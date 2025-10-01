@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 OpenAI Fine-tuning Module for Tentanator
 Handles uploading training data and managing fine-tuning jobs
@@ -12,14 +11,18 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 import asyncio
+import dotenv
 
-# Will need: pip install openai
+dotenv.load_dotenv()
+
+
 from openai import OpenAI
+
 
 @dataclass
 class FineTuningConfig:
     """Configuration for fine-tuning job"""
-    model: str = "gpt-4o-mini-2024-07-18"  # Default model for fine-tuning
+    model: str = "gpt-4.1-mini-2025-04-14"  # Default model for fine-tuning
     n_epochs: int = 3  # Number of training epochs
     batch_size: int = 1  # Batch size for training
     learning_rate_multiplier: float = 1.0
@@ -44,9 +47,41 @@ class FineTuningJob:
     model: str
     status: str
     created_at: str
+    training_file: str  # JSONL file used for training
+    question_name: str  # Question being trained
     finished_at: Optional[str] = None
     fine_tuned_model: Optional[str] = None
     error: Optional[str] = None
+
+
+@dataclass
+class ModelRegistry:
+    """Registry of fine-tuned models"""
+    models: Dict[str, Dict[str, Any]]  # model_id -> model info
+
+    def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str):
+        """Add a model to the registry"""
+        self.models[model_id] = {
+            "model_id": model_id,
+            "jsonl_file": jsonl_file,
+            "question_name": question_name,
+            "job_id": job_id,
+            "created_at": datetime.now().isoformat()
+        }
+
+    def save(self, filepath: str = "models.json"):
+        """Save registry to file"""
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(self.models, f, indent=2)
+
+    @classmethod
+    def load(cls, filepath: str = "models.json") -> "ModelRegistry":
+        """Load registry from file"""
+        if Path(filepath).exists():
+            with open(filepath, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return cls(models=data)
+        return cls(models={})
 
 
 class OpenAITrainer:
@@ -60,6 +95,7 @@ class OpenAITrainer:
 
         self.client = OpenAI(api_key=self.api_key)
         self.session_file = ".tentanator_training_session.json"
+        self.model_registry = ModelRegistry.load()
 
     def validate_jsonl_file(self, filepath: Path) -> Tuple[bool, str, int]:
         """
@@ -142,7 +178,9 @@ class OpenAITrainer:
             print(f"❌ Upload failed: {e}")
             return None
 
-    def create_fine_tuning_job(self, training_file: TrainingFile, config: FineTuningConfig) -> Optional[FineTuningJob]:
+    def create_fine_tuning_job(self, training_file: TrainingFile,
+                              jsonl_filename: str,
+                              config: FineTuningConfig) -> Optional[FineTuningJob]:
         """Create a fine-tuning job with uploaded file"""
         print(f"🚀 Creating fine-tuning job for {training_file.question_name}...")
 
@@ -166,7 +204,9 @@ class OpenAITrainer:
                 job_id=response.id,
                 model=config.model,
                 status=response.status,
-                created_at=datetime.now().isoformat()
+                created_at=datetime.now().isoformat(),
+                training_file=jsonl_filename,
+                question_name=training_file.question_name
             )
 
             print(f"✅ Fine-tuning job created! Job ID: {response.id}")
@@ -189,6 +229,18 @@ class OpenAITrainer:
                 job.finished_at = datetime.now().isoformat()
                 print(f"✅ Job {job.job_id} completed successfully!")
                 print(f"   Fine-tuned model: {job.fine_tuned_model}")
+
+                # Add to model registry
+                if job.fine_tuned_model:
+                    self.model_registry.add_model(
+                        model_id=job.fine_tuned_model,
+                        jsonl_file=job.training_file,
+                        question_name=job.question_name,
+                        job_id=job.job_id
+                    )
+                    self.model_registry.save()
+                    print(f"   Added to models.json registry")
+
             elif response.status == "failed":
                 job.error = response.error.message if response.error else "Unknown error"
                 print(f"❌ Job {job.job_id} failed: {job.error}")
@@ -312,18 +364,31 @@ class OpenAITrainer:
         print(f"💾 Session saved to {self.session_file}")
 
     def load_training_session(self) -> Tuple[List[TrainingFile], List[FineTuningJob]]:
-        """Load training session from file"""
+        """Load training session from file and clean up cancelled jobs"""
         if not Path(self.session_file).exists():
             return [], []
 
         try:
-            with open(self.session_file, 'r') as f:
+            with open(self.session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
             files = [TrainingFile(**f) for f in data.get("uploaded_files", [])]
-            jobs = [FineTuningJob(**j) for j in data.get("fine_tuning_jobs", [])]
+            all_jobs = [FineTuningJob(**j) for j in data.get("fine_tuning_jobs", [])]
 
-            return files, jobs
+            # Filter out cancelled jobs
+            active_jobs = []
+            for job in all_jobs:
+                if job.status == "cancelled":
+                    print(f"🗑️  Removing cancelled job: {job.job_id} ({job.question_name})")
+                else:
+                    active_jobs.append(job)
+
+            # Save cleaned session if any jobs were removed
+            if len(active_jobs) < len(all_jobs):
+                self.save_training_session(files, active_jobs)
+                print(f"✅ Cleaned up {len(all_jobs) - len(active_jobs)} cancelled jobs")
+
+            return files, active_jobs
 
         except Exception as e:
             print(f"⚠️  Failed to load session: {e}")
@@ -337,21 +402,36 @@ def main():
     # Initialize trainer
     trainer = OpenAITrainer()
 
+    # Show existing models
+    if trainer.model_registry.models:
+        print(f"📚 Registered Models:")
+        for model_id, info in trainer.model_registry.models.items():
+            print(f"  - {info['question_name']}: {model_id}")
+            print(f"    JSONL: {info['jsonl_file']}")
+
     # Load existing session
     files, jobs = trainer.load_training_session()
 
     if jobs:
-        print(f"Found {len(jobs)} existing fine-tuning jobs:")
+        print(f"\n📋 Existing fine-tuning jobs:")
+        updated_jobs = []
         for job in jobs:
-            print(f"  - {job.job_id}: {job.status}")
+            print(f"  - {job.question_name} ({job.job_id}): {job.status}")
             if job.status in ["running", "created", "validating_files"]:
                 # Check current status
                 updated_job = trainer.check_job_status(job)
-                if updated_job.status != job.status:
-                    job.status = updated_job.status
-                    job.fine_tuned_model = updated_job.fine_tuned_model
+                job.status = updated_job.status
+                job.fine_tuned_model = updated_job.fine_tuned_model
 
-        trainer.save_training_session(files, jobs)
+            # Only keep non-cancelled jobs
+            if job.status != "cancelled":
+                updated_jobs.append(job)
+            else:
+                print(f"    🗑️  Removing cancelled job")
+
+        if len(updated_jobs) != len(jobs):
+            jobs = updated_jobs
+            trainer.save_training_session(files, jobs)
 
     # Find JSONL files
     training_dir = Path("training_data")
@@ -359,35 +439,77 @@ def main():
         jsonl_files = list(training_dir.glob("*.jsonl"))
 
         if jsonl_files:
-            print(f"\nFound {len(jsonl_files)} JSONL files:")
-            for f in jsonl_files:
-                print(f"  - {f.name}")
+            print(f"\n📁 Available JSONL files:")
+            for idx, f in enumerate(jsonl_files, 1):
+                # Check if already used
+                already_used = any(
+                    info['jsonl_file'] == f.name
+                    for info in trainer.model_registry.models.values()
+                )
+                status = " ✅ (already trained)" if already_used else ""
+                print(f"  {idx}. {f.name}{status}")
 
-            # Example: Upload and train
-            choice = input("\nUpload and start training? [y/n]: ").strip().lower()
-            if choice == 'y':
-                for jsonl_file in jsonl_files:
-                    # Extract question name from filename
-                    question_name = jsonl_file.stem.rsplit('_', 2)[0]
+            # Select one file for training
+            untrained_files = [f for f in jsonl_files
+                              if not any(info['jsonl_file'] == f.name
+                                       for info in trainer.model_registry.models.values())]
 
-                    # Upload file
-                    training_file = trainer.upload_training_file(jsonl_file, question_name)
-                    if training_file:
-                        files.append(training_file)
+            if untrained_files:
+                choice = input("\nSelect a file to train (enter number, or 'q' to quit): ").strip()
 
-                        # Create fine-tuning job
-                        config = FineTuningConfig()
-                        job = trainer.create_fine_tuning_job(training_file, config)
-                        if job:
-                            jobs.append(job)
+                if choice.lower() != 'q':
+                    try:
+                        file_idx = int(choice) - 1
+                        if 0 <= file_idx < len(jsonl_files):
+                            jsonl_file = jsonl_files[file_idx]
 
-                            # Monitor job
-                            monitor = input("Monitor job until completion? [y/n]: ").strip().lower()
-                            if monitor == 'y':
-                                job = trainer.monitor_job(job)
+                            # Double-check if already trained
+                            if any(info['jsonl_file'] == jsonl_file.name
+                                  for info in trainer.model_registry.models.values()):
+                                print(f"❌ {jsonl_file.name} has already been trained!")
+                                print(f"   Model exists in registry. Cannot train again.")
+                                return
 
-                # Save session
-                trainer.save_training_session(files, jobs)
+                            # Check if there's an active job for this file
+                            active_job = next((j for j in jobs
+                                             if j.training_file == jsonl_file.name
+                                             and j.status in ["running", "created", "validating_files"]),
+                                            None)
+                            if active_job:
+                                print(f"❌ {jsonl_file.name} already has an active training job!")
+                                print(f"   Job {active_job.job_id} is {active_job.status}")
+                                return
+
+                            # Extract question name from filename
+                            question_name = jsonl_file.stem.rsplit('_', 2)[0]
+
+                            # Upload file
+                            print(f"\n📤 Processing {jsonl_file.name}")
+                            training_file = trainer.upload_training_file(jsonl_file, question_name)
+                            if training_file:
+                                files.append(training_file)
+
+                                # Create fine-tuning job
+                                config = FineTuningConfig()
+                                job = trainer.create_fine_tuning_job(
+                                    training_file, jsonl_file.name, config
+                                )
+                                if job:
+                                    jobs.append(job)
+
+                                    # Monitor job
+                                    monitor = input("Monitor job until completion? [y/n]: ").strip().lower()
+                                    if monitor == 'y':
+                                        job = trainer.monitor_job(job)
+
+                                # Save session
+                                trainer.save_training_session(files, jobs)
+                        else:
+                            print("Invalid selection")
+                    except ValueError:
+                        print("Invalid input")
+            else:
+                print("\n✅ All files have been trained!")
 
 
 if __name__ == "__main__":

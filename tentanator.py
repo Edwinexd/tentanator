@@ -11,6 +11,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
+try:
+    from openai import OpenAI
+    OPENAI_AVAILABLE = True
+except ImportError:
+    OPENAI_AVAILABLE = False
+
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher grading student exam responses.
 Your task is to evaluate the student's answer to the following question and provide a grade.
@@ -21,7 +27,6 @@ Exam Question: {exam_question}
 Grading Criteria:
 - Correctness of the answer
 - Completeness of the response
-- Clarity of explanation (if applicable)
 
 Provide only the grade value as your response."""
 
@@ -40,6 +45,7 @@ class QuestionGrades:
     """Grades for a single question/output column"""
     question_name: str
     input_column: str
+    exam_question: str = ""  # The actual exam question text
     graded_items: List[GradedItem] = field(default_factory=list)
 
 
@@ -74,6 +80,7 @@ def save_session(session: GradingSession, filename: str = ".tentanator_session.j
         session_dict["questions"][col] = {
             "question_name": question.question_name,
             "input_column": question.input_column,
+            "exam_question": question.exam_question,
             "graded_items": [asdict(item) for item in question.graded_items]
         }
 
@@ -98,6 +105,7 @@ def load_session(filename: str = ".tentanator_session.json") -> Optional[Grading
             questions[col] = QuestionGrades(
                 question_name=q_data["question_name"],
                 input_column=q_data["input_column"],
+                exam_question=q_data.get("exam_question", ""),
                 graded_items=graded_items
             )
 
@@ -193,12 +201,60 @@ def get_row_id(row: Dict[str, str], id_columns: List[str]) -> str:
     return "_".join([row.get(col, "") for col in id_columns])
 
 
-def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]], threshold: int = 50) -> GradingSession:
+def load_model_registry() -> Dict[str, Dict[str, Any]]:
+    """Load the models.json registry"""
+    models_file = Path("models.json")
+    if models_file.exists():
+        try:
+            with open(models_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"⚠️  Failed to load models.json: {e}")
+    return {}
+
+
+def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades,
+                            response_text: str) -> Optional[str]:
+    """Get AI-suggested grade from fine-tuned model"""
+    if not OPENAI_AVAILABLE:
+        return None
+
+    try:
+        # Build system prompt with exam question
+        if question.exam_question:
+            system_content = BASE_SYSTEM_PROMPT.format(exam_question=question.exam_question)
+        else:
+            system_content = f"You are grading responses for: {question.question_name}"
+
+        # Get grade from model
+        response = client.chat.completions.create(
+            model=model_id,
+            messages=[
+                {"role": "system", "content": system_content},
+                {"role": "user", "content": response_text}
+            ],
+            max_tokens=10,
+            temperature=0.1
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"⚠️  AI suggestion failed: {e}")
+        return None
+
+
+def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
+                   threshold: int = 50, openai_client: Optional[Any] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
-    print("Commands: [q]uit, [s]kip, [b]ack, or enter grade value")
+    print("Commands: [q]uit, [s]kip, [b]ack, [ENTER] to accept AI suggestion, or enter grade value")
     print("-" * 50)
+
+    # Load model registry to check for trained models
+    model_registry = load_model_registry()
+    available_models = {}
 
     # Process one output column at a time
     for col_idx in range(session.current_question_index, len(session.output_columns)):
@@ -215,6 +271,17 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]], thr
             )
 
         question = session.questions[output_col]
+
+        # Check if there's a trained model for this question
+        model_id = None
+        if openai_client and model_registry:
+            # Look for a model trained on this question
+            question_key = output_col.replace(' ', '_')
+            for mid, info in model_registry.items():
+                if question_key.lower() in info.get('question_name', '').lower():
+                    model_id = mid
+                    print(f"\n🤖 Found trained model for {output_col}: {model_id}")
+                    break
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
@@ -285,8 +352,25 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]], thr
             if existing:
                 print(f"\nCurrent grade in CSV: {existing}")
 
+            # Get AI suggestion if model is available
+            ai_suggestion = None
+            if model_id and openai_client:
+                ai_suggestion = get_ai_grade_suggestion(
+                    openai_client, model_id, question, response_text
+                )
+                if ai_suggestion:
+                    print(f"\n🤖 AI Suggestion: {ai_suggestion}")
+                    print("   Press [ENTER] to accept, or type a different grade")
+
             while True:
-                grade = input(f"\nEnter grade for {output_col}: ").strip()
+                if ai_suggestion:
+                    grade = input(f"\nGrade for {output_col} [{ai_suggestion}]: ").strip()
+                    # If empty, accept AI suggestion
+                    if not grade:
+                        grade = ai_suggestion
+                        print(f"✓ Accepted AI suggestion: {grade}")
+                else:
+                    grade = input(f"\nEnter grade for {output_col}: ").strip()
 
                 if grade.lower() == 'q':
                     save_session(session)
@@ -300,7 +384,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]], thr
                     removed = question.graded_items.pop()
                     print(f"Removed grade for ID: {removed.row_id}")
                     save_session(session)
-                    return grade_questions(session, csv_data, threshold)
+                    return grade_questions(session, csv_data, threshold, openai_client)
                 elif grade:
                     graded_item = GradedItem(
                         row_id=row_id,
@@ -310,7 +394,10 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]], thr
                     )
                     question.graded_items.append(graded_item)
                     valid_graded_count += 1  # Increment valid count for manually graded items
-                    print(f"✓ Graded as: {grade}")
+                    if grade == ai_suggestion:
+                        print(f"✓ Accepted: {grade}")
+                    else:
+                        print(f"✓ Graded as: {grade}")
 
                     # Save after each grade
                     save_session(session)
@@ -342,6 +429,22 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") 
         if not question.graded_items:
             continue
 
+        # Ask for exam question if not already set
+        if not question.exam_question:
+            print(f"\n{'='*60}")
+            print(f"Question: {output_col}")
+            print(f"Input column: {question.input_column}")
+            print(f"{'='*60}")
+            print("Please enter the exam question that students were answering:")
+            print("(This will be included in the training data for context)")
+            exam_question = input("> ").strip()
+            if exam_question:
+                question.exam_question = exam_question
+                # Save the updated session with the exam question
+                save_session(session)
+            else:
+                print("⚠ Using generic prompt without specific exam question")
+
         jsonl_file = Path(output_dir) / f"{output_col.replace(' ', '_')}_{timestamp}.jsonl"
         exported_count = 0
 
@@ -351,12 +454,18 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") 
                 if item.input_text.strip() in ["", "-", "N/A"]:
                     continue
 
+                # Build system prompt with exam question
+                if question.exam_question:
+                    system_content = BASE_SYSTEM_PROMPT.format(exam_question=question.exam_question)
+                else:
+                    system_content = f"You are grading responses for: {output_col}"
+
                 # Build the training example
                 training_example = {
                     "messages": [
                         {
                             "role": "system",
-                            "content": f"You are grading responses for: {output_col}"
+                            "content": system_content
                         },
                         {
                             "role": "user",
@@ -373,7 +482,9 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") 
                 exported_count += 1
 
         if exported_count > 0:
-            print(f"✓ Exported {exported_count} examples for {output_col} to {jsonl_file} (excluded {len(question.graded_items) - exported_count} blank/dash responses)")
+            print(f"✓ Exported {exported_count} examples for {output_col} to {jsonl_file}")
+            if len(question.graded_items) - exported_count > 0:
+                print(f"  (Excluded {len(question.graded_items) - exported_count} blank/dash responses)")
         else:
             print(f"⚠ No valid examples to export for {output_col} (all were blank/dash responses)")
             # Remove empty file
@@ -407,7 +518,18 @@ def main() -> None:
         if resume == 'y':
             filepath = Path("exams") / existing_session.csv_file
             csv_data = read_csv_data(filepath)
-            session = grade_questions(existing_session, csv_data)
+
+            # Initialize OpenAI client if available
+            openai_client = None
+            if OPENAI_AVAILABLE:
+                api_key = os.getenv("OPENAI_API_KEY")
+                if api_key:
+                    openai_client = OpenAI(api_key=api_key)
+                    print("✓ OpenAI client initialized for AI-assisted grading")
+                else:
+                    print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
+
+            session = grade_questions(existing_session, csv_data, openai_client=openai_client)
 
             # Ask if they want to export
             export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
