@@ -209,3 +209,4 @@ __marimo__/
 exams/
 .tentanator*.json
 training_data/*
+models.json

@@ -11,11 +11,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
-try:
-    from openai import OpenAI
-    OPENAI_AVAILABLE = True
-except ImportError:
-    OPENAI_AVAILABLE = False
+from openai import OpenAI
+
+import dotenv
+
+dotenv.load_dotenv()
 
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher grading student exam responses.
@@ -57,7 +57,6 @@ class GradingSession:
     input_columns: List[str]
     output_columns: List[str]
     questions: Dict[str, QuestionGrades]  # output_column -> QuestionGrades
-    current_question_index: int = 0
     last_updated: str = ""
 
 
@@ -71,7 +70,6 @@ def save_session(session: GradingSession, filename: str = ".tentanator_session.j
         "id_columns": session.id_columns,
         "input_columns": session.input_columns,
         "output_columns": session.output_columns,
-        "current_question_index": session.current_question_index,
         "last_updated": session.last_updated,
         "questions": {}
     }
@@ -115,7 +113,6 @@ def load_session(filename: str = ".tentanator_session.json") -> Optional[Grading
             input_columns=data["input_columns"],
             output_columns=data["output_columns"],
             questions=questions,
-            current_question_index=data.get("current_question_index", 0),
             last_updated=data.get("last_updated", "")
         )
     except Exception as e:
@@ -207,18 +204,19 @@ def load_model_registry() -> Dict[str, Dict[str, Any]]:
     if models_file.exists():
         try:
             with open(models_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                registry = json.load(f)
+                print(f"📚 Loaded {len(registry)} models from registry")
+                return registry
         except Exception as e:
             print(f"⚠️  Failed to load models.json: {e}")
+    else:
+        print("📚 No models.json found - no trained models available")
     return {}
 
 
 def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades,
                             response_text: str) -> Optional[str]:
     """Get AI-suggested grade from fine-tuned model"""
-    if not OPENAI_AVAILABLE:
-        return None
-
     try:
         # Build system prompt with exam question
         if question.exam_question:
@@ -234,7 +232,7 @@ def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades
                 {"role": "user", "content": response_text}
             ],
             max_tokens=10,
-            temperature=0.1
+            temperature=0.0
         )
 
         return response.choices[0].message.content.strip()
@@ -249,17 +247,19 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
-    print("Commands: [q]uit, [s]kip, [b]ack, [ENTER] to accept AI suggestion, or enter grade value")
+    print("Commands: [q]uit, [s]kip, [b]ack, or enter grade value")
+    print("AI models (if available) will grade remaining responses after threshold is reached")
     print("-" * 50)
 
     # Load model registry to check for trained models
     model_registry = load_model_registry()
-    available_models = {}
+
+    # Cache for pre-computed AI suggestions (rolling window)
+    ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
+    WINDOW_SIZE = 5  # Pre-compute next 5 responses
 
     # Process one output column at a time
-    for col_idx in range(session.current_question_index, len(session.output_columns)):
-        output_col = session.output_columns[col_idx]
-        session.current_question_index = col_idx
+    for col_idx, output_col in enumerate(session.output_columns):
 
         # Get or create QuestionGrades
         if output_col not in session.questions:
@@ -276,12 +276,24 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
         model_id = None
         if openai_client and model_registry:
             # Look for a model trained on this question
-            question_key = output_col.replace(' ', '_')
+            print(f"\n🔍 Looking for model for: {output_col}")
+
             for mid, info in model_registry.items():
-                if question_key.lower() in info.get('question_name', '').lower():
+                model_question = info.get('question_name', '')
+                print(f"   Available model: {model_question} -> {mid[:30]}...")
+
+                # More flexible matching - handle both "Points 27" and "Points_27" formats
+                normalized_output = output_col.replace(' ', '_').lower()
+                normalized_model = model_question.replace(' ', '_').lower()
+
+                if normalized_output == normalized_model:
                     model_id = mid
-                    print(f"\n🤖 Found trained model for {output_col}: {model_id}")
+                    print(f"\n✅ MATCHED! Using model for {output_col}")
+                    print(f"   Model ID: {model_id}")
                     break
+
+            if not model_id:
+                print(f"❌ No match found - manual grading only for {output_col}")
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
@@ -289,7 +301,68 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
         # Skip if we already have enough valid grades for this question
         if valid_graded_count >= threshold:
-            print(f"\n✓ Already have {threshold} valid grades for {output_col}, skipping to next question")
+            print(f"\n✓ Already have {threshold} manual grades for {output_col}")
+
+            # Check if there are ungraded rows that could benefit from AI grading
+            graded_ids = {item.row_id for item in question.graded_items}
+            ungraded_rows = []
+            for row_idx, row in enumerate(csv_data):
+                row_id = get_row_id(row, session.id_columns)
+                if row_id not in graded_ids:
+                    response_text = row.get(question.input_column, "N/A")
+                    # Skip blank responses
+                    if response_text.strip() not in ["", "-", "N/A"]:
+                        ungraded_rows.append((row_idx, row))
+
+            if ungraded_rows and model_id and openai_client:
+                print(f"🤖 Model available for remaining {len(ungraded_rows)} responses")
+                use_ai = input("Use AI to grade remaining responses? [y/n]: ").strip().lower()
+
+                if use_ai == 'y':
+                    print(f"\nGrading with AI - you can review and modify each suggestion...")
+
+                    for row_idx, row in ungraded_rows:
+                        row_id = get_row_id(row, session.id_columns)
+                        response_text = row.get(question.input_column, "N/A")
+
+                        # Get AI suggestion
+                        ai_suggestion = get_ai_grade_suggestion(
+                            openai_client, model_id, question, response_text
+                        )
+
+                        if ai_suggestion:
+                            print(f"\n{'-'*60}")
+                            print(f"Student {row_idx + 1}/{len(csv_data)}")
+                            print(f"\nResponse:")
+                            print("-" * 40)
+                            print(response_text)  # Full response, no truncation
+                            print("-" * 40)
+                            print(f"\n🤖 AI Grade: {ai_suggestion}")
+
+                            # Let user confirm or modify
+                            user_input = input(f"Accept grade? [ENTER=yes, or type new grade]: ").strip()
+
+                            if user_input:
+                                final_grade = user_input
+                                print(f"✓ Modified to: {final_grade}")
+                            else:
+                                final_grade = ai_suggestion
+                                print(f"✓ Accepted: {final_grade}")
+
+                            graded_item = GradedItem(
+                                row_id=row_id,
+                                input_text=response_text,
+                                grade=final_grade,
+                                timestamp=datetime.now().isoformat()
+                            )
+                            question.graded_items.append(graded_item)
+
+                            # Save after EACH grade for safety
+                            save_session(session)
+                            print(f"💾 Saved (Total graded: {len(question.graded_items)})")
+
+                    print(f"\n✅ Completed grading for {output_col}")
+
             continue
 
         print(f"\n{'='*60}")
@@ -298,10 +371,51 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
         auto_graded = len(question.graded_items) - valid_graded_count
         if auto_graded > 0:
             print(f"(Plus {auto_graded} auto-graded blank/dash responses)")
-        print(f"{'='*60}")
 
         # Create set of already graded row IDs for this question
         graded_ids = {item.row_id for item in question.graded_items}
+
+        # Initialize cache for this question if needed
+        if output_col not in ai_suggestion_cache:
+            ai_suggestion_cache[output_col] = {}
+
+        # Pre-compute AI suggestions for rolling window (if model available)
+        def precompute_suggestions(start_idx: int, window_size: int):
+            """Pre-compute AI suggestions for upcoming responses"""
+            if not model_id or not openai_client:
+                return
+
+            end_idx = min(start_idx + window_size, len(csv_data))
+            for idx in range(start_idx, end_idx):
+                if idx >= len(csv_data):
+                    break
+
+                future_row = csv_data[idx]
+                future_row_id = get_row_id(future_row, session.id_columns)
+
+                # Skip if already graded or cached
+                if future_row_id in graded_ids or future_row_id in ai_suggestion_cache[output_col]:
+                    continue
+
+                future_response = future_row.get(question.input_column, "N/A")
+
+                # Skip blank responses
+                if future_response.strip() in ["", "-", "N/A"]:
+                    continue
+
+                # Get AI suggestion in background
+                ai_grade = get_ai_grade_suggestion(
+                    openai_client, model_id, question, future_response
+                )
+                if ai_grade:
+                    ai_suggestion_cache[output_col][future_row_id] = ai_grade
+
+        if model_id:
+            print(f"🤖 AI model available - pre-computing suggestions for smoother grading")
+            # Pre-load first window
+            precompute_suggestions(0, WINDOW_SIZE)
+        print(f"{'='*60}")
+
 
         # Grade this column for each row
         for row_idx, row in enumerate(csv_data):
@@ -309,6 +423,10 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             if valid_graded_count >= threshold:
                 print(f"\n✓ Reached {threshold} valid grades for {output_col}!")
                 break
+
+            # Pre-compute suggestions for next window of responses
+            if model_id and openai_client and row_idx % 3 == 0:  # Update window every 3 responses
+                precompute_suggestions(row_idx + 1, WINDOW_SIZE)
 
             # Get row ID
             row_id = get_row_id(row, session.id_columns)
@@ -352,15 +470,12 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             if existing:
                 print(f"\nCurrent grade in CSV: {existing}")
 
-            # Get AI suggestion if model is available
-            ai_suggestion = None
-            if model_id and openai_client:
-                ai_suggestion = get_ai_grade_suggestion(
-                    openai_client, model_id, question, response_text
-                )
-                if ai_suggestion:
-                    print(f"\n🤖 AI Suggestion: {ai_suggestion}")
-                    print("   Press [ENTER] to accept, or type a different grade")
+            # Check if we have a pre-computed AI suggestion
+            ai_suggestion = ai_suggestion_cache.get(output_col, {}).get(row_id)
+
+            if ai_suggestion:
+                print(f"\n🤖 AI Suggestion: {ai_suggestion}")
+                print("   Press [ENTER] to accept, or type a different grade")
 
             while True:
                 if ai_suggestion:
@@ -394,8 +509,13 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     )
                     question.graded_items.append(graded_item)
                     valid_graded_count += 1  # Increment valid count for manually graded items
+
+                    # Clear from cache once used
+                    if row_id in ai_suggestion_cache.get(output_col, {}):
+                        del ai_suggestion_cache[output_col][row_id]
+
                     if grade == ai_suggestion:
-                        print(f"✓ Accepted: {grade}")
+                        print(f"✓ Accepted AI suggestion: {grade}")
                     else:
                         print(f"✓ Graded as: {grade}")
 
@@ -519,15 +639,14 @@ def main() -> None:
             filepath = Path("exams") / existing_session.csv_file
             csv_data = read_csv_data(filepath)
 
-            # Initialize OpenAI client if available
+            # Initialize OpenAI client
             openai_client = None
-            if OPENAI_AVAILABLE:
-                api_key = os.getenv("OPENAI_API_KEY")
-                if api_key:
-                    openai_client = OpenAI(api_key=api_key)
-                    print("✓ OpenAI client initialized for AI-assisted grading")
-                else:
-                    print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                openai_client = OpenAI(api_key=api_key)
+                print("✓ OpenAI client initialized for AI-assisted grading")
+            else:
+                print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
 
             session = grade_questions(existing_session, csv_data, openai_client=openai_client)
 
@@ -595,7 +714,6 @@ def main() -> None:
         input_columns=input_columns,
         output_columns=output_columns,
         questions={},
-        current_question_index=0,
         last_updated=datetime.now().isoformat()
     )
 
