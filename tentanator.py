@@ -18,9 +18,9 @@ import dotenv
 dotenv.load_dotenv()
 
 # Base system prompt for grading
-BASE_SYSTEM_PROMPT = """You are an experienced teacher grading student exam responses.
+BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade student exam responses.
 Your task is to evaluate the student's answer to the following question and provide a grade.
-Be consistent, fair, and objective in your grading.
+Be consistent, fair, and objective in your grading. All respones will be reviewed by a human teacher.
 
 Exam Question: {exam_question}
 
@@ -60,12 +60,82 @@ class GradingSession:
     last_updated: str = ""
 
 
-def save_session(session: GradingSession, filename: str = ".tentanator_session.json") -> None:
+def get_sessions_dir() -> Path:
+    """Get the sessions directory path, creating it if necessary"""
+    sessions_dir = Path(".tentanator_sessions")
+    sessions_dir.mkdir(exist_ok=True)
+
+    # Migrate old session if exists
+    old_session_file = Path(".tentanator_session.json")
+    if old_session_file.exists():
+        print("📦 Migrating existing session to new format...")
+        try:
+            with open(old_session_file, 'r') as f:
+                data = json.load(f)
+
+            # Generate session name from CSV file and timestamp
+            csv_base = Path(data.get("csv_file", "unknown")).stem
+            timestamp = data.get("last_updated", datetime.now().isoformat())[:19].replace(":", "").replace("-", "").replace("T", "_")
+            session_name = f"{csv_base}_migrated_{timestamp}"
+            session_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_name)
+
+            # Save to new location
+            new_path = sessions_dir / f"{session_name}.json"
+            data["session_name"] = session_name
+            with open(new_path, 'w') as f:
+                json.dump(data, f, indent=2)
+
+            # Rename old file to backup
+            old_session_file.rename(".tentanator_session.json.backup")
+            print(f"✓ Migrated to: {session_name}")
+
+        except Exception as e:
+            print(f"⚠️  Could not migrate old session: {e}")
+
+    return sessions_dir
+
+
+def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
+    """List all available sessions with their metadata"""
+    sessions_dir = get_sessions_dir()
+    sessions = []
+
+    for session_file in sessions_dir.glob("*.json"):
+        try:
+            with open(session_file, 'r') as f:
+                data = json.load(f)
+                session_name = session_file.stem
+                metadata = {
+                    "csv_file": data.get("csv_file", "Unknown"),
+                    "last_updated": data.get("last_updated", "Unknown"),
+                    "num_questions": len(data.get("questions", {}))
+                }
+                sessions.append((session_name, metadata))
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+    return sorted(sessions, key=lambda x: x[1].get("last_updated", ""), reverse=True)
+
+
+def save_session(session: GradingSession, session_name: Optional[str] = None) -> str:
     """Save the current session to a JSON file"""
     session.last_updated = datetime.now().isoformat()
 
+    # If no session name provided, generate one from CSV filename
+    if not session_name:
+        csv_base = Path(session.csv_file).stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"{csv_base}_{timestamp}"
+
+    # Ensure session name is filesystem-safe
+    session_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_name)
+
+    sessions_dir = get_sessions_dir()
+    filename = sessions_dir / f"{session_name}.json"
+
     # Convert to dict for JSON serialization
     session_dict = {
+        "session_name": session_name,
         "csv_file": session.csv_file,
         "id_columns": session.id_columns,
         "input_columns": session.input_columns,
@@ -84,12 +154,16 @@ def save_session(session: GradingSession, filename: str = ".tentanator_session.j
 
     with open(filename, 'w') as f:
         json.dump(session_dict, f, indent=2)
-    print(f"✓ Session saved to {filename}")
+    print(f"✓ Session saved as '{session_name}'")
+    return session_name
 
 
-def load_session(filename: str = ".tentanator_session.json") -> Optional[GradingSession]:
+def load_session(session_name: str) -> Optional[GradingSession]:
     """Load a session from a JSON file"""
-    if not Path(filename).exists():
+    sessions_dir = get_sessions_dir()
+    filename = sessions_dir / f"{session_name}.json"
+
+    if not filename.exists():
         return None
 
     try:
@@ -243,7 +317,8 @@ def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades
 
 
 def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
-                   threshold: int = 50, openai_client: Optional[Any] = None) -> GradingSession:
+                   threshold: int = 50, openai_client: Optional[Any] = None,
+                   session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
@@ -275,25 +350,36 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
         # Check if there's a trained model for this question
         model_id = None
         if openai_client and model_registry:
-            # Look for a model trained on this question
-            print(f"\n🔍 Looking for model for: {output_col}")
+            # Extract exam identifier from session
+            exam_id = Path(session.csv_file).stem if session.csv_file else ""
+
+            # Look for a model trained on this question and exam
+            print(f"\n🔍 Looking for model for: {output_col} (Exam: {exam_id})")
 
             for mid, info in model_registry.items():
                 model_question = info.get('question_name', '')
-                print(f"   Available model: {model_question} -> {mid[:30]}...")
+                model_exam = info.get('exam_id', '')
+
+                # Display available models with their exam IDs
+                print(f"   Available model: {model_question} (Exam: {model_exam}) -> {mid[:30]}...")
 
                 # More flexible matching - handle both "Points 27" and "Points_27" formats
                 normalized_output = output_col.replace(' ', '_').lower()
                 normalized_model = model_question.replace(' ', '_').lower()
 
+                # Match both question name AND exam ID
                 if normalized_output == normalized_model:
-                    model_id = mid
-                    print(f"\n✅ MATCHED! Using model for {output_col}")
-                    print(f"   Model ID: {model_id}")
-                    break
+                    # Check if exam matches (if exam_id is present in model registry)
+                    if not model_exam or exam_id.lower() in model_exam.lower() or model_exam.lower() in exam_id.lower():
+                        model_id = mid
+                        print(f"\n✅ MATCHED! Using model for {output_col} from exam {model_exam or 'unknown'}")
+                        print(f"   Model ID: {model_id}")
+                        break
+                    else:
+                        print(f"   ⚠️  Question matches but exam doesn't ({model_exam} != {exam_id})")
 
             if not model_id:
-                print(f"❌ No match found - manual grading only for {output_col}")
+                print(f"❌ No matching model found - manual grading only for {output_col}")
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
@@ -347,11 +433,11 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                                 # Remove the last graded item
                                 removed = question.graded_items.pop()
                                 print(f"Removed grade for ID: {removed.row_id}")
-                                save_session(session)
+                                save_session(session, session_name)
                                 # Restart the grading process to go back
                                 return grade_questions(session, csv_data, threshold, openai_client)
                             elif user_input.lower() == 'q':
-                                save_session(session)
+                                save_session(session, session_name)
                                 print("\nSaved and exiting...")
                                 return session
                             elif user_input:
@@ -370,7 +456,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                             question.graded_items.append(graded_item)
 
                             # Save after EACH grade for safety
-                            save_session(session)
+                            save_session(session, session_name)
                             print(f"💾 Saved (Total graded: {len(question.graded_items)})")
 
                     print(f"\n✅ Completed AI grading for {output_col}")
@@ -394,7 +480,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
                     if auto_zeroed > 0:
                         print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
-                        save_session(session)
+                        save_session(session, session_name)
 
                     # Export to CSV after AI review and auto-zeroing
                     print("\n📝 Exporting graded CSV...")
@@ -498,7 +584,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 )
                 question.graded_items.append(graded_item)
                 print(f"\n✓ Auto-graded as 0 (blank/dash response - not counted toward {threshold} goal)")
-                save_session(session)
+                save_session(session, session_name)
                 # Don't increment valid_graded_count for auto-graded blank responses
                 continue
 
@@ -525,7 +611,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     grade = input(f"\nEnter grade for {output_col}: ").strip()
 
                 if grade.lower() == 'q':
-                    save_session(session)
+                    save_session(session, session_name)
                     print("\nSaved and exiting...")
                     return session
                 elif grade.lower() == 's':
@@ -535,7 +621,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     # Remove the last graded item
                     removed = question.graded_items.pop()
                     print(f"Removed grade for ID: {removed.row_id}")
-                    save_session(session)
+                    save_session(session, session_name)
                     return grade_questions(session, csv_data, threshold, openai_client)
                 elif grade:
                     graded_item = GradedItem(
@@ -557,7 +643,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                         print(f"✓ Graded as: {grade}")
 
                     # Save after each grade
-                    save_session(session)
+                    save_session(session, session_name)
                     break
                 else:
                     print("  Please enter a grade or command")
@@ -569,40 +655,29 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
     )
     if all_complete:
         print(f"\n{'='*60}")
-        print(f"✓ GRADING COMPLETE!")
-        print(f"Graded {threshold} valid responses for all {len(session.output_columns)} questions")
+        print(f"✓ THRESHOLD REACHED!")
+        print(
+            f"Graded {threshold} valid responses for all "
+            f"{len(session.output_columns)} questions"
+        )
         print(f"{'='*60}")
 
-        # Auto-zero any remaining ungraded responses for all questions
-        print("\n🔄 Auto-zeroing any remaining ungraded responses...")
-        total_auto_zeroed = 0
-        for output_col, question in session.questions.items():
-            graded_ids = {item.row_id for item in question.graded_items}
-            for row in csv_data:
-                row_id = get_row_id(row, session.id_columns)
-                if row_id not in graded_ids:
-                    response_text = row.get(question.input_column, "-")
-                    graded_item = GradedItem(
-                        row_id=row_id,
-                        input_text=response_text,
-                        grade="0",
-                        timestamp=datetime.now().isoformat()
-                    )
-                    question.graded_items.append(graded_item)
-                    total_auto_zeroed += 1
+        # Export to JSONL for training
+        print("\n📤 Exporting training data to JSONL...")
+        export_to_jsonl(session, session_name=session_name)
 
-        if total_auto_zeroed > 0:
-            print(f"✓ Auto-zeroed {total_auto_zeroed} remaining responses across all questions")
-            save_session(session)
+        print("\n💡 Next steps:")
+        print("   1. Train a model using the exported JSONL files")
+        print("   2. Reopen this session - the model will be auto-detected")
+        print("   3. Continue grading remaining responses with AI assistance")
 
-        # Export to CSV after all grading complete
-        print("\n📝 Exporting final graded CSV...")
-        export_to_csv(session, csv_data)
+        return session  # Return here to avoid duplicate export prompt
 
     return session
 
 
-def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]], output_dir: str = "graded_exams") -> str:
+def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]],
+                  output_dir: str = "graded_exams") -> str:
     """Export graded data to CSV file with grades filled in"""
     Path(output_dir).mkdir(exist_ok=True)
 
@@ -645,10 +720,19 @@ def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]], outpu
     return ""
 
 
-def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") -> None:
+def export_to_jsonl(session: GradingSession, output_dir: str = "training_data", session_name: Optional[str] = None) -> None:
     """Export graded data to JSONL format for fine-tuning"""
     Path(output_dir).mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Extract exam identifier from session name or CSV filename
+    if session_name:
+        exam_id = session_name.split('_')[0] if '_' in session_name else session_name
+    else:
+        exam_id = Path(session.csv_file).stem
+
+    # Sanitize exam_id for filename
+    exam_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in exam_id)
 
     # Create one JSONL file per question
     for output_col, question in session.questions.items():
@@ -667,11 +751,13 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") 
             if exam_question:
                 question.exam_question = exam_question
                 # Save the updated session with the exam question
-                save_session(session)
+                save_session(session, session_name)
             else:
                 print("⚠ Using generic prompt without specific exam question")
 
-        jsonl_file = Path(output_dir) / f"{output_col.replace(' ', '_')}_{timestamp}.jsonl"
+        # Include exam ID in the filename for uniqueness
+        sanitized_col = output_col.replace(' ', '_').replace('/', '-')
+        jsonl_file = Path(output_dir) / f"{exam_id}_{sanitized_col}_{timestamp}.jsonl"
         exported_count = 0
 
         with open(jsonl_file, 'w') as f:
@@ -721,56 +807,89 @@ def main() -> None:
     """Main function to run the CLI tool."""
     print("=== Tentanator - CSV Grading Assistant ===\n")
 
-    # Check for existing session
-    existing_session = load_session()
-    if existing_session:
-        print(f"Found existing session from {existing_session.last_updated}")
-        print(f"CSV: {existing_session.csv_file}")
+    # Check for existing sessions
+    existing_sessions = list_sessions()
+    selected_session = None
+    current_session_name = None
+
+    if existing_sessions:
+        print("Found existing sessions:\n")
+        for i, (name, metadata) in enumerate(existing_sessions, 1):
+            print(f"{i}. {name}")
+            print(f"   CSV: {metadata['csv_file']}")
+            print(f"   Last updated: {metadata['last_updated']}")
+            print(f"   Questions: {metadata['num_questions']}\n")
+
+        print(f"{len(existing_sessions) + 1}. Create new session")
+
+        while True:
+            choice = input(f"\nSelect session [1-{len(existing_sessions) + 1}]: ").strip()
+            try:
+                choice_num = int(choice)
+                if 1 <= choice_num <= len(existing_sessions):
+                    current_session_name, _ = existing_sessions[choice_num - 1]
+                    selected_session = load_session(current_session_name)
+                    if selected_session:
+                        print(f"\n✓ Loaded session '{current_session_name}'")
+                        break
+                    else:
+                        print(f"Error loading session '{current_session_name}'")
+                elif choice_num == len(existing_sessions) + 1:
+                    # Create new session
+                    break
+                else:
+                    print("Invalid choice. Please try again.")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+
+    if selected_session:
+        print(f"\n=== Resuming Session ===")
+        print(f"CSV: {selected_session.csv_file}")
 
         # Count valid grades only (excluding blank/dash)
         valid_graded = sum(
             sum(1 for item in q.graded_items if item.input_text.strip() not in ["", "-", "N/A"])
-            for q in existing_session.questions.values()
+            for q in selected_session.questions.values()
         )
-        total_graded = sum(len(q.graded_items) for q in existing_session.questions.values())
+        total_graded = sum(len(q.graded_items) for q in selected_session.questions.values())
         auto_graded = total_graded - valid_graded
 
         print(f"Progress: {valid_graded} valid responses graded")
         if auto_graded > 0:
             print(f"         ({auto_graded} blank/dash responses auto-graded as 0)")
-        print(f"Questions: {len(existing_session.questions)} questions in progress")
+        print(f"Questions: {len(selected_session.questions)} questions in progress\n")
 
-        resume = input("\nResume this session? [y/n]: ").strip().lower()
-        if resume == 'y':
-            filepath = Path("exams") / existing_session.csv_file
-            csv_data = read_csv_data(filepath)
+        # Load CSV data
+        filepath = Path("exams") / selected_session.csv_file
+        csv_data = read_csv_data(filepath)
 
-            # Initialize OpenAI client
-            openai_client = None
-            api_key = os.getenv("OPENAI_API_KEY")
-            if api_key:
-                openai_client = OpenAI(api_key=api_key)
-                print("✓ OpenAI client initialized for AI-assisted grading")
-            else:
-                print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
+        # Initialize OpenAI client
+        openai_client = None
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            openai_client = OpenAI(api_key=api_key)
+            print("✓ OpenAI client initialized for AI-assisted grading")
+        else:
+            print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
 
-            session = grade_questions(existing_session, csv_data, openai_client=openai_client)
+        session = grade_questions(selected_session, csv_data, openai_client=openai_client,
+                                 session_name=current_session_name)
 
-            # Check if we only did manual grading (50) without AI review
-            # If so, ask about JSONL export for training
-            all_fully_graded = all(
-                len(q.graded_items) >= len(csv_data)  # All rows graded
-                for q in session.questions.values()
-            )
+        # Check if we only did manual grading (50) without AI review
+        # If so, ask about JSONL export for training
+        all_fully_graded = all(
+            len(q.graded_items) >= len(csv_data)  # All rows graded
+            for q in session.questions.values()
+        )
 
-            if not all_fully_graded:
-                # We only graded the manual threshold, ask about JSONL export for training
-                export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
-                if export_now == 'y':
-                    export_to_jsonl(session)
-            # If all_fully_graded is True, we already exported CSV and don't need JSONL
+        if not all_fully_graded:
+            # We only graded the manual threshold, ask about JSONL export for training
+            export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
+            if export_now == 'y':
+                export_to_jsonl(session, session_name=current_session_name)
+        # If all_fully_graded is True, we already exported CSV and don't need JSONL
 
-            return
+        return
 
     # Start new session
     csv_files = list_csv_files()
@@ -823,6 +942,18 @@ def main() -> None:
     print(f"Input Columns: {', '.join(input_columns)}")
     print(f"Output Columns: {', '.join(output_columns)}")
 
+    # Ask for session name
+    session_name_input = input("\nEnter a name for this session (or press Enter for auto-generated): ").strip()
+    if not session_name_input:
+        csv_base = Path(selected_file).stem
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        session_name = f"{csv_base}_{timestamp}"
+    else:
+        # Ensure session name is filesystem-safe
+        session_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_name_input)
+
+    print(f"✓ Creating session: {session_name}")
+
     # Create new session
     session = GradingSession(
         csv_file=selected_file,
@@ -833,8 +964,17 @@ def main() -> None:
         last_updated=datetime.now().isoformat()
     )
 
+    # Initialize OpenAI client if available
+    openai_client = None
+    api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        openai_client = OpenAI(api_key=api_key)
+        print("✓ OpenAI client initialized for AI-assisted grading")
+    else:
+        print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
+
     # Start grading
-    session = grade_questions(session, csv_data)
+    session = grade_questions(session, csv_data, openai_client=openai_client, session_name=session_name)
 
     # Check if we only did manual grading (50) without AI review
     # If so, ask about JSONL export for training
@@ -848,7 +988,7 @@ def main() -> None:
             # We only graded the manual threshold, ask about JSONL export for training
             export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
             if export_now == 'y':
-                export_to_jsonl(session)
+                export_to_jsonl(session, session_name=session_name)
         # If all_fully_graded is True, we already exported CSV and don't need JSONL
 
 

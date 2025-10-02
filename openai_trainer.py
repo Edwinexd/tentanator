@@ -49,6 +49,7 @@ class FineTuningJob:
     created_at: str
     training_file: str  # JSONL file used for training
     question_name: str  # Question being trained
+    exam_id: str = ""  # Exam identifier
     finished_at: Optional[str] = None
     fine_tuned_model: Optional[str] = None
     error: Optional[str] = None
@@ -59,12 +60,13 @@ class ModelRegistry:
     """Registry of fine-tuned models"""
     models: Dict[str, Dict[str, Any]]  # model_id -> model info
 
-    def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str):
+    def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str, exam_id: str = ""):
         """Add a model to the registry"""
         self.models[model_id] = {
             "model_id": model_id,
             "jsonl_file": jsonl_file,
             "question_name": question_name,
+            "exam_id": exam_id,  # Which exam this model was trained on
             "job_id": job_id,
             "created_at": datetime.now().isoformat()
         }
@@ -154,10 +156,21 @@ class OpenAITrainer:
             if proceed != 'y':
                 return None
 
-        print(f"📤 Uploading {filepath.name} ({num_examples} examples)...")
+        # Create a temporary file with "exam" removed from the filename for OpenAI
+        temp_filepath = filepath.parent / filepath.name.replace("exam", "").replace("Exam", "")
+
+        # If no change needed, use original file
+        if temp_filepath == filepath:
+            temp_filepath = filepath
+            print(f"📤 Uploading {filepath.name} ({num_examples} examples)...")
+        else:
+            # Copy to temp file with new name
+            import shutil
+            shutil.copy2(filepath, temp_filepath)
+            print(f"📤 Uploading as {temp_filepath.name} ({num_examples} examples)...")
 
         try:
-            with open(filepath, 'rb') as f:
+            with open(temp_filepath, 'rb') as f:
                 response = self.client.files.create(
                     file=f,
                     purpose='fine-tune'
@@ -165,39 +178,46 @@ class OpenAITrainer:
 
             training_file = TrainingFile(
                 file_id=response.id,
-                filename=filepath.name,
+                filename=filepath.name,  # Keep original filename for tracking
                 question_name=question_name,
                 size=filepath.stat().st_size,
                 created_at=datetime.now().isoformat()
             )
+
+            # Clean up temporary file if we created one
+            if temp_filepath != filepath and temp_filepath.exists():
+                temp_filepath.unlink()
 
             print(f"✅ Uploaded successfully! File ID: {response.id}")
             return training_file
 
         except Exception as e:
             print(f"❌ Upload failed: {e}")
+            # Clean up temporary file on error
+            if temp_filepath != filepath and temp_filepath.exists():
+                temp_filepath.unlink()
             return None
 
     def create_fine_tuning_job(self, training_file: TrainingFile,
                               jsonl_filename: str,
-                              config: FineTuningConfig) -> Optional[FineTuningJob]:
+                              config: FineTuningConfig,
+                              exam_id: str = "") -> Optional[FineTuningJob]:
         """Create a fine-tuning job with uploaded file"""
         print(f"🚀 Creating fine-tuning job for {training_file.question_name}...")
 
         try:
-            # Prepare hyperparameters
-            hyperparameters = {
-                "n_epochs": config.n_epochs,
-                "batch_size": config.batch_size,
-                "learning_rate_multiplier": config.learning_rate_multiplier,
-            }
+            # Generate suffix and remove "exam" from it
+            if config.suffix:
+                suffix = config.suffix.replace("exam", "").replace("Exam", "")
+            else:
+                suffix = f"tentanator_{training_file.question_name.replace(' ', '_').lower()}"
+                suffix = suffix.replace("exam", "").replace("Exam", "")
 
             # Create job
             response = self.client.fine_tuning.jobs.create(
                 training_file=training_file.file_id,
                 model=config.model,
-                hyperparameters=hyperparameters,
-                suffix=config.suffix or f"tentanator_{training_file.question_name.replace(' ', '_').lower()}"
+                suffix=suffix
             )
 
             job = FineTuningJob(
@@ -206,7 +226,8 @@ class OpenAITrainer:
                 status=response.status,
                 created_at=datetime.now().isoformat(),
                 training_file=jsonl_filename,
-                question_name=training_file.question_name
+                question_name=training_file.question_name,
+                exam_id=exam_id
             )
 
             print(f"✅ Fine-tuning job created! Job ID: {response.id}")
@@ -236,7 +257,8 @@ class OpenAITrainer:
                         model_id=job.fine_tuned_model,
                         jsonl_file=job.training_file,
                         question_name=job.question_name,
-                        job_id=job.job_id
+                        job_id=job.job_id,
+                        exam_id=job.exam_id
                     )
                     self.model_registry.save()
                     print(f"   Added to models.json registry")
@@ -325,7 +347,7 @@ class OpenAITrainer:
                     temperature=0.1
                 )
 
-                grade = result.choices[0].message.content.strip()
+                grade = result.choices[0].message.content.strip() # type: ignore
 
                 graded_results.append({
                     "row_index": idx,
@@ -489,10 +511,14 @@ def main():
                             if training_file:
                                 files.append(training_file)
 
+                                # Extract exam_id from filename (format: examid_question_timestamp.jsonl)
+                                filename_parts = jsonl_file.stem.split('_')
+                                exam_id = filename_parts[0] if len(filename_parts) > 2 else ""
+
                                 # Create fine-tuning job
                                 config = FineTuningConfig()
                                 job = trainer.create_fine_tuning_job(
-                                    training_file, jsonl_file.name, config
+                                    training_file, jsonl_file.name, config, exam_id
                                 )
                                 if job:
                                     jobs.append(job)
