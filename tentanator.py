@@ -340,9 +340,21 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                             print(f"\n🤖 AI Grade: {ai_suggestion}")
 
                             # Let user confirm or modify
-                            user_input = input(f"Accept grade? [ENTER=yes, or type new grade]: ").strip()
+                            user_input = input(f"Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: ").strip()
 
-                            if user_input:
+                            # Handle back command
+                            if user_input.lower() == 'b' and len(question.graded_items) > 0:
+                                # Remove the last graded item
+                                removed = question.graded_items.pop()
+                                print(f"Removed grade for ID: {removed.row_id}")
+                                save_session(session)
+                                # Restart the grading process to go back
+                                return grade_questions(session, csv_data, threshold, openai_client)
+                            elif user_input.lower() == 'q':
+                                save_session(session)
+                                print("\nSaved and exiting...")
+                                return session
+                            elif user_input:
                                 final_grade = user_input
                                 print(f"✓ Modified to: {final_grade}")
                             else:
