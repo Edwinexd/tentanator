@@ -367,16 +367,16 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 normalized_output = output_col.replace(' ', '_').lower()
                 normalized_model = model_question.replace(' ', '_').lower()
 
-                # Match both question name AND exam ID
-                if normalized_output == normalized_model:
+                # Match if the output_col appears in the model's question_name
+                # (handles cases like "Points_27" matching "Exam123_Points_27")
+                if normalized_output in normalized_model:
                     # Check if exam matches (if exam_id is present in model registry)
                     if not model_exam or exam_id.lower() in model_exam.lower() or model_exam.lower() in exam_id.lower():
                         model_id = mid
                         print(f"\n✅ MATCHED! Using model for {output_col} from exam {model_exam or 'unknown'}")
                         print(f"   Model ID: {model_id}")
                         break
-                    else:
-                        print(f"   ⚠️  Question matches but exam doesn't ({model_exam} != {exam_id})")
+                    print(f"   ⚠️  Question matches but exam doesn't ({model_exam} != {exam_id})")
 
             if not model_id:
                 print(f"❌ No matching model found - manual grading only for {output_col}")
@@ -747,13 +747,14 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data", 
             print(f"{'='*60}")
             print("Please enter the exam question that students were answering:")
             print("(This will be included in the training data for context)")
-            exam_question = input("> ").strip()
-            if exam_question:
-                question.exam_question = exam_question
-                # Save the updated session with the exam question
-                save_session(session, session_name)
-            else:
-                print("⚠ Using generic prompt without specific exam question")
+            while True:
+                exam_question = input("> ").strip()
+                if exam_question:
+                    question.exam_question = exam_question
+                    # Save the updated session with the exam question
+                    save_session(session, session_name)
+                    break
+                print("⚠ Exam question cannot be empty. Please enter the question:")
 
         # Include exam ID in the filename for uniqueness
         sanitized_col = output_col.replace(' ', '_').replace('/', '-')
