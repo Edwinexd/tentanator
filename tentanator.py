@@ -373,7 +373,32 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                             save_session(session)
                             print(f"💾 Saved (Total graded: {len(question.graded_items)})")
 
-                    print(f"\n✅ Completed grading for {output_col}")
+                    print(f"\n✅ Completed AI grading for {output_col}")
+
+                    # Auto-zero any remaining ungraded responses
+                    print("\n🔄 Auto-zeroing remaining ungraded responses...")
+                    auto_zeroed = 0
+                    for row in csv_data:
+                        row_id = get_row_id(row, session.id_columns)
+                        if row_id not in {item.row_id for item in question.graded_items}:
+                            response_text = row.get(question.input_column, "-")
+                            # Auto-grade any ungraded response as 0
+                            graded_item = GradedItem(
+                                row_id=row_id,
+                                input_text=response_text,
+                                grade="0",
+                                timestamp=datetime.now().isoformat()
+                            )
+                            question.graded_items.append(graded_item)
+                            auto_zeroed += 1
+
+                    if auto_zeroed > 0:
+                        print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
+                        save_session(session)
+
+                    # Export to CSV after AI review and auto-zeroing
+                    print("\n📝 Exporting graded CSV...")
+                    export_to_csv(session, csv_data)
 
             continue
 
@@ -548,7 +573,76 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
         print(f"Graded {threshold} valid responses for all {len(session.output_columns)} questions")
         print(f"{'='*60}")
 
+        # Auto-zero any remaining ungraded responses for all questions
+        print("\n🔄 Auto-zeroing any remaining ungraded responses...")
+        total_auto_zeroed = 0
+        for output_col, question in session.questions.items():
+            graded_ids = {item.row_id for item in question.graded_items}
+            for row in csv_data:
+                row_id = get_row_id(row, session.id_columns)
+                if row_id not in graded_ids:
+                    response_text = row.get(question.input_column, "-")
+                    graded_item = GradedItem(
+                        row_id=row_id,
+                        input_text=response_text,
+                        grade="0",
+                        timestamp=datetime.now().isoformat()
+                    )
+                    question.graded_items.append(graded_item)
+                    total_auto_zeroed += 1
+
+        if total_auto_zeroed > 0:
+            print(f"✓ Auto-zeroed {total_auto_zeroed} remaining responses across all questions")
+            save_session(session)
+
+        # Export to CSV after all grading complete
+        print("\n📝 Exporting final graded CSV...")
+        export_to_csv(session, csv_data)
+
     return session
+
+
+def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]], output_dir: str = "graded_exams") -> str:
+    """Export graded data to CSV file with grades filled in"""
+    Path(output_dir).mkdir(exist_ok=True)
+
+    # Use the same filename as the original CSV
+    output_file = Path(output_dir) / session.csv_file
+
+    # Create a mapping of row_id to grades for all questions
+    grades_by_row: Dict[str, Dict[str, str]] = {}  # row_id -> {output_col -> grade}
+
+    for output_col, question in session.questions.items():
+        for item in question.graded_items:
+            if item.row_id not in grades_by_row:
+                grades_by_row[item.row_id] = {}
+            grades_by_row[item.row_id][output_col] = item.grade
+
+    # Update the CSV data with grades
+    updated_rows = []
+    for row in csv_data:
+        row_id = get_row_id(row, session.id_columns)
+        updated_row = row.copy()
+
+        # Add grades for this row
+        if row_id in grades_by_row:
+            for output_col, grade in grades_by_row[row_id].items():
+                updated_row[output_col] = grade
+
+        updated_rows.append(updated_row)
+
+    # Write the updated CSV
+    if updated_rows:
+        fieldnames = list(updated_rows[0].keys())
+        with open(output_file, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(updated_rows)
+
+        print(f"✓ Exported graded CSV to: {output_file}")
+        return str(output_file)
+
+    return ""
 
 
 def export_to_jsonl(session: GradingSession, output_dir: str = "training_data") -> None:
@@ -662,10 +756,20 @@ def main() -> None:
 
             session = grade_questions(existing_session, csv_data, openai_client=openai_client)
 
-            # Ask if they want to export
-            export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
-            if export_now == 'y':
-                export_to_jsonl(session)
+            # Check if we only did manual grading (50) without AI review
+            # If so, ask about JSONL export for training
+            all_fully_graded = all(
+                len(q.graded_items) >= len(csv_data)  # All rows graded
+                for q in session.questions.values()
+            )
+
+            if not all_fully_graded:
+                # We only graded the manual threshold, ask about JSONL export for training
+                export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
+                if export_now == 'y':
+                    export_to_jsonl(session)
+            # If all_fully_graded is True, we already exported CSV and don't need JSONL
+
             return
 
     # Start new session
@@ -732,11 +836,20 @@ def main() -> None:
     # Start grading
     session = grade_questions(session, csv_data)
 
-    # Ask if they want to export
+    # Check if we only did manual grading (50) without AI review
+    # If so, ask about JSONL export for training
     if session.questions:
-        export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
-        if export_now == 'y':
-            export_to_jsonl(session)
+        all_fully_graded = all(
+            len(q.graded_items) >= len(csv_data)  # All rows graded
+            for q in session.questions.values()
+        )
+
+        if not all_fully_graded:
+            # We only graded the manual threshold, ask about JSONL export for training
+            export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
+            if export_now == 'y':
+                export_to_jsonl(session)
+        # If all_fully_graded is True, we already exported CSV and don't need JSONL
 
 
 if __name__ == "__main__":
