@@ -10,6 +10,7 @@ Tentanator is a Python-based intelligent grading system that combines manual gra
 - **Session Persistence**: Resume grading sessions at any time with automatic session saving
 - **Smart Auto-Grading**: Automatically assigns grade "0" to blank or dash responses
 - **Batch Export**: Export fully graded CSV files with all grades filled in
+- **Excel Export**: Convert graded CSV files to Excel format with auto-adjusted column widths
 - **Model Registry**: Track and manage all fine-tuned models for different questions
 
 ## Installation
@@ -79,6 +80,19 @@ python tentanator.py
    - After manual grading, use trained models to grade remaining responses
    - Review and modify AI suggestions as needed
 
+### Export to Excel
+
+1. **Run the Excel export**:
+```bash
+python make_excel.py
+```
+
+2. **What it does**:
+   - Converts all CSV files from `graded_exams/` directory
+   - Creates Excel files in `graded_exams_out/` directory
+   - Auto-adjusts column widths for better readability
+   - Preserves all data and formatting from the CSV files
+
 ### Training Custom Models
 
 1. **Run the training module**:
@@ -100,12 +114,15 @@ python openai_trainer.py
 tentanator/
 ├── tentanator.py              # Main grading application
 ├── openai_trainer.py          # OpenAI fine-tuning module
+├── make_excel.py              # CSV to Excel converter utility
 ├── requirements.txt           # Python dependencies
 ├── .env                       # API keys (not in version control)
 ├── exams/                     # Input CSV files
 │   └── *.csv
 ├── graded_exams/              # Output CSV files with grades
 │   └── *.csv
+├── graded_exams_out/          # Excel exports of graded exams
+│   └── *.xlsx
 ├── training_data/             # JSONL files for fine-tuning
 │   └── *.jsonl
 ├── models.json                # Registry of fine-tuned models
@@ -129,6 +146,14 @@ The main application module containing:
   - `export_to_csv()`: Export graded data to CSV
   - `export_to_jsonl()`: Export training data for fine-tuning
   - `get_ai_grade_suggestion()`: Get grade suggestions from trained models
+
+### make_excel.py
+
+The CSV to Excel converter utility containing:
+- Automatic conversion of all CSV files from `graded_exams/` directory
+- Excel file generation with proper formatting
+- Auto-adjusted column widths for optimal readability
+- Batch processing of multiple CSV files
 
 ### openai_trainer.py
 
@@ -214,6 +239,8 @@ The OpenAI fine-tuning module containing:
 - Python 3.8+
 - openai
 - python-dotenv>=1.0.0
+- pandas>=2.0.0
+- openpyxl>=3.1.0
 
 ## License
 

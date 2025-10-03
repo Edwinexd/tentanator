@@ -208,6 +208,7 @@ __marimo__/
 
 exams/
 graded_exams/
+graded_exams_out/
 .tentanator*.json
 training_data/
 models.json
