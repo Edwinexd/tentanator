@@ -24,7 +24,7 @@ Tentanator is a Python-based intelligent grading system that combines manual gra
 
 1. Clone the repository:
 ```bash
-git clone <repository-url>
+git clone https://github.com/Edwinexd/tentanator.git
 cd tentanator
 ```
 
