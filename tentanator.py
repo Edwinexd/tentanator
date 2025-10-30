@@ -14,10 +14,13 @@ from typing import Any, Dict, List, Optional, Tuple
 import dotenv
 from openai import OpenAI
 
-dotenv.load_dotenv()
-
 from clustering import SamplingAlgorithm, get_samples
 from embeddings import get_embedding
+
+dotenv.load_dotenv()
+
+# Initialize OpenAI client globally
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Constants
 NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples to select via clustering (used for kmeans_fixed)
@@ -30,7 +33,7 @@ assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, "Representative samples 
 #   - "kmeans_fixed": Uses fixed k=NUM_REPRESENTATIVE_SAMPLES for clustering
 #   - "random": Random sampling with n=NUM_REPRESENTATIVE_SAMPLES
 #   - "maximin": Maximin diversity sampling with n=NUM_REPRESENTATIVE_SAMPLES (greedy farthest-first)
-SAMPLING_ALGORITHM: SamplingAlgorithm = "maximin"
+SAMPLING_ALGORITHM: SamplingAlgorithm = "kmeans_fixed"
 
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade student exam responses.
@@ -53,7 +56,6 @@ class GradedItem:
     input_text: str
     grade: str
     timestamp: str
-    embedding: Optional[List[float]] = None  # Text embedding for the input
 
 
 @dataclass
@@ -74,7 +76,8 @@ class GradingSession:
     output_columns: List[str]
     questions: Dict[str, QuestionGrades]  # output_column -> QuestionGrades
     last_updated: str = ""
-    embeddings_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)  # input_column -> {row_id -> embedding}
+    # input_column -> {row_id -> embedding}
+    embeddings_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
 
 
 def get_sessions_dir() -> Path:
@@ -87,26 +90,27 @@ def get_sessions_dir() -> Path:
     if old_session_file.exists():
         print("📦 Migrating existing session to new format...")
         try:
-            with open(old_session_file, 'r') as f:
+            with open(old_session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
 
             # Generate session name from CSV file and timestamp
             csv_base = Path(data.get("csv_file", "unknown")).stem
-            timestamp = data.get("last_updated", datetime.now().isoformat())[:19].replace(":", "").replace("-", "").replace("T", "_")
+            timestamp = data.get("last_updated", datetime.now().isoformat())[:19]
+            timestamp = timestamp.replace(":", "").replace("-", "").replace("T", "_")
             session_name = f"{csv_base}_migrated_{timestamp}"
             session_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_name)
 
             # Save to new location
             new_path = sessions_dir / f"{session_name}.json"
             data["session_name"] = session_name
-            with open(new_path, 'w') as f:
+            with open(new_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2)
 
             # Rename old file to backup
             old_session_file.rename(".tentanator_session.json.backup")
             print(f"✓ Migrated to: {session_name}")
 
-        except Exception as e:
+        except (json.JSONDecodeError, OSError, KeyError) as e:
             print(f"⚠️  Could not migrate old session: {e}")
 
     return sessions_dir
@@ -119,7 +123,7 @@ def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
 
     for session_file in sessions_dir.glob("*.json"):
         try:
-            with open(session_file, 'r') as f:
+            with open(session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 session_name = session_file.stem
                 metadata = {
@@ -170,7 +174,7 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
             "graded_items": [asdict(item) for item in question.graded_items]
         }
 
-    with open(filename, 'w') as f:
+    with open(filename, 'w', encoding='utf-8') as f:
         json.dump(session_dict, f, indent=2)
     print(f"✓ Session saved as '{session_name}'")
     return session_name
@@ -221,7 +225,7 @@ def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[
                 if total_generated % 10 == 0:
                     print(f"    Generated {total_generated} embeddings...")
 
-            except Exception as e:
+            except (OSError, ValueError, RuntimeError) as e:
                 print(f"    ⚠️  Failed for row {row_id}: {e}")
                 continue
 
@@ -236,85 +240,37 @@ def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
                                       session: Optional[GradingSession] = None,
                                       input_column: Optional[str] = None) -> GradedItem:
     """
-    Create a GradedItem with embedding if available
+    Create a GradedItem and ensure embedding is cached
 
     Args:
         row_id: Unique identifier for the row
         input_text: The student's response text
         grade: The grade assigned
-        session: Optional session to check for cached embeddings
-        input_column: Optional column name to lookup cached embedding
+        session: Optional session to cache embeddings in
+        input_column: Optional column name for embedding cache
 
     Returns:
-        GradedItem with embedding if possible
+        GradedItem (embeddings stored separately in session.embeddings_cache)
     """
-    embedding = None
+    # Ensure embedding is cached if session provided
+    if session and input_column and input_text.strip() and input_text.strip() not in ['-', 'N/A']:
+        if input_column not in session.embeddings_cache:
+            session.embeddings_cache[input_column] = {}
 
-    # First, try to get cached embedding
-    if session and input_column and input_column in session.embeddings_cache:
-        embedding = session.embeddings_cache[input_column].get(row_id)
-
-    # If not cached and response is valid, generate it
-    if embedding is None and input_text.strip() and input_text.strip() not in ['-', 'N/A']:
-        try:
-            embedding = get_embedding(input_text)
-            # Cache it for future use
-            if session and input_column:
-                if input_column not in session.embeddings_cache:
-                    session.embeddings_cache[input_column] = {}
+        # Generate embedding if not already cached
+        if row_id not in session.embeddings_cache[input_column]:
+            try:
+                embedding = get_embedding(input_text)
                 session.embeddings_cache[input_column][row_id] = embedding
-        except Exception as e:
-            print(f"⚠️  Failed to generate embedding: {e}")
+            except (OSError, ValueError, RuntimeError) as e:
+                print(f"⚠️  Failed to generate embedding: {e}")
 
     return GradedItem(
         row_id=row_id,
         input_text=input_text,
         grade=grade,
-        timestamp=datetime.now().isoformat(),
-        embedding=embedding
+        timestamp=datetime.now().isoformat()
     )
-
-
-def generate_embeddings_for_session(session: GradingSession, session_name: str) -> bool:
-    """
-    Generate embeddings for graded items that don't have them yet
-
-    Args:
-        session: The GradingSession to process
-        session_name: Name of the session for saving
-
-    Returns:
-        True if any embeddings were generated
-    """
-
-    modified = False
-    generated_count = 0
-
-    for question in session.questions.values():
-        for item in question.graded_items:
-            # Skip if already has embedding
-            if item.embedding is not None:
-                continue
-
-            # Skip blank/empty responses
-            input_text = item.input_text.strip()
-            if not input_text or input_text in ['-', 'N/A']:
-                continue
-
-            # Generate embedding
-            try:
-                item.embedding = get_embedding(input_text)
-                generated_count += 1
-                modified = True
-            except Exception as e:
-                print(f"⚠️  Failed to generate embedding: {e}")
-                continue
-
-    if modified:
-        print(f"🔢 Generated {generated_count} new embedding(s)")
-        save_session(session, session_name)
-
-    return modified
 
 
 def load_session(session_name: str) -> Optional[GradingSession]:
@@ -326,22 +282,20 @@ def load_session(session_name: str) -> Optional[GradingSession]:
         return None
 
     try:
-        with open(filename, 'r') as f:
+        with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
 
         # Reconstruct the session
         questions = {}
         for col, q_data in data.get("questions", {}).items():
-            # Handle optional embedding field when loading
             graded_items = []
             for item in q_data["graded_items"]:
-                # Create GradedItem with all fields, including optional embedding
+                # Create GradedItem (ignore embedding field from old sessions)
                 graded_items.append(GradedItem(
                     row_id=item["row_id"],
                     input_text=item["input_text"],
                     grade=item["grade"],
-                    timestamp=item["timestamp"],
-                    embedding=item.get("embedding")
+                    timestamp=item["timestamp"]
                 ))
             questions[col] = QuestionGrades(
                 question_name=q_data["question_name"],
@@ -360,11 +314,8 @@ def load_session(session_name: str) -> Optional[GradingSession]:
             embeddings_cache=data.get("embeddings_cache", {})
         )
 
-        # Auto-generate embeddings for items that don't have them
-        generate_embeddings_for_session(session, session_name)
-
         return session
-    except Exception as e:
+    except (json.JSONDecodeError, OSError, KeyError) as e:
         print(f"Error loading session: {e}")
         return None
 
@@ -456,14 +407,14 @@ def load_model_registry() -> Dict[str, Dict[str, Any]]:
                 registry = json.load(f)
                 print(f"📚 Loaded {len(registry)} models from registry")
                 return registry
-        except Exception as e:
+        except (json.JSONDecodeError, OSError) as e:
             print(f"⚠️  Failed to load models.json: {e}")
     else:
         print("📚 No models.json found - no trained models available")
     return {}
 
 
-def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades,
+def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
                             response_text: str) -> Optional[str]:
     """Get AI-suggested grade from fine-tuned model"""
     try:
@@ -484,9 +435,9 @@ def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades
             temperature=0.0
         )
 
-        return response.choices[0].message.content.strip()
+        return (response.choices[0].message.content or "").strip()
 
-    except Exception as e:
+    except (OSError, ValueError, RuntimeError, AttributeError) as e:
         print(f"⚠️  AI suggestion failed: {e}")
         return None
 
@@ -502,7 +453,6 @@ def select_representative_samples(
 
     Args:
         session: The GradingSession with cached embeddings
-        csv_data: List of CSV rows as dictionaries
         input_column: The input column to select samples from
         algorithm: Sampling algorithm to use (defaults to SAMPLING_ALGORITHM constant)
         n_samples: Number of samples to select (required for some algorithms, optional for others)
@@ -547,7 +497,7 @@ def select_representative_samples(
         )
         return selected_ids, quality_score, num_selected
 
-    except Exception as e:
+    except (ValueError, RuntimeError) as e:
         print(f"⚠️  Sampling failed: {e}")
         # Fallback to returning first n samples or all if n not specified
         fallback_n = n_samples if n_samples else min(NUM_REPRESENTATIVE_SAMPLES, len(valid_embeddings))
@@ -555,7 +505,7 @@ def select_representative_samples(
 
 
 def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
-                   threshold: int = GRADING_THRESHOLD, openai_client: Optional[Any] = None,
+                   threshold: int = GRADING_THRESHOLD,
                    session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
@@ -573,14 +523,17 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
     # Cache for pre-computed AI suggestions (rolling window)
     ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
-    WINDOW_SIZE = 5  # Pre-compute next 5 responses
+    window_size = 5  # Pre-compute next 5 responses
 
     # Process one output column at a time
     for col_idx, output_col in enumerate(session.output_columns):
 
         # Get or create QuestionGrades
         if output_col not in session.questions:
-            input_col = session.input_columns[col_idx] if col_idx < len(session.input_columns) else session.input_columns[0]
+            if col_idx < len(session.input_columns):
+                input_col = session.input_columns[col_idx]
+            else:
+                input_col = session.input_columns[0]
             session.questions[output_col] = QuestionGrades(
                 question_name=output_col,
                 input_column=input_col,
@@ -606,11 +559,11 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 print(f"\n📊 Selected {num_selected} representative samples")
                 if quality_score > 0:
                     print(f"   Quality score: {quality_score:.3f}")
-                print(f"   These representative samples will be prioritized for grading\n")
+                print("   These representative samples will be prioritized for grading\n")
 
         # Check if there's a trained model for this question
         model_id = None
-        if openai_client and model_registry:
+        if model_registry:
             # Extract exam identifier from session
             exam_id = Path(session.csv_file).stem if session.csv_file else ""
 
@@ -661,12 +614,12 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     if response_text.strip() not in ["", "-", "N/A"]:
                         ungraded_rows.append((row_idx, row))
 
-            if ungraded_rows and model_id and openai_client:
+            if ungraded_rows and model_id:
                 print(f"🤖 Model available for remaining {len(ungraded_rows)} responses")
                 use_ai = input("Use AI to grade remaining responses? [y/n]: ").strip().lower()
 
                 if use_ai == 'y':
-                    print(f"\nGrading with AI - you can review and modify each suggestion...")
+                    print("\nGrading with AI - you can review and modify each suggestion...")
 
                     for row_idx, row in ungraded_rows:
                         row_id = get_row_id(row, session.id_columns)
@@ -674,20 +627,21 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
                         # Get AI suggestion
                         ai_suggestion = get_ai_grade_suggestion(
-                            openai_client, model_id, question, response_text
+                            model_id, question, response_text
                         )
 
                         if ai_suggestion:
                             print(f"\n{'-'*60}")
                             print(f"Student {row_idx + 1}/{len(csv_data)}")
-                            print(f"\nResponse:")
+                            print("\nResponse:")
                             print("-" * 40)
                             print(response_text)  # Full response, no truncation
                             print("-" * 40)
                             print(f"\n🤖 AI Grade: {ai_suggestion}")
 
                             # Let user confirm or modify
-                            user_input = input(f"Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: ").strip()
+                            prompt = "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
+                            user_input = input(prompt).strip()
 
                             # Handle back command
                             if user_input.lower() == 'b' and len(question.graded_items) > 0:
@@ -696,12 +650,12 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                                 print(f"Removed grade for ID: {removed.row_id}")
                                 save_session(session, session_name)
                                 # Restart the grading process to go back
-                                return grade_questions(session, csv_data, threshold, openai_client)
-                            elif user_input.lower() == 'q':
+                                return grade_questions(session, csv_data, threshold, session_name)
+                            if user_input.lower() == 'q':
                                 save_session(session, session_name)
                                 print("\nSaved and exiting...")
                                 return session
-                            elif user_input:
+                            if user_input:
                                 final_grade = user_input
                                 print(f"✓ Modified to: {final_grade}")
                             else:
@@ -758,12 +712,19 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             ai_suggestion_cache[output_col] = {}
 
         # Pre-compute AI suggestions for rolling window (if model available)
-        def precompute_suggestions(start_idx: int, window_size: int):
+        def precompute_suggestions(
+            start_idx: int,
+            win_size: int,
+            curr_model_id: Optional[str],
+            curr_graded_ids: set,
+            curr_output_col: str,
+            curr_question: QuestionGrades
+        ):
             """Pre-compute AI suggestions for upcoming responses"""
-            if not model_id or not openai_client:
+            if not curr_model_id:
                 return
 
-            end_idx = min(start_idx + window_size, len(csv_data))
+            end_idx = min(start_idx + win_size, len(csv_data))
             for idx in range(start_idx, end_idx):
                 if idx >= len(csv_data):
                     break
@@ -772,10 +733,10 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 future_row_id = get_row_id(future_row, session.id_columns)
 
                 # Skip if already graded or cached
-                if future_row_id in graded_ids or future_row_id in ai_suggestion_cache[output_col]:
+                if future_row_id in curr_graded_ids or future_row_id in ai_suggestion_cache[curr_output_col]:
                     continue
 
-                future_response = future_row.get(question.input_column, "N/A")
+                future_response = future_row.get(curr_question.input_column, "N/A")
 
                 # Skip blank responses
                 if future_response.strip() in ["", "-", "N/A"]:
@@ -783,22 +744,22 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
                 # Get AI suggestion in background
                 ai_grade = get_ai_grade_suggestion(
-                    openai_client, model_id, question, future_response
+                    curr_model_id, curr_question, future_response
                 )
                 if ai_grade:
-                    ai_suggestion_cache[output_col][future_row_id] = ai_grade
+                    ai_suggestion_cache[curr_output_col][future_row_id] = ai_grade
 
         if model_id:
-            print(f"🤖 AI model available - pre-computing suggestions for smoother grading")
+            print("🤖 AI model available - pre-computing suggestions for smoother grading")
             # Pre-load first window
-            precompute_suggestions(0, WINDOW_SIZE)
+            precompute_suggestions(0, window_size, model_id, graded_ids, output_col, question)
         print(f"{'='*60}")
 
         # Create prioritized list of rows to grade (representative samples first)
         representative_set = set(representative_row_ids)
         prioritized_rows = []
 
-        # First add representative samples
+        # First add representative samplesƒ‹
         for row_idx, row in enumerate(csv_data):
             row_id = get_row_id(row, session.id_columns)
             if row_id in representative_set:
@@ -818,8 +779,10 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 break
 
             # Pre-compute suggestions for next window of responses
-            if model_id and openai_client and row_idx % 3 == 0:  # Update window every 3 responses
-                precompute_suggestions(row_idx + 1, WINDOW_SIZE)
+            if model_id and row_idx % 3 == 0:  # Update window every 3 responses
+                precompute_suggestions(
+                    row_idx + 1, window_size, model_id, graded_ids, output_col, question
+                )
 
             # Get row ID
             row_id = get_row_id(row, session.id_columns)
@@ -883,16 +846,16 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     save_session(session, session_name)
                     print("\nSaved and exiting...")
                     return session
-                elif grade.lower() == 's':
+                if grade.lower() == 's':
                     print("  Skipping this response...")
                     break
-                elif grade.lower() == 'b' and len(question.graded_items) > 0:
+                if grade.lower() == 'b' and len(question.graded_items) > 0:
                     # Remove the last graded item
                     removed = question.graded_items.pop()
                     print(f"Removed grade for ID: {removed.row_id}")
                     save_session(session, session_name)
-                    return grade_questions(session, csv_data, threshold, openai_client)
-                elif grade:
+                    return grade_questions(session, csv_data, threshold, session_name)
+                if grade:
                     graded_item = create_graded_item_with_embedding(
                         row_id, response_text, grade, session, question.input_column
                     )
@@ -911,8 +874,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     # Save after each grade
                     save_session(session, session_name)
                     break
-                else:
-                    print("  Please enter a grade or command")
+                print("  Please enter a grade or command")
 
     # Check if all questions are complete (based on valid grades only)
     all_complete = all(
@@ -921,11 +883,9 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
     )
     if all_complete:
         print(f"\n{'='*60}")
-        print(f"✓ THRESHOLD REACHED!")
-        print(
-            f"Graded {threshold} valid responses for all "
-            f"{len(session.output_columns)} questions"
-        )
+        print("✓ THRESHOLD REACHED!")
+        num_questions = len(session.output_columns)
+        print(f"Graded {threshold} valid responses for all {num_questions} questions")
         print(f"{'='*60}")
 
         # Export to JSONL for training
@@ -986,7 +946,11 @@ def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]],
     return ""
 
 
-def export_to_jsonl(session: GradingSession, output_dir: str = "training_data", session_name: Optional[str] = None) -> None:
+def export_to_jsonl(
+    session: GradingSession,
+    output_dir: str = "training_data",
+    session_name: Optional[str] = None
+) -> None:
     """Export graded data to JSONL format for fine-tuning"""
     Path(output_dir).mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1027,7 +991,7 @@ def export_to_jsonl(session: GradingSession, output_dir: str = "training_data", 
         jsonl_file = Path(output_dir) / f"{exam_id}_{sanitized_col}_{timestamp}.jsonl"
         exported_count = 0
 
-        with open(jsonl_file, 'w') as f:
+        with open(jsonl_file, 'w', encoding='utf-8') as f:
             for item in question.graded_items:
                 # Skip blank/dash responses as they are irrelevant for training
                 if item.input_text.strip() in ["", "-", "N/A"]:
@@ -1099,8 +1063,7 @@ def main() -> None:
                     if selected_session:
                         print(f"\n✓ Loaded session '{current_session_name}'")
                         break
-                    else:
-                        print(f"Error loading session '{current_session_name}'")
+                    print(f"Error loading session '{current_session_name}'")
                 elif choice_num == len(existing_sessions) + 1:
                     # Create new session
                     break
@@ -1110,7 +1073,7 @@ def main() -> None:
                 print("Invalid input. Please enter a number.")
 
     if selected_session:
-        print(f"\n=== Resuming Session ===")
+        print("\n=== Resuming Session ===")
         print(f"CSV: {selected_session.csv_file}")
 
         # Count valid grades only (excluding blank/dash)
@@ -1130,16 +1093,7 @@ def main() -> None:
         filepath = Path("exams") / selected_session.csv_file
         csv_data = read_csv_data(filepath)
 
-        # Initialize OpenAI client
-        openai_client = None
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            openai_client = OpenAI(api_key=api_key)
-            print("✓ OpenAI client initialized for AI-assisted grading")
-        else:
-            print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
-
-        session = grade_questions(selected_session, csv_data, openai_client=openai_client,
+        session = grade_questions(selected_session, csv_data,
                                  session_name=current_session_name)
 
         # Check if we only did manual grading (50) without AI review
@@ -1172,12 +1126,13 @@ def main() -> None:
     try:
         columns = get_csv_columns(filepath)
         csv_data = read_csv_data(filepath)
-    except Exception as e:
+    except (OSError, csv.Error, UnicodeDecodeError) as e:
         print(f"Error reading CSV file: {e}")
         return
 
     # Select ID columns
-    id_columns = select_columns(columns, "Select columns to use as unique IDENTIFIERS (e.g., student ID, name):", allow_multiple=True)
+    prompt = "Select columns to use as unique IDENTIFIERS (e.g., student ID, name):"
+    id_columns = select_columns(columns, prompt, allow_multiple=True)
     if not id_columns:
         print("Warning: No ID columns selected. Using row number as identifier.")
         id_columns = ["_row_number"]
@@ -1185,14 +1140,16 @@ def main() -> None:
     print(f"\nID columns: {', '.join(id_columns)}")
 
     # Select input columns
-    input_columns = select_columns(columns, "Select columns to use as INPUT (student responses):", allow_multiple=True)
+    prompt = "Select columns to use as INPUT (student responses):"
+    input_columns = select_columns(columns, prompt, allow_multiple=True)
     if not input_columns:
         return
 
     print(f"\nInput columns: {', '.join(input_columns)}")
 
     # Select output columns (one per question)
-    output_columns = select_columns(columns, "Select columns to use as OUTPUT (grading targets, one per question):", allow_multiple=True)
+    prompt = "Select columns to use as OUTPUT (grading targets, one per question):"
+    output_columns = select_columns(columns, prompt, allow_multiple=True)
     if not output_columns:
         return
 
@@ -1231,17 +1188,8 @@ def main() -> None:
         last_updated=datetime.now().isoformat()
     )
 
-    # Initialize OpenAI client if available
-    openai_client = None
-    api_key = os.getenv("OPENAI_API_KEY")
-    if api_key:
-        openai_client = OpenAI(api_key=api_key)
-        print("✓ OpenAI client initialized for AI-assisted grading")
-    else:
-        print("⚠️  OPENAI_API_KEY not found, AI suggestions disabled")
-
     # Start grading
-    session = grade_questions(session, csv_data, openai_client=openai_client, session_name=session_name)
+    session = grade_questions(session, csv_data, session_name=session_name)
 
     # Check if we only did manual grading (50) without AI review
     # If so, ask about JSONL export for training

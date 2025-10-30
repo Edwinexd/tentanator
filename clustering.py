@@ -57,7 +57,7 @@ def find_optimal_k(
             if score > best_score:
                 best_score = score
                 best_k = k
-        except Exception as e:
+        except (ValueError, RuntimeError) as e:
             print(f"   k={k:2d}: failed ({e})")
             continue
 
@@ -235,7 +235,7 @@ def get_samples(
         all_ids = list(data.keys())
 
         # Use numpy for reproducible random sampling
-        rng = np.random.RandomState(42)
+        rng = np.random.default_rng(42)
         selected_indices = rng.choice(len(all_ids), size=n_samples, replace=False)
         selected_ids = [all_ids[i] for i in selected_indices]
 
