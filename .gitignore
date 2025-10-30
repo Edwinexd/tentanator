@@ -213,3 +213,4 @@ graded_exams_out/
 training_data/
 models.json
 .tentanator_sessions/
+backups/

@@ -17,6 +17,8 @@ import dotenv
 
 dotenv.load_dotenv()
 
+from embeddings import get_embedding
+
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade student exam responses.
 Your task is to evaluate the student's answer to the following question and provide a grade.
@@ -38,6 +40,7 @@ class GradedItem:
     input_text: str
     grade: str
     timestamp: str
+    embedding: Optional[List[float]] = None  # Text embedding for the input
 
 
 @dataclass
@@ -58,6 +61,7 @@ class GradingSession:
     output_columns: List[str]
     questions: Dict[str, QuestionGrades]  # output_column -> QuestionGrades
     last_updated: str = ""
+    embeddings_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)  # input_column -> {row_id -> embedding}
 
 
 def get_sessions_dir() -> Path:
@@ -141,6 +145,7 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
         "input_columns": session.input_columns,
         "output_columns": session.output_columns,
         "last_updated": session.last_updated,
+        "embeddings_cache": session.embeddings_cache,
         "questions": {}
     }
 
@@ -158,6 +163,147 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
     return session_name
 
 
+def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[str, str]],
+                                   session_name: str) -> None:
+    """
+    Pre-generate embeddings for all responses in the CSV data
+
+    Args:
+        session: The GradingSession to populate with embeddings
+        csv_data: List of CSV rows as dictionaries
+        session_name: Name of the session for saving
+    """
+    print("\n🔢 Pre-generating embeddings for all responses...")
+
+    total_generated = 0
+    total_skipped = 0
+
+    for input_column in session.input_columns:
+        if input_column not in session.embeddings_cache:
+            session.embeddings_cache[input_column] = {}
+
+        print(f"\n  Processing column: {input_column}")
+
+        for row in csv_data:
+            row_id = get_row_id(row, session.id_columns)
+
+            # Skip if already cached
+            if row_id in session.embeddings_cache[input_column]:
+                total_skipped += 1
+                continue
+
+            response_text = row.get(input_column, "")
+
+            # Skip blank/empty responses
+            if not response_text.strip() or response_text.strip() in ['-', 'N/A']:
+                total_skipped += 1
+                continue
+
+            # Generate embedding
+            try:
+                embedding = get_embedding(response_text)
+                session.embeddings_cache[input_column][row_id] = embedding
+                total_generated += 1
+
+                if total_generated % 10 == 0:
+                    print(f"    Generated {total_generated} embeddings...")
+
+            except Exception as e:
+                print(f"    ⚠️  Failed for row {row_id}: {e}")
+                continue
+
+    if total_generated > 0:
+        print(f"\n✓ Generated {total_generated} embeddings, skipped {total_skipped}")
+        save_session(session, session_name)
+    else:
+        print(f"✓ All embeddings already cached ({total_skipped} total)")
+
+
+def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
+                                      session: Optional[GradingSession] = None,
+                                      input_column: Optional[str] = None) -> GradedItem:
+    """
+    Create a GradedItem with embedding if available
+
+    Args:
+        row_id: Unique identifier for the row
+        input_text: The student's response text
+        grade: The grade assigned
+        session: Optional session to check for cached embeddings
+        input_column: Optional column name to lookup cached embedding
+
+    Returns:
+        GradedItem with embedding if possible
+    """
+    embedding = None
+
+    # First, try to get cached embedding
+    if session and input_column and input_column in session.embeddings_cache:
+        embedding = session.embeddings_cache[input_column].get(row_id)
+
+    # If not cached and response is valid, generate it
+    if embedding is None and input_text.strip() and input_text.strip() not in ['-', 'N/A']:
+        try:
+            embedding = get_embedding(input_text)
+            # Cache it for future use
+            if session and input_column:
+                if input_column not in session.embeddings_cache:
+                    session.embeddings_cache[input_column] = {}
+                session.embeddings_cache[input_column][row_id] = embedding
+        except Exception as e:
+            print(f"⚠️  Failed to generate embedding: {e}")
+
+    return GradedItem(
+        row_id=row_id,
+        input_text=input_text,
+        grade=grade,
+        timestamp=datetime.now().isoformat(),
+        embedding=embedding
+    )
+
+
+def generate_embeddings_for_session(session: GradingSession, session_name: str) -> bool:
+    """
+    Generate embeddings for graded items that don't have them yet
+
+    Args:
+        session: The GradingSession to process
+        session_name: Name of the session for saving
+
+    Returns:
+        True if any embeddings were generated
+    """
+
+    modified = False
+    generated_count = 0
+
+    for question in session.questions.values():
+        for item in question.graded_items:
+            # Skip if already has embedding
+            if item.embedding is not None:
+                continue
+
+            # Skip blank/empty responses
+            input_text = item.input_text.strip()
+            if not input_text or input_text in ['-', 'N/A']:
+                continue
+
+            # Generate embedding
+            try:
+                item.embedding = get_embedding(input_text)
+                generated_count += 1
+                modified = True
+            except Exception as e:
+                print(f"⚠️  Failed to generate embedding: {e}")
+                continue
+
+    if modified:
+        print(f"🔢 Generated {generated_count} new embedding(s)")
+        save_session(session, session_name)
+
+    return modified
+
+
 def load_session(session_name: str) -> Optional[GradingSession]:
     """Load a session from a JSON file"""
     sessions_dir = get_sessions_dir()
@@ -173,7 +319,17 @@ def load_session(session_name: str) -> Optional[GradingSession]:
         # Reconstruct the session
         questions = {}
         for col, q_data in data.get("questions", {}).items():
-            graded_items = [GradedItem(**item) for item in q_data["graded_items"]]
+            # Handle optional embedding field when loading
+            graded_items = []
+            for item in q_data["graded_items"]:
+                # Create GradedItem with all fields, including optional embedding
+                graded_items.append(GradedItem(
+                    row_id=item["row_id"],
+                    input_text=item["input_text"],
+                    grade=item["grade"],
+                    timestamp=item["timestamp"],
+                    embedding=item.get("embedding")
+                ))
             questions[col] = QuestionGrades(
                 question_name=q_data["question_name"],
                 input_column=q_data["input_column"],
@@ -181,14 +337,20 @@ def load_session(session_name: str) -> Optional[GradingSession]:
                 graded_items=graded_items
             )
 
-        return GradingSession(
+        session = GradingSession(
             csv_file=data["csv_file"],
             id_columns=data["id_columns"],
             input_columns=data["input_columns"],
             output_columns=data["output_columns"],
             questions=questions,
-            last_updated=data.get("last_updated", "")
+            last_updated=data.get("last_updated", ""),
+            embeddings_cache=data.get("embeddings_cache", {})
         )
+
+        # Auto-generate embeddings for items that don't have them
+        generate_embeddings_for_session(session, session_name)
+
+        return session
     except Exception as e:
         print(f"Error loading session: {e}")
         return None
@@ -326,6 +488,10 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
     print("AI models (if available) will grade remaining responses after threshold is reached")
     print("-" * 50)
 
+    # Pre-generate embeddings for all responses before grading starts
+    if session_name:
+        pregenerate_embeddings_for_csv(session, csv_data, session_name)
+
     # Load model registry to check for trained models
     model_registry = load_model_registry()
 
@@ -447,11 +613,8 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                                 final_grade = ai_suggestion
                                 print(f"✓ Accepted: {final_grade}")
 
-                            graded_item = GradedItem(
-                                row_id=row_id,
-                                input_text=response_text,
-                                grade=final_grade,
-                                timestamp=datetime.now().isoformat()
+                            graded_item = create_graded_item_with_embedding(
+                                row_id, response_text, final_grade, session, question.input_column
                             )
                             question.graded_items.append(graded_item)
 
@@ -469,11 +632,8 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                         if row_id not in {item.row_id for item in question.graded_items}:
                             response_text = row.get(question.input_column, "-")
                             # Auto-grade any ungraded response as 0
-                            graded_item = GradedItem(
-                                row_id=row_id,
-                                input_text=response_text,
-                                grade="0",
-                                timestamp=datetime.now().isoformat()
+                            graded_item = create_graded_item_with_embedding(
+                                row_id, response_text, "0", session, question.input_column
                             )
                             question.graded_items.append(graded_item)
                             auto_zeroed += 1
@@ -576,11 +736,8 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
             # Auto-grade blank or "-" responses as 0
             if response_text.strip() in ["", "-", "N/A"]:
-                graded_item = GradedItem(
-                    row_id=row_id,
-                    input_text=response_text,
-                    grade="0",
-                    timestamp=datetime.now().isoformat()
+                graded_item = create_graded_item_with_embedding(
+                    row_id, response_text, "0", session, question.input_column
                 )
                 question.graded_items.append(graded_item)
                 print(f"\n✓ Auto-graded as 0 (blank/dash response - not counted toward {threshold} goal)")
@@ -624,11 +781,8 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     save_session(session, session_name)
                     return grade_questions(session, csv_data, threshold, openai_client)
                 elif grade:
-                    graded_item = GradedItem(
-                        row_id=row_id,
-                        input_text=response_text,
-                        grade=grade,
-                        timestamp=datetime.now().isoformat()
+                    graded_item = create_graded_item_with_embedding(
+                        row_id, response_text, grade, session, question.input_column
                     )
                     question.graded_items.append(graded_item)
                     valid_graded_count += 1  # Increment valid count for manually graded items
