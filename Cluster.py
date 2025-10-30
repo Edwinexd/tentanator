@@ -13,14 +13,14 @@ def cluster_with_kmean(data : dict, k : int) -> Tuple[dict, np.array, float]:
 
     pipe = pipeline(
         [('Scaler', StandardScaler()),
-        'Kmean',KMeans(n_clusters = k, init = 'k-means++') ]
+        'Kmeans',KMeans(n_clusters = k, init = 'k-means++') ]
     )
     pipe.fit(df)
     
     df['cluster']= pipe.predict(df)
     score = silhouette_score(pipe.named_steps['Scaler'].transform(df.drop(axis = 1,columns='cluster')), df['cluster'] )
 
-    centers_scaled = pipe.named_steps["Kmeans"].centroid
+    centers_scaled = pipe.named_steps["Kmeans"].cluster_centers_
     centers_orig = pipe.named_steps["Scaler"].inverse_transform(centers_scaled)
 
 
