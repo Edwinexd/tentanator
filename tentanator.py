@@ -6,18 +6,31 @@ Tentanator - CSV grading assistant with AI fine-tuning support
 import csv
 import json
 import os
-from dataclasses import dataclass, asdict, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
-
-from openai import OpenAI
+from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
+from openai import OpenAI
 
 dotenv.load_dotenv()
 
+from clustering import SamplingAlgorithm, get_samples
 from embeddings import get_embedding
+
+# Constants
+NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples to select via clustering (used for kmeans_fixed)
+GRADING_THRESHOLD = 25  # Minimum number of manual grades required
+assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, "Representative samples cannot exceed grading threshold"
+
+# Sampling algorithm configuration
+# Available algorithms:
+#   - "kmeans_auto": Automatically finds optimal k (2-20) by maximizing silhouette score
+#   - "kmeans_fixed": Uses fixed k=NUM_REPRESENTATIVE_SAMPLES for clustering
+#   - "random": Random sampling with n=NUM_REPRESENTATIVE_SAMPLES
+#   - "maximin": Maximin diversity sampling with n=NUM_REPRESENTATIVE_SAMPLES (greedy farthest-first)
+SAMPLING_ALGORITHM: SamplingAlgorithm = "maximin"
 
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade student exam responses.
@@ -478,8 +491,71 @@ def get_ai_grade_suggestion(client: Any, model_id: str, question: QuestionGrades
         return None
 
 
+def select_representative_samples(
+    session: GradingSession,
+    input_column: str,
+    algorithm: Optional[SamplingAlgorithm] = None,
+    n_samples: Optional[int] = None
+) -> Tuple[List[str], float, int]:
+    """
+    Select representative samples using specified sampling algorithm.
+
+    Args:
+        session: The GradingSession with cached embeddings
+        csv_data: List of CSV rows as dictionaries
+        input_column: The input column to select samples from
+        algorithm: Sampling algorithm to use (defaults to SAMPLING_ALGORITHM constant)
+        n_samples: Number of samples to select (required for some algorithms, optional for others)
+
+    Returns:
+        Tuple of (list of row_ids for representative samples, quality score, number of samples selected)
+    """
+    # Use default algorithm if not specified
+    if algorithm is None:
+        algorithm = SAMPLING_ALGORITHM
+
+    # Get embeddings for this column
+    if input_column not in session.embeddings_cache:
+        print(f"⚠️  No embeddings found for column {input_column}")
+        return [], 0.0, 0
+
+    embeddings_dict = session.embeddings_cache[input_column]
+
+    # Filter out empty embeddings
+    valid_embeddings = {
+        row_id: emb for row_id, emb in embeddings_dict.items()
+        if emb is not None and len(emb) > 0
+    }
+
+    if len(valid_embeddings) < 2:
+        print(f"⚠️  Not enough valid embeddings ({len(valid_embeddings)}) for sampling")
+        return list(valid_embeddings.keys()), 0.0, len(valid_embeddings)
+
+    # Use the get_samples function with the specified algorithm
+    try:
+        print(f"\n📊 Sampling with algorithm: {algorithm}")
+
+        # If n_samples not specified and algorithm requires it, use NUM_REPRESENTATIVE_SAMPLES
+        effective_n_samples = n_samples
+        if effective_n_samples is None and algorithm in ("kmeans_fixed", "random", "maximin"):
+            effective_n_samples = NUM_REPRESENTATIVE_SAMPLES
+
+        selected_ids, quality_score, num_selected = get_samples(
+            valid_embeddings,
+            algorithm=algorithm,
+            n_samples=effective_n_samples
+        )
+        return selected_ids, quality_score, num_selected
+
+    except Exception as e:
+        print(f"⚠️  Sampling failed: {e}")
+        # Fallback to returning first n samples or all if n not specified
+        fallback_n = n_samples if n_samples else min(NUM_REPRESENTATIVE_SAMPLES, len(valid_embeddings))
+        return list(valid_embeddings.keys())[:fallback_n], 0.0, fallback_n
+
+
 def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
-                   threshold: int = 50, openai_client: Optional[Any] = None,
+                   threshold: int = GRADING_THRESHOLD, openai_client: Optional[Any] = None,
                    session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
@@ -512,6 +588,25 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             )
 
         question = session.questions[output_col]
+
+        # Select representative samples (if not already graded enough)
+        representative_row_ids = []
+
+        # Count only valid (non-blank) graded items
+        valid_graded_count = sum(1 for item in question.graded_items
+                                if item.input_text.strip() not in ["", "-", "N/A"])
+
+        if valid_graded_count < threshold:
+            # Only run sampling if we haven't graded enough samples yet
+            representative_row_ids, quality_score, num_selected = select_representative_samples(
+                session, question.input_column
+            )
+
+            if representative_row_ids:
+                print(f"\n📊 Selected {num_selected} representative samples")
+                if quality_score > 0:
+                    print(f"   Quality score: {quality_score:.3f}")
+                print(f"   These representative samples will be prioritized for grading\n")
 
         # Check if there's a trained model for this question
         model_id = None
@@ -699,9 +794,24 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             precompute_suggestions(0, WINDOW_SIZE)
         print(f"{'='*60}")
 
+        # Create prioritized list of rows to grade (representative samples first)
+        representative_set = set(representative_row_ids)
+        prioritized_rows = []
 
-        # Grade this column for each row
+        # First add representative samples
         for row_idx, row in enumerate(csv_data):
+            row_id = get_row_id(row, session.id_columns)
+            if row_id in representative_set:
+                prioritized_rows.append((row_idx, row))
+
+        # Then add remaining rows
+        for row_idx, row in enumerate(csv_data):
+            row_id = get_row_id(row, session.id_columns)
+            if row_id not in representative_set:
+                prioritized_rows.append((row_idx, row))
+
+        # Grade this column for each row (prioritizing representative samples)
+        for row_idx, row in prioritized_rows:
             # Check if we've reached the threshold for valid grades
             if valid_graded_count >= threshold:
                 print(f"\n✓ Reached {threshold} valid grades for {output_col}!")
@@ -719,7 +829,9 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 continue
 
             print(f"\n{'-'*60}")
-            print(f"Student {row_idx + 1}/{len(csv_data)} | {output_col}")
+            is_representative = row_id in representative_set
+            representative_marker = " 🎯 REPRESENTATIVE SAMPLE" if is_representative else ""
+            print(f"Student {row_idx + 1}/{len(csv_data)} | {output_col}{representative_marker}")
 
             # Show ID columns for reference
             id_info = " | ".join([f"{col}: {row.get(col, 'N/A')}" for col in session.id_columns])
