@@ -3,6 +3,7 @@
 Tentanator - CSV grading assistant with AI fine-tuning support
 """
 
+import asyncio
 import csv
 import json
 import os
@@ -12,7 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from clustering import SamplingAlgorithm, get_samples
 from embeddings import get_embedding
@@ -20,7 +21,7 @@ from embeddings import get_embedding
 dotenv.load_dotenv()
 
 # Initialize OpenAI client globally
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Constants
 NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples to select via clustering (used for kmeans_fixed)
@@ -180,8 +181,8 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
     return session_name
 
 
-def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[str, str]],
-                                   session_name: str) -> None:
+async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[str, str]],
+                                          session_name: str) -> None:
     """
     Pre-generate embeddings for all responses in the CSV data
 
@@ -201,6 +202,10 @@ def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[
 
         print(f"\n  Processing column: {input_column}")
 
+        # Collect all rows that need embeddings
+        tasks = []
+        row_ids_to_process = []
+
         for row in csv_data:
             row_id = get_row_id(row, session.id_columns)
 
@@ -216,18 +221,27 @@ def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[
                 total_skipped += 1
                 continue
 
-            # Generate embedding
-            try:
-                embedding = get_embedding(response_text)
-                session.embeddings_cache[input_column][row_id] = embedding
+            # Create task for generating embedding
+            tasks.append(get_embedding(response_text))
+            row_ids_to_process.append(row_id)
+
+        # Generate all embeddings concurrently
+        if tasks:
+            print(f"    Generating {len(tasks)} embeddings concurrently...")
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for row_id, result in zip(row_ids_to_process, results):
+                if isinstance(result, Exception):
+                    print(f"    ⚠️  Failed for row {row_id}: {result}")
+                    continue
+
+                # Type check: result should be List[float] if not an Exception
+                if isinstance(result, list):
+                    session.embeddings_cache[input_column][row_id] = result
                 total_generated += 1
 
                 if total_generated % 10 == 0:
                     print(f"    Generated {total_generated} embeddings...")
-
-            except (OSError, ValueError, RuntimeError) as e:
-                print(f"    ⚠️  Failed for row {row_id}: {e}")
-                continue
 
     if total_generated > 0:
         print(f"\n✓ Generated {total_generated} embeddings, skipped {total_skipped}")
@@ -236,9 +250,9 @@ def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[
         print(f"✓ All embeddings already cached ({total_skipped} total)")
 
 
-def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
-                                      session: Optional[GradingSession] = None,
-                                      input_column: Optional[str] = None) -> GradedItem:
+async def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
+                                             session: Optional[GradingSession] = None,
+                                             input_column: Optional[str] = None) -> GradedItem:
     """
     Create a GradedItem and ensure embedding is cached
 
@@ -260,7 +274,7 @@ def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
         # Generate embedding if not already cached
         if row_id not in session.embeddings_cache[input_column]:
             try:
-                embedding = get_embedding(input_text)
+                embedding = await get_embedding(input_text)
                 session.embeddings_cache[input_column][row_id] = embedding
             except (OSError, ValueError, RuntimeError) as e:
                 print(f"⚠️  Failed to generate embedding: {e}")
@@ -414,8 +428,8 @@ def load_model_registry() -> Dict[str, Dict[str, Any]]:
     return {}
 
 
-def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
-                            response_text: str) -> Optional[str]:
+async def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
+                                   response_text: str) -> Optional[str]:
     """Get AI-suggested grade from fine-tuned model"""
     try:
         # Build system prompt with exam question
@@ -425,7 +439,7 @@ def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
             system_content = f"You are grading responses for: {question.question_name}"
 
         # Get grade from model
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=model_id,
             messages=[
                 {"role": "system", "content": system_content},
@@ -504,9 +518,9 @@ def select_representative_samples(
         return list(valid_embeddings.keys())[:fallback_n], 0.0, fallback_n
 
 
-def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
-                   threshold: int = GRADING_THRESHOLD,
-                   session_name: Optional[str] = None) -> GradingSession:
+async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
+                          threshold: int = GRADING_THRESHOLD,
+                          session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
@@ -516,7 +530,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
     # Pre-generate embeddings for all responses before grading starts
     if session_name:
-        pregenerate_embeddings_for_csv(session, csv_data, session_name)
+        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
 
     # Load model registry to check for trained models
     model_registry = load_model_registry()
@@ -626,7 +640,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                         response_text = row.get(question.input_column, "N/A")
 
                         # Get AI suggestion
-                        ai_suggestion = get_ai_grade_suggestion(
+                        ai_suggestion = await get_ai_grade_suggestion(
                             model_id, question, response_text
                         )
 
@@ -650,7 +664,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                                 print(f"Removed grade for ID: {removed.row_id}")
                                 save_session(session, session_name)
                                 # Restart the grading process to go back
-                                return grade_questions(session, csv_data, threshold, session_name)
+                                return await grade_questions(session, csv_data, threshold, session_name)
                             if user_input.lower() == 'q':
                                 save_session(session, session_name)
                                 print("\nSaved and exiting...")
@@ -662,7 +676,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                                 final_grade = ai_suggestion
                                 print(f"✓ Accepted: {final_grade}")
 
-                            graded_item = create_graded_item_with_embedding(
+                            graded_item = await create_graded_item_with_embedding(
                                 row_id, response_text, final_grade, session, question.input_column
                             )
                             question.graded_items.append(graded_item)
@@ -676,16 +690,23 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     # Auto-zero any remaining ungraded responses
                     print("\n🔄 Auto-zeroing remaining ungraded responses...")
                     auto_zeroed = 0
+                    graded_ids_set = {item.row_id for item in question.graded_items}
+                    tasks = []
+                    rows_to_grade = []
                     for row in csv_data:
                         row_id = get_row_id(row, session.id_columns)
-                        if row_id not in {item.row_id for item in question.graded_items}:
+                        if row_id not in graded_ids_set:
                             response_text = row.get(question.input_column, "-")
                             # Auto-grade any ungraded response as 0
-                            graded_item = create_graded_item_with_embedding(
+                            tasks.append(create_graded_item_with_embedding(
                                 row_id, response_text, "0", session, question.input_column
-                            )
-                            question.graded_items.append(graded_item)
-                            auto_zeroed += 1
+                            ))
+                            rows_to_grade.append(row_id)
+
+                    if tasks:
+                        graded_items = await asyncio.gather(*tasks)
+                        question.graded_items.extend(graded_items)
+                        auto_zeroed = len(graded_items)
 
                     if auto_zeroed > 0:
                         print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
@@ -712,7 +733,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             ai_suggestion_cache[output_col] = {}
 
         # Pre-compute AI suggestions for rolling window (if model available)
-        def precompute_suggestions(
+        async def precompute_suggestions(
             start_idx: int,
             win_size: int,
             curr_model_id: Optional[str],
@@ -720,9 +741,13 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
             curr_output_col: str,
             curr_question: QuestionGrades
         ):
-            """Pre-compute AI suggestions for upcoming responses"""
+            """Pre-compute AI suggestions for upcoming responses concurrently"""
             if not curr_model_id:
                 return
+
+            # Collect all responses that need AI suggestions
+            tasks = []
+            row_ids_to_compute = []
 
             end_idx = min(start_idx + win_size, len(csv_data))
             for idx in range(start_idx, end_idx):
@@ -742,17 +767,26 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                 if future_response.strip() in ["", "-", "N/A"]:
                     continue
 
-                # Get AI suggestion in background
-                ai_grade = get_ai_grade_suggestion(
+                # Create task for getting AI suggestion
+                tasks.append(get_ai_grade_suggestion(
                     curr_model_id, curr_question, future_response
-                )
-                if ai_grade:
-                    ai_suggestion_cache[curr_output_col][future_row_id] = ai_grade
+                ))
+                row_ids_to_compute.append(future_row_id)
+
+            # Execute all AI grading calls concurrently
+            if tasks:
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                for row_id, ai_grade in zip(row_ids_to_compute, results):
+                    if isinstance(ai_grade, Exception):
+                        continue
+                    # Type check: ai_grade should be str if not an Exception
+                    if ai_grade and isinstance(ai_grade, str):
+                        ai_suggestion_cache[curr_output_col][row_id] = ai_grade
 
         if model_id:
             print("🤖 AI model available - pre-computing suggestions for smoother grading")
             # Pre-load first window
-            precompute_suggestions(0, window_size, model_id, graded_ids, output_col, question)
+            await precompute_suggestions(0, window_size, model_id, graded_ids, output_col, question)
         print(f"{'='*60}")
 
         # Create prioritized list of rows to grade (representative samples first)
@@ -780,7 +814,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
             # Pre-compute suggestions for next window of responses
             if model_id and row_idx % 3 == 0:  # Update window every 3 responses
-                precompute_suggestions(
+                await precompute_suggestions(
                     row_idx + 1, window_size, model_id, graded_ids, output_col, question
                 )
 
@@ -811,7 +845,7 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
 
             # Auto-grade blank or "-" responses as 0
             if response_text.strip() in ["", "-", "N/A"]:
-                graded_item = create_graded_item_with_embedding(
+                graded_item = await create_graded_item_with_embedding(
                     row_id, response_text, "0", session, question.input_column
                 )
                 question.graded_items.append(graded_item)
@@ -854,9 +888,9 @@ def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
                     removed = question.graded_items.pop()
                     print(f"Removed grade for ID: {removed.row_id}")
                     save_session(session, session_name)
-                    return grade_questions(session, csv_data, threshold, session_name)
+                    return await grade_questions(session, csv_data, threshold, session_name)
                 if grade:
-                    graded_item = create_graded_item_with_embedding(
+                    graded_item = await create_graded_item_with_embedding(
                         row_id, response_text, grade, session, question.input_column
                     )
                     question.graded_items.append(graded_item)
@@ -1034,7 +1068,7 @@ def export_to_jsonl(
             jsonl_file.unlink()
 
 
-def main() -> None:
+async def main() -> None:
     """Main function to run the CLI tool."""
     print("=== Tentanator - CSV Grading Assistant ===\n")
 
@@ -1093,8 +1127,8 @@ def main() -> None:
         filepath = Path("exams") / selected_session.csv_file
         csv_data = read_csv_data(filepath)
 
-        session = grade_questions(selected_session, csv_data,
-                                 session_name=current_session_name)
+        session = await grade_questions(selected_session, csv_data,
+                                         session_name=current_session_name)
 
         # Check if we only did manual grading (50) without AI review
         # If so, ask about JSONL export for training
@@ -1189,7 +1223,7 @@ def main() -> None:
     )
 
     # Start grading
-    session = grade_questions(session, csv_data, session_name=session_name)
+    session = await grade_questions(session, csv_data, session_name=session_name)
 
     # Check if we only did manual grading (50) without AI review
     # If so, ask about JSONL export for training
@@ -1208,4 +1242,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
