@@ -61,7 +61,7 @@ def make_excel() -> None:
 
             print(f" Converted: {csv_file.name} -> {excel_filename}")
 
-        except Exception as e:
+        except (OSError, ValueError, pd.errors.ParserError) as e:
             print(f" Error converting {csv_file.name}: {e}")
             continue
 

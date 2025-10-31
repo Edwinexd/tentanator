@@ -5,18 +5,17 @@ Handles uploading training data and managing fine-tuning jobs
 
 import json
 import os
+import shutil
 import time
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
-import asyncio
+
 import dotenv
+from openai import OpenAI
 
 dotenv.load_dotenv()
-
-
-from openai import OpenAI
 
 
 @dataclass
@@ -93,7 +92,8 @@ class OpenAITrainer:
         """Initialize OpenAI client"""
         self.api_key = api_key or os.getenv("OPENAI_API_KEY")
         if not self.api_key:
-            raise ValueError("OpenAI API key not found. Set OPENAI_API_KEY environment variable or pass api_key parameter.")
+            msg = "OpenAI API key not found. Set OPENAI_API_KEY environment variable or pass api_key parameter."
+            raise ValueError(msg)
 
         self.client = OpenAI(api_key=self.api_key)
         self.session_file = ".tentanator_training_session.json"
@@ -109,7 +109,7 @@ class OpenAITrainer:
 
         examples = []
         try:
-            with open(filepath, 'r') as f:
+            with open(filepath, 'r', encoding='utf-8') as f:
                 for line_num, line in enumerate(f, 1):
                     try:
                         example = json.loads(line)
@@ -134,12 +134,13 @@ class OpenAITrainer:
                     except json.JSONDecodeError as e:
                         return False, f"Line {line_num}: Invalid JSON - {e}", 0
 
-        except Exception as e:
+        except (OSError, json.JSONDecodeError) as e:
             return False, f"Error reading file: {e}", 0
 
         # Check minimum examples (OpenAI recommends at least 10)
         if len(examples) < 10:
-            return False, f"Warning: Only {len(examples)} examples found. OpenAI recommends at least 10 for effective fine-tuning.", len(examples)
+            msg = f"Warning: Only {len(examples)} examples found. OpenAI recommends at least 10 for effective fine-tuning."
+            return False, msg, len(examples)
 
         return True, f"Valid: {len(examples)} training examples", len(examples)
 
@@ -150,7 +151,7 @@ class OpenAITrainer:
         if not is_valid and num_examples == 0:
             print(f"❌ Validation failed: {message}")
             return None
-        elif not is_valid:
+        if not is_valid:
             print(f"⚠️  {message}")
             proceed = input("Continue anyway? [y/n]: ").strip().lower()
             if proceed != 'y':
@@ -165,7 +166,6 @@ class OpenAITrainer:
             print(f"📤 Uploading {filepath.name} ({num_examples} examples)...")
         else:
             # Copy to temp file with new name
-            import shutil
             shutil.copy2(filepath, temp_filepath)
             print(f"📤 Uploading as {temp_filepath.name} ({num_examples} examples)...")
 
@@ -191,7 +191,7 @@ class OpenAITrainer:
             print(f"✅ Uploaded successfully! File ID: {response.id}")
             return training_file
 
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             print(f"❌ Upload failed: {e}")
             # Clean up temporary file on error
             if temp_filepath != filepath and temp_filepath.exists():
@@ -234,7 +234,7 @@ class OpenAITrainer:
             print(f"   Status: {response.status}")
             return job
 
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             print(f"❌ Failed to create job: {e}")
             return None
 
@@ -261,7 +261,7 @@ class OpenAITrainer:
                         exam_id=job.exam_id
                     )
                     self.model_registry.save()
-                    print(f"   Added to models.json registry")
+                    print("   Added to models.json registry")
 
             elif response.status == "failed":
                 job.error = response.error.message if response.error else "Unknown error"
@@ -271,14 +271,14 @@ class OpenAITrainer:
 
             return job
 
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             print(f"❌ Failed to check job status: {e}")
             return job
 
     def monitor_job(self, job: FineTuningJob, check_interval: int = 30) -> FineTuningJob:
         """Monitor a fine-tuning job until completion"""
         print(f"📊 Monitoring job {job.job_id}...")
-        print(f"   This may take 10-30 minutes depending on dataset size")
+        print("   This may take 10-30 minutes depending on dataset size")
 
         while job.status not in ["succeeded", "failed", "cancelled"]:
             time.sleep(check_interval)
@@ -292,7 +292,7 @@ class OpenAITrainer:
                 )
                 for event in events.data[:1]:  # Show latest event
                     print(f"   [{event.created_at}] {event.message}")
-            except:
+            except (OSError, RuntimeError, ValueError, AttributeError):
                 pass
 
         return job
@@ -312,7 +312,7 @@ class OpenAITrainer:
 
             return response.choices[0].message.content
 
-        except Exception as e:
+        except (OSError, RuntimeError, ValueError) as e:
             print(f"❌ Failed to test model: {e}")
             return None
 
@@ -360,7 +360,7 @@ class OpenAITrainer:
                 if (idx + 1) % 10 == 0:
                     print(f"   Graded {idx + 1}/{len(csv_data)} responses...")
 
-            except Exception as e:
+            except (OSError, RuntimeError, ValueError) as e:
                 print(f"   Error grading row {idx}: {e}")
                 graded_results.append({
                     "row_index": idx,
@@ -380,7 +380,7 @@ class OpenAITrainer:
             "fine_tuning_jobs": [asdict(j) for j in jobs]
         }
 
-        with open(self.session_file, 'w') as f:
+        with open(self.session_file, 'w', encoding='utf-8') as f:
             json.dump(session_data, f, indent=2)
 
         print(f"💾 Session saved to {self.session_file}")
@@ -412,7 +412,7 @@ class OpenAITrainer:
 
             return files, active_jobs
 
-        except Exception as e:
+        except (OSError, json.JSONDecodeError, KeyError) as e:
             print(f"⚠️  Failed to load session: {e}")
             return [], []
 
@@ -426,7 +426,7 @@ def main():
 
     # Show existing models
     if trainer.model_registry.models:
-        print(f"📚 Registered Models:")
+        print("📚 Registered Models:")
         for model_id, info in trainer.model_registry.models.items():
             print(f"  - {info['question_name']}: {model_id}")
             print(f"    JSONL: {info['jsonl_file']}")
@@ -435,7 +435,7 @@ def main():
     files, jobs = trainer.load_training_session()
 
     if jobs:
-        print(f"\n📋 Existing fine-tuning jobs:")
+        print("\n📋 Existing fine-tuning jobs:")
         updated_jobs = []
         for job in jobs:
             print(f"  - {job.question_name} ({job.job_id}): {job.status}")
@@ -449,7 +449,7 @@ def main():
             if job.status != "cancelled":
                 updated_jobs.append(job)
             else:
-                print(f"    🗑️  Removing cancelled job")
+                print("    🗑️  Removing cancelled job")
 
         if len(updated_jobs) != len(jobs):
             jobs = updated_jobs
@@ -461,7 +461,7 @@ def main():
         jsonl_files = list(training_dir.glob("*.jsonl"))
 
         if jsonl_files:
-            print(f"\n📁 Available JSONL files:")
+            print("\n📁 Available JSONL files:")
             for idx, f in enumerate(jsonl_files, 1):
                 # Check if already used
                 already_used = any(
@@ -489,7 +489,7 @@ def main():
                             if any(info['jsonl_file'] == jsonl_file.name
                                   for info in trainer.model_registry.models.values()):
                                 print(f"❌ {jsonl_file.name} has already been trained!")
-                                print(f"   Model exists in registry. Cannot train again.")
+                                print("   Model exists in registry. Cannot train again.")
                                 return
 
                             # Check if there's an active job for this file

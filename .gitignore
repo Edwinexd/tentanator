@@ -214,3 +214,5 @@ training_data/
 models.json
 .tentanator_sessions/
 backups/
+.claude/
+viz/
