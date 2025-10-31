@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dotenv
 from openai import AsyncOpenAI
 
-from clustering import SamplingAlgorithm, get_samples
+from sampling import SamplingAlgorithm, get_samples
 from embeddings import get_embedding
 
 dotenv.load_dotenv()
@@ -24,22 +24,28 @@ dotenv.load_dotenv()
 client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Constants
-NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples to select via clustering (used for kmeans_fixed)
+NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples (used for kmeans_fixed)
 GRADING_THRESHOLD = 25  # Minimum number of manual grades required
-assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, "Representative samples cannot exceed grading threshold"
+assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, \
+    "Representative samples cannot exceed grading threshold"
 
 # Sampling algorithm configuration
 # Available algorithms:
-#   - "kmeans_auto": Automatically finds optimal k (2-20) by maximizing silhouette score
-#   - "kmeans_fixed": Uses fixed k=NUM_REPRESENTATIVE_SAMPLES for clustering
-#   - "random": Random sampling with n=NUM_REPRESENTATIVE_SAMPLES
-#   - "maximin": Maximin diversity sampling with n=NUM_REPRESENTATIVE_SAMPLES (greedy farthest-first)
-SAMPLING_ALGORITHM: SamplingAlgorithm = "kmeans_fixed"
+#   - SamplingAlgorithm.KMEANS_AUTO: Auto-finds optimal k (2-20) by silhouette score
+#   - SamplingAlgorithm.KMEANS_FIXED: Fixed k=NUM_REPRESENTATIVE_SAMPLES
+#   - SamplingAlgorithm.RANDOM: Random sampling with n=NUM_REPRESENTATIVE_SAMPLES
+#   - SamplingAlgorithm.MAXIMIN: Maximin diversity (greedy farthest-first)
+#   - SamplingAlgorithm.GPTSORT: GPT-based quality sorting (top n=NUM_REPRESENTATIVE_SAMPLES)
+#   - SamplingAlgorithm.IFOREST_GMM: Isolation Forest + Gaussian Mixture Model
+SAMPLING_ALGORITHM: SamplingAlgorithm = SamplingAlgorithm.KMEANS_FIXED
 
 # Base system prompt for grading
-BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade student exam responses.
-Your task is to evaluate the student's answer to the following question and provide a grade.
-Be consistent, fair, and objective in your grading. All respones will be reviewed by a human teacher.
+BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade \
+student exam responses.
+Your task is to evaluate the student's answer to the following question and \
+provide a grade.
+Be consistent, fair, and objective in your grading. All respones will be \
+reviewed by a human teacher.
 
 Exam Question: {exam_question}
 
@@ -459,6 +465,7 @@ async def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
 def select_representative_samples(
     session: GradingSession,
     input_column: str,
+    output_column: Optional[str] = None,
     algorithm: Optional[SamplingAlgorithm] = None,
     n_samples: Optional[int] = None
 ) -> Tuple[List[str], float, int]:
@@ -468,6 +475,7 @@ def select_representative_samples(
     Args:
         session: The GradingSession with cached embeddings
         input_column: The input column to select samples from
+        output_column: The output column (question) being graded (required for gptsort)
         algorithm: Sampling algorithm to use (defaults to SAMPLING_ALGORITHM constant)
         n_samples: Number of samples to select (required for some algorithms, optional for others)
 
@@ -501,13 +509,46 @@ def select_representative_samples(
 
         # If n_samples not specified and algorithm requires it, use NUM_REPRESENTATIVE_SAMPLES
         effective_n_samples = n_samples
-        if effective_n_samples is None and algorithm in ("kmeans_fixed", "random", "maximin"):
+        algorithms_needing_n = (
+            SamplingAlgorithm.KMEANS_FIXED,
+            SamplingAlgorithm.RANDOM,
+            SamplingAlgorithm.MAXIMIN,
+            SamplingAlgorithm.GPTSORT,
+            SamplingAlgorithm.IFOREST_GMM
+        )
+        if effective_n_samples is None and algorithm in algorithms_needing_n:
             effective_n_samples = NUM_REPRESENTATIVE_SAMPLES
+
+        # For gptsort, we need text data and question text
+        text_data = None
+        question_text = None
+        if algorithm == SamplingAlgorithm.GPTSORT:
+            if output_column is None:
+                raise ValueError("output_column is required for gptsort algorithm")
+
+            # Load CSV data to get text responses
+            csv_data = read_csv_data(Path(session.csv_file))
+
+            # Build text_data dict mapping row_id to response text
+            text_data = {}
+            for row in csv_data:
+                row_id = get_row_id(row, session.id_columns)
+                if row_id in valid_embeddings:  # Only include rows with valid embeddings
+                    text_data[row_id] = row.get(input_column, "")
+
+            # Get question text from session
+            if output_column in session.questions:
+                question = session.questions[output_column]
+                question_text = question.exam_question or question.question_name
+            else:
+                question_text = output_column
 
         selected_ids, quality_score, num_selected = get_samples(
             valid_embeddings,
             algorithm=algorithm,
-            n_samples=effective_n_samples
+            n_samples=effective_n_samples,
+            text_data=text_data,
+            question_text=question_text
         )
         return selected_ids, quality_score, num_selected
 
@@ -566,7 +607,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         if valid_graded_count < threshold:
             # Only run sampling if we haven't graded enough samples yet
             representative_row_ids, quality_score, num_selected = select_representative_samples(
-                session, question.input_column
+                session, question.input_column, output_column=output_col
             )
 
             if representative_row_ids:

@@ -33,7 +33,7 @@ python openai_trainer.py
 python make_excel.py
 
 # Lint code
-pylint tentanator.py openai_trainer.py clustering.py embeddings.py make_excel.py
+pylint tentanator.py openai_trainer.py sampling.py embeddings.py make_excel.py
 
 # Check syntax
 python -m py_compile tentanator.py
@@ -52,7 +52,7 @@ python -m py_compile tentanator.py
   - `export_to_jsonl()`: Export training data for fine-tuning
   - `get_ai_grade_suggestion()`: Get AI suggestions from trained models
 - Session persistence in `.tentanator_sessions/` directory
-- Embeddings caching for clustering/sampling
+- Embeddings caching for sampling algorithms
 - Async/await architecture for OpenAI API calls
 
 **openai_trainer.py**
@@ -61,11 +61,12 @@ python -m py_compile tentanator.py
 - Handles JSONL validation, file upload, job creation, and monitoring
 - Maintains `models.json` registry of trained models
 
-**clustering.py**
+**sampling.py**
 - Sample selection algorithms for representative grading
-- Implements: KMeans (auto/fixed k), random sampling, maximin diversity sampling
-- `SamplingAlgorithm` type: `"kmeans_auto" | "kmeans_fixed" | "random" | "maximin"`
+- Implements: KMeans (auto/fixed k), random sampling, maximin diversity sampling, GPT-based quality sorting
+- `SamplingAlgorithm` type: `"kmeans_auto" | "kmeans_fixed" | "random" | "maximin" | "gptsort"`
 - Uses scikit-learn with silhouette scoring for optimal k selection
+- GPTSort uses ChatGPT to sort responses by quality without embeddings
 
 **embeddings.py**
 - OpenAI text embeddings wrapper
@@ -88,8 +89,8 @@ python -m py_compile tentanator.py
 
 In `tentanator.py`:
 - `GRADING_THRESHOLD = 25`: Minimum manual grades required before AI training
-- `NUM_REPRESENTATIVE_SAMPLES = 25`: Number of samples for clustering-based selection
-- `SAMPLING_ALGORITHM`: Choose from `"kmeans_auto"`, `"kmeans_fixed"`, `"random"`, `"maximin"`
+- `NUM_REPRESENTATIVE_SAMPLES = 25`: Number of samples for selection algorithms
+- `SAMPLING_ALGORITHM`: Choose from `"kmeans_auto"`, `"kmeans_fixed"`, `"random"`, `"maximin"`, `"gptsort"`
 - `BASE_SYSTEM_PROMPT`: Template for AI grading prompts
 
 ### Directory Structure
@@ -107,7 +108,7 @@ In `tentanator.py`:
 Sessions are automatically saved after each grade to `.tentanator_sessions/{csv_name}_{timestamp}.json`. Sessions track:
 - ID/input/output column mappings
 - All graded items with timestamps
-- Embeddings cache for clustering
+- Embeddings cache for sampling algorithms
 - Exam question text for each output column
 
 Model registry (`models.json`) maps normalized question names to OpenAI fine-tuned model IDs.
@@ -120,3 +121,4 @@ Model registry (`models.json`) maps normalized question names to OpenAI fine-tun
 - All files must end with a final newline
 - Follow pylint conventions (100 char line length)
 - Async/await for OpenAI API calls
+- Always run and handle pylint checks before finishing edits, this should always be your last task in the todo.
