@@ -2,10 +2,12 @@ from typing import Dict, List, Tuple, Optional, Literal
 
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from sklearn import pipeline
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
+from sklearn.decomposition import PCA
 
 # Type for sampling algorithm selection
 SamplingAlgorithm = Literal["kmeans_auto", "kmeans_fixed", "random", "maximin"]
@@ -63,6 +65,157 @@ def find_optimal_k(
 
     print(f"✓ Optimal k={best_k} with silhouette score={best_score:.3f}")
     return best_k, best_score
+
+
+def visualize_embeddings_2d(
+    data: Dict[str, List[float]],
+    clusters: Optional[Dict[str, int]] = None,
+    representative_ids: Optional[List[str]] = None,
+    title: str = "Embedding Visualization",
+    save_path: Optional[str] = None,
+    show_plot: bool = True
+) -> pd.DataFrame:
+    """
+    Reduce embeddings to 2D using PCA and create matplotlib visualization.
+
+    Args:
+        data: Dictionary mapping IDs to feature vectors
+        clusters: Optional cluster assignments for each ID
+        representative_ids: Optional list of IDs to highlight as representatives
+        title: Plot title
+        save_path: Optional path to save the plot image
+        show_plot: Whether to display the plot (default: True)
+
+    Returns:
+        DataFrame with ID, PC1, PC2, and optional cluster columns
+    """
+    if not data:
+        print("No data to visualize")
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    df = pd.DataFrame.from_dict(data, orient='index')
+    original_dim = df.shape[1]
+
+    # Apply PCA to reduce to 2D
+    pca = PCA(n_components=2)
+    reduced = pca.fit_transform(df)
+
+    # Create results DataFrame
+    result_df = pd.DataFrame({
+        'ID': df.index,
+        'PC1': reduced[:, 0],
+        'PC2': reduced[:, 1]
+    })
+
+    # Add cluster assignments if provided
+    if clusters:
+        result_df['cluster'] = result_df['ID'].map(clusters)
+
+    # Print summary
+    print(f"\n📊 Dimensionality Reduction Results:")
+    print(f"   Original dimensions: {original_dim}")
+    print(f"   Reduced to: 2D")
+    print(f"   Total samples: {len(data)}")
+    print(f"   Variance explained: PC1={pca.explained_variance_ratio_[0]:.1%}, "
+          f"PC2={pca.explained_variance_ratio_[1]:.1%}, "
+          f"Total={sum(pca.explained_variance_ratio_):.1%}")
+
+    # Create the plot
+    _, ax = plt.subplots(figsize=(12, 8))
+
+    if clusters:
+        # Plot with different colors for each cluster
+        unique_clusters = sorted(result_df['cluster'].unique())
+        colors = plt.cm.tab10(np.linspace(0, 1, len(unique_clusters)))
+
+        for i, cluster_id in enumerate(unique_clusters):
+            cluster_data = result_df[result_df['cluster'] == cluster_id]
+            ax.scatter(
+                cluster_data['PC1'],
+                cluster_data['PC2'],
+                c=[colors[i]],
+                label=f'Cluster {cluster_id} (n={len(cluster_data)})',
+                alpha=0.6,
+                s=100,
+                edgecolors='black',
+                linewidth=0.5
+            )
+
+        # Print cluster statistics
+        print(f"\n📦 Cluster Statistics:")
+        cluster_stats = result_df.groupby('cluster').agg({
+            'PC1': ['mean', 'std'],
+            'PC2': ['mean', 'std'],
+            'ID': 'count'
+        }).round(4)
+        cluster_stats.columns = ['PC1_mean', 'PC1_std', 'PC2_mean', 'PC2_std', 'count']
+        print(cluster_stats.to_string())
+    else:
+        # Plot all points with same color
+        ax.scatter(
+            result_df['PC1'],
+            result_df['PC2'],
+            alpha=0.6,
+            s=100,
+            c='steelblue',
+            edgecolors='black',
+            linewidth=0.5,
+            label=f'All samples (n={len(result_df)})'
+        )
+
+    # Highlight representative samples if provided
+    if representative_ids:
+        rep_data = result_df[result_df['ID'].isin(representative_ids)]
+        ax.scatter(
+            rep_data['PC1'],
+            rep_data['PC2'],
+            c='red',
+            marker='*',
+            s=500,
+            edgecolors='darkred',
+            linewidth=2,
+            label=f'Representatives (n={len(rep_data)})',
+            zorder=10
+        )
+
+        # Annotate representative points
+        for _, row in rep_data.iterrows():
+            ax.annotate(
+                row['ID'],
+                (row['PC1'], row['PC2']),
+                xytext=(5, 5),
+                textcoords='offset points',
+                fontsize=8,
+                fontweight='bold',
+                color='darkred'
+            )
+
+        print(f"\n⭐ Representative samples: {representative_ids}")
+
+    # Formatting
+    ax.set_xlabel(f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)", fontsize=12)
+    ax.set_ylabel(f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)", fontsize=12)
+    ax.set_title(title, fontsize=14, fontweight='bold')
+    ax.legend(loc='best', framealpha=0.9)
+    ax.grid(True, alpha=0.3)
+    ax.axhline(y=0, color='k', linestyle='--', alpha=0.3, linewidth=0.5)
+    ax.axvline(x=0, color='k', linestyle='--', alpha=0.3, linewidth=0.5)
+
+    plt.tight_layout()
+
+    # Save if path provided
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f"\n💾 Plot saved to: {save_path}")
+
+    # Show plot
+    if show_plot:
+        plt.show()
+    else:
+        plt.close()
+
+    return result_df
 
 
 def cluster_with_kmean(
