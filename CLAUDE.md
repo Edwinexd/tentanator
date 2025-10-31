@@ -121,4 +121,4 @@ Model registry (`models.json`) maps normalized question names to OpenAI fine-tun
 - All files must end with a final newline
 - Follow pylint conventions (100 char line length)
 - Async/await for OpenAI API calls
-- Always run and handle pylint checks before finishing edits, this should always be your last task in the todo.
+- Always run and handle pylint checks before finishing edits, this should always be your last task in the todo. Always run pylint in the background to not blow up the users terminal.

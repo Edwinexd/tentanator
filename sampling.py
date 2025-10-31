@@ -207,10 +207,13 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
     First identifies outliers using Isolation Forest, then clusters normal points with GMM.
     Returns representatives from both outliers and clusters.
 
+    For exam grading, prioritizes outliers (exceptional or incorrect answers) by selecting
+    ~35% of samples from outliers (minimum 5 if available) and the rest from cluster centers.
+
     Args:
         data: Dictionary mapping IDs to feature vectors
         n_samples: Number of samples to select
-        contamination: Expected proportion of outliers (default: 0.15)
+        contamination: Expected proportion of outliers for Isolation Forest (default: 0.15)
 
     Returns:
         Tuple of (list of selected sample IDs, cluster assignments dict, GMM centers)
@@ -247,8 +250,11 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
     print(f"   Found {n_outliers} outliers ({n_outliers/n_total:.1%}) and {n_normal} normal points")
 
     # Determine how many samples to take from outliers vs clusters
-    # Allocate proportionally to ensure outliers are represented
-    outlier_samples = min(n_outliers, max(1, int(n_samples * contamination)))
+    # For exam grading, prioritize outliers (exceptional/wrong answers)
+    # Aim for 35% of samples to be outliers, with a minimum of 5 if available
+    target_outliers = int(n_samples * 0.35)  # 35% target (more than contamination rate)
+    min_outliers = min(5, n_outliers)  # At least 5, but not more than exist
+    outlier_samples = min(n_outliers, max(min_outliers, target_outliers))
     cluster_samples = n_samples - outlier_samples
 
     print(f"   Selecting {outlier_samples} outliers and {cluster_samples} from clusters")
@@ -343,9 +349,9 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
                     # Take center + evenly distributed points across the distance spectrum
                     # This captures center + ring (periphery) of the cluster
                     step = len(sorted_by_distance) / n_from_cluster
-                    selected_indices = [int(i * step) for i in range(n_from_cluster)]
+                    distance_indices = [int(i * step) for i in range(n_from_cluster)]
                     selected_from_cluster = [cluster_member_indices[sorted_by_distance[i]]
-                                           for i in selected_indices]
+                                           for i in distance_indices]
 
                 cluster_representatives.extend(selected_from_cluster)
 

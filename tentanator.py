@@ -36,8 +36,8 @@ assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, \
 #   - SamplingAlgorithm.RANDOM: Random sampling with n=NUM_REPRESENTATIVE_SAMPLES
 #   - SamplingAlgorithm.MAXIMIN: Maximin diversity (greedy farthest-first)
 #   - SamplingAlgorithm.GPTSORT: GPT-based quality sorting (top n=NUM_REPRESENTATIVE_SAMPLES)
-#   - SamplingAlgorithm.IFOREST_GMM: Isolation Forest + Gaussian Mixture Model
-SAMPLING_ALGORITHM: SamplingAlgorithm = SamplingAlgorithm.KMEANS_FIXED
+#   - SamplingAlgorithm.IFOREST_GMM: Isolation Forest + Gaussian Mixture Model (strongly recommended - see examples in README.md of samplings)
+SAMPLING_ALGORITHM: SamplingAlgorithm = SamplingAlgorithm.IFOREST_GMM
 
 # Base system prompt for grading
 BASE_SYSTEM_PROMPT = """You are an experienced teacher assistant helping grade \
@@ -66,12 +66,23 @@ class GradedItem:
 
 
 @dataclass
+class SamplingResult:
+    """Stores results of a sampling operation"""
+    algorithm: str  # Algorithm used (e.g., "iforest_gmm", "kmeans_auto", etc.)
+    selected_ids: List[str]  # Row IDs selected
+    quality_score: float  # Quality score from the algorithm (if applicable)
+    num_samples: int  # Number of samples selected
+    timestamp: str  # When the sampling was performed
+
+
+@dataclass
 class QuestionGrades:
     """Grades for a single question/output column"""
     question_name: str
     input_column: str
     exam_question: str = ""  # The actual exam question text
     graded_items: List[GradedItem] = field(default_factory=list)
+    sampling_result: Optional[SamplingResult] = None  # Sampling result for this question
 
 
 @dataclass
@@ -174,12 +185,14 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
     }
 
     for col, question in session.questions.items():
-        session_dict["questions"][col] = {
+        question_dict = {
             "question_name": question.question_name,
             "input_column": question.input_column,
             "exam_question": question.exam_question,
-            "graded_items": [asdict(item) for item in question.graded_items]
+            "graded_items": [asdict(item) for item in question.graded_items],
+            "sampling_result": asdict(question.sampling_result) if question.sampling_result else None
         }
+        session_dict["questions"][col] = question_dict
 
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(session_dict, f, indent=2)
@@ -317,11 +330,24 @@ def load_session(session_name: str) -> Optional[GradingSession]:
                     grade=item["grade"],
                     timestamp=item["timestamp"]
                 ))
+            # Load sampling result if present
+            sampling_result = None
+            if "sampling_result" in q_data and q_data["sampling_result"]:
+                sr_data = q_data["sampling_result"]
+                sampling_result = SamplingResult(
+                    algorithm=sr_data["algorithm"],
+                    selected_ids=sr_data["selected_ids"],
+                    quality_score=sr_data["quality_score"],
+                    num_samples=sr_data["num_samples"],
+                    timestamp=sr_data["timestamp"]
+                )
+
             questions[col] = QuestionGrades(
                 question_name=q_data["question_name"],
                 input_column=q_data["input_column"],
                 exam_question=q_data.get("exam_question", ""),
-                graded_items=graded_items
+                graded_items=graded_items,
+                sampling_result=sampling_result
             )
 
         session = GradingSession(
@@ -462,6 +488,51 @@ async def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
         return None
 
 
+def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorithm]:
+    """
+    Ask the user which sampling algorithm to use.
+    Returns None if user wants to skip sampling.
+    """
+    # Check if we already have sampling results for this question
+    if question.sampling_result:
+        print(f"\n📊 Previous sampling: {question.sampling_result.algorithm} "
+              f"(selected {question.sampling_result.num_samples} samples)")
+        response = input(
+            "Use previous sampling? [y]es/[n]o to select new algorithm: "
+        ).strip().lower()
+        if response in ['y', 'yes', '']:
+            return None  # Will use existing sampling
+
+    print("\n📊 Select sampling algorithm for representative samples:")
+    print("1. iforest_gmm - Isolation Forest + GMM (recommended but slow)")
+    print("2. kmeans_auto - KMeans with automatic k optimization")
+    print("3. kmeans_fixed - KMeans with fixed k=25")
+    print("4. random - Random sampling")
+    print("5. maximin - Maximin diversity sampling")
+    print("6. gptsort - GPT-based quality sorting")
+    print("7. [s]kip - Skip sampling (grade all manually)")
+
+    while True:
+        choice = input("Enter choice (1-7 or 's'): ").strip().lower()
+
+        if choice in ['s', 'skip']:
+            return None
+
+        algorithm_map = {
+            '1': SamplingAlgorithm.IFOREST_GMM,
+            '2': SamplingAlgorithm.KMEANS_AUTO,
+            '3': SamplingAlgorithm.KMEANS_FIXED,
+            '4': SamplingAlgorithm.RANDOM,
+            '5': SamplingAlgorithm.MAXIMIN,
+            '6': SamplingAlgorithm.GPTSORT,
+        }
+
+        if choice in algorithm_map:
+            return algorithm_map[choice]
+
+        print("Invalid choice. Please enter 1-7 or 's' to skip.")
+
+
 def select_representative_samples(
     session: GradingSession,
     input_column: str,
@@ -559,30 +630,20 @@ def select_representative_samples(
         return list(valid_embeddings.keys())[:fallback_n], 0.0, fallback_n
 
 
-async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
-                          threshold: int = GRADING_THRESHOLD,
-                          session_name: Optional[str] = None) -> GradingSession:
-    """Interactive grading interface - grades one question at a time across all rows"""
-    print("\n=== Manual Grading Mode ===")
-    print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
-    print("Commands: [q]uit, [s]kip, [b]ack, or enter grade value")
-    print("AI models (if available) will grade remaining responses after threshold is reached")
+async def perform_sampling_for_all_questions(
+    session: GradingSession,
+    threshold: int = GRADING_THRESHOLD,
+    session_name: Optional[str] = None
+) -> None:
+    """
+    Perform sampling for all questions upfront before grading starts.
+    """
+    print("\n=== Sampling Phase ===")
+    print("Setting up representative samples for each question...")
     print("-" * 50)
 
-    # Pre-generate embeddings for all responses before grading starts
-    if session_name:
-        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
-
-    # Load model registry to check for trained models
-    model_registry = load_model_registry()
-
-    # Cache for pre-computed AI suggestions (rolling window)
-    ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
-    window_size = 5  # Pre-compute next 5 responses
-
-    # Process one output column at a time
+    # Initialize questions and perform sampling for each
     for col_idx, output_col in enumerate(session.output_columns):
-
         # Get or create QuestionGrades
         if output_col not in session.questions:
             if col_idx < len(session.input_columns):
@@ -597,24 +658,116 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
         question = session.questions[output_col]
 
-        # Select representative samples (if not already graded enough)
+        # Count only valid (non-blank) graded items
+        valid_graded_count = sum(1 for item in question.graded_items
+                                if item.input_text.strip() not in ["", "-", "N/A"])
+
+        print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
+        print(f"   Already graded: {valid_graded_count}/{threshold} responses")
+
+        if valid_graded_count >= threshold:
+            print("   ✓ Already has enough graded samples")
+            continue
+
+        # Check if we already have sampling results
+        if question.sampling_result:
+            print(f"   ✓ Already has sampling: {question.sampling_result.algorithm} "
+                  f"({question.sampling_result.num_samples} samples)")
+            continue
+
+        # Ask user for sampling algorithm for this question
+        print(f"   Needs {threshold - valid_graded_count} more graded responses")
+        chosen_algorithm = ask_sampling_algorithm(question)
+
+        if chosen_algorithm:
+            # Run sampling with chosen algorithm
+            representative_row_ids, quality_score, num_selected = select_representative_samples(
+                session, question.input_column, output_column=output_col,
+                algorithm=chosen_algorithm
+            )
+
+            if representative_row_ids:
+                # Save sampling results
+                question.sampling_result = SamplingResult(
+                    algorithm=chosen_algorithm.value,
+                    selected_ids=representative_row_ids,
+                    quality_score=quality_score,
+                    num_samples=num_selected,
+                    timestamp=datetime.now().isoformat()
+                )
+
+                # Save session immediately after sampling
+                if session_name:
+                    save_session(session, session_name)
+
+                print(f"   ✓ Selected {num_selected} representative samples")
+                if quality_score > 0:
+                    print(f"     Quality score: {quality_score:.3f}")
+        else:
+            print("   ⚠️  No sampling - will grade all responses manually")
+
+    # Show sampling summary
+    print("\n" + "=" * 50)
+    print("📊 SAMPLING SUMMARY")
+    print("=" * 50)
+
+    for output_col in session.output_columns:
+        question = session.questions[output_col]
+        print(f"\n{output_col}:")
+        if question.sampling_result:
+            print(f"  Algorithm: {question.sampling_result.algorithm}")
+            print(f"  Samples: {question.sampling_result.num_samples}")
+            if question.sampling_result.quality_score > 0:
+                print(f"  Quality: {question.sampling_result.quality_score:.3f}")
+        else:
+            print("  No sampling (manual grading)")
+
+    print("\n" + "=" * 50)
+    input("\nPress Enter to start grading...")
+
+
+async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
+                          threshold: int = GRADING_THRESHOLD,
+                          session_name: Optional[str] = None) -> GradingSession:
+    """Interactive grading interface - grades one question at a time across all rows"""
+    # Pre-generate embeddings for all responses before grading starts
+    if session_name:
+        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
+
+    # Perform sampling for all questions upfront
+    await perform_sampling_for_all_questions(session, threshold, session_name)
+
+    print("\n=== Manual Grading Mode ===")
+    print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
+    print("Commands: [q]uit, [s]kip, [b]ack, or enter grade value")
+    print("AI models (if available) will grade remaining responses after threshold is reached")
+    print("-" * 50)
+
+    # Load model registry to check for trained models
+    model_registry = load_model_registry()
+
+    # Cache for pre-computed AI suggestions (rolling window)
+    ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
+    window_size = 5  # Pre-compute next 5 responses
+
+    # Process one output column at a time
+    for col_idx, output_col in enumerate(session.output_columns):
+
+        # Get question (already initialized in perform_sampling_for_all_questions)
+        question = session.questions[output_col]
+
+        # Use sampling results if available
         representative_row_ids = []
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
                                 if item.input_text.strip() not in ["", "-", "N/A"])
 
-        if valid_graded_count < threshold:
-            # Only run sampling if we haven't graded enough samples yet
-            representative_row_ids, quality_score, num_selected = select_representative_samples(
-                session, question.input_column, output_column=output_col
-            )
-
-            if representative_row_ids:
-                print(f"\n📊 Selected {num_selected} representative samples")
-                if quality_score > 0:
-                    print(f"   Quality score: {quality_score:.3f}")
-                print("   These representative samples will be prioritized for grading\n")
+        if valid_graded_count < threshold and question.sampling_result:
+            # Use the pre-computed sampling results
+            representative_row_ids = question.sampling_result.selected_ids
+            print(f"\n📊 Using {question.sampling_result.algorithm} sampling")
+            print(f"   {question.sampling_result.num_samples} representative samples to grade")
 
         # Check if there's a trained model for this question
         model_id = None

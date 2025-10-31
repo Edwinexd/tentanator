@@ -3,18 +3,19 @@ Test script to visualize embeddings using dimensionality reduction.
 """
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend for thread safety
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
-from sampling import (
-    SamplingAlgorithm, get_samples, gptsort_sampling,
-    cluster_with_kmean, iforest_gmm_sampling
-)
+from sampling import (SamplingAlgorithm, cluster_with_kmean, get_samples,
+                      gptsort_sampling, iforest_gmm_sampling)
 
 
 def visualize_embeddings_2d(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -72,7 +73,7 @@ def visualize_embeddings_2d(  # pylint: disable=too-many-arguments,too-many-posi
           f"Total={sum(pca.explained_variance_ratio_):.1%}")
 
     # Create the plot
-    _, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(12, 8))
 
     if clusters:
         # Plot with different colors for each cluster
@@ -162,8 +163,9 @@ def visualize_embeddings_2d(  # pylint: disable=too-many-arguments,too-many-posi
     # Show plot
     if show_plot:
         plt.show()
-    else:
-        plt.close()
+
+    # Always close the figure to free memory
+    plt.close(fig)
 
     return result_df
 
@@ -255,25 +257,177 @@ def save_representative_texts(  # pylint: disable=too-many-arguments,too-many-po
             f.write("\n")
 
 
-def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
-    """Main visualization test."""
-    # Find the most recent session file
-    sessions_dir = Path('.tentanator_sessions')
+def process_algorithm(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals,too-many-branches
+    algo_name: SamplingAlgorithm,
+    n_param: Optional[int],
+    display_name: str,
+    embeddings: Dict[str, List[float]],
+    question_name: str,
+    safe_question_name: str,
+    viz_dir: Path,
+    df: Optional[pd.DataFrame]
+) -> dict:
+    """
+    Process a single sampling algorithm for a question.
 
-    if not sessions_dir.exists():
-        print("No sessions directory found. Run tentanator.py first to create sessions.")
+    Returns dict with status and any error messages.
+    """
+    try:
+        print(f"  {display_name}...")
+
+        # Special handling for gptsort (uses text, not embeddings)
+        if algo_name == SamplingAlgorithm.GPTSORT:
+            if df is None:
+                return {"status": "skipped", "reason": "CSV data not available"}
+
+            # Build text_data dict from DataFrame
+            text_data = {}
+            for emb_id in embeddings.keys():
+                if emb_id in df.index:
+                    response_text = df.loc[emb_id, question_name]
+                    # Handle NaN values
+                    if not pd.isna(response_text):
+                        text_data[emb_id] = str(response_text)
+                    else:
+                        text_data[emb_id] = ""
+
+            if not text_data:
+                return {"status": "skipped", "reason": "No text data found"}
+
+            # Run gptsort asynchronously
+            sample_ids = asyncio.run(gptsort_sampling(
+                text_data,
+                question_text=question_name,
+                n_samples=n_param
+            ))
+            k = len(sample_ids)
+            clusters = None
+
+        else:
+            # Run sampling algorithm for embedding-based methods
+            if n_param is None:
+                sample_ids, _, k = get_samples(
+                    embeddings,
+                    algorithm=algo_name
+                )
+            else:
+                sample_ids, _, k = get_samples(
+                    embeddings,
+                    algorithm=algo_name,
+                    n_samples=n_param
+                )
+
+            # Get cluster assignments if using kmeans or iforest_gmm
+            clusters = None
+            if algo_name in (
+                SamplingAlgorithm.KMEANS_AUTO,
+                SamplingAlgorithm.KMEANS_FIXED
+            ):
+                clusters, _, _, _ = cluster_with_kmean(embeddings, k)
+            elif algo_name == SamplingAlgorithm.IFOREST_GMM:
+                _, clusters, _ = iforest_gmm_sampling(embeddings, n_param)
+
+        # Visualize with representatives
+        _ = visualize_embeddings_2d(
+            embeddings,
+            clusters=clusters,
+            representative_ids=sample_ids,
+            title=f"{question_name} - {display_name}",
+            save_path=str(viz_dir / f"{safe_question_name}_{algo_name.value}.png"),
+            show_plot=False
+        )
+
+        # Save representative sample texts
+        save_representative_texts(
+            viz_dir=viz_dir,
+            filename_base=f"{safe_question_name}_{algo_name.value}",
+            question_name=question_name,
+            sample_ids=sample_ids,
+            df=df,
+            algorithm_name=display_name
+        )
+
+        print(f"  ✓ {display_name} complete")
+        return {"status": "success"}
+
+    except (ValueError, RuntimeError, OSError, KeyError, IndexError) as e:
+        print(f"  ⚠️  Failed to run {algo_name.value}: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def process_question(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
+    question_name: str,
+    embeddings: Dict[str, List[float]],
+    viz_dir: Path,
+    df: Optional[pd.DataFrame],
+    max_workers: int = 4
+) -> None:
+    """Process a single question with all algorithms in parallel."""
+    print("\n" + "-"*80)
+    print(f"QUESTION: {question_name}")
+    print("-"*80)
+    print(f"Number of student responses: {len(embeddings)}")
+
+    if len(embeddings) < 2:
+        print("Not enough embeddings to visualize (need at least 2)")
         return
 
-    session_files = list(sessions_dir.glob('*.json'))
+    # Sanitize question name for filename
+    safe_question_name = sanitize_filename(question_name)
 
-    if not session_files:
-        print("No session files found. Run tentanator.py first.")
-        return
+    # First, just visualize the raw embeddings
+    print("  Raw Embeddings...")
+    _ = visualize_embeddings_2d(
+        embeddings,
+        title=f"{question_name} - Raw Embeddings",
+        save_path=str(viz_dir / f"{safe_question_name}_raw.png"),
+        show_plot=False
+    )
+    print("  ✓ Raw Embeddings complete")
 
-    print(f"Found {len(session_files)} session file(s)\n")
+    # Now run all sampling algorithms in parallel
+    if len(embeddings) >= 3:  # Need at least 3 for meaningful clustering
+        # Determine number of samples for fixed algorithms (25 or all if less)
+        n_samples = min(25, len(embeddings))
 
-    # Process ALL sessions
-    for session_file in sorted(session_files, key=lambda p: p.stat().st_mtime, reverse=True):  # pylint: disable=too-many-nested-blocks
+        algorithms_to_test = [
+            (SamplingAlgorithm.KMEANS_AUTO, None, "KMeans Auto"),
+            (SamplingAlgorithm.KMEANS_FIXED, n_samples, f"KMeans Fixed (k={n_samples})"),
+            (SamplingAlgorithm.RANDOM, n_samples, f"Random (n={n_samples})"),
+            (SamplingAlgorithm.MAXIMIN, n_samples, f"Maximin (n={n_samples})"),
+            (SamplingAlgorithm.GPTSORT, n_samples, f"GPTSort (n={n_samples})"),
+            (SamplingAlgorithm.IFOREST_GMM, n_samples, f"IForest+GMM (n={n_samples})")
+        ]
+
+        # Run algorithms in parallel
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    process_algorithm,
+                    algo_name,
+                    n_param,
+                    display_name,
+                    embeddings,
+                    question_name,
+                    safe_question_name,
+                    viz_dir,
+                    df
+                ): display_name
+                for algo_name, n_param, display_name in algorithms_to_test
+            }
+
+            for future in as_completed(futures):
+                future.result()  # Wait for completion and propagate exceptions
+                # Result already printed in process_algorithm
+
+
+def process_session(session_file: Path) -> dict:  # pylint: disable=too-many-locals
+    """
+    Process a single session file with all its questions in parallel.
+
+    Returns dict with status and any error messages.
+    """
+    try:
         print("=" * 80)
         print(f"Processing session: {session_file.name}")
         print("=" * 80)
@@ -290,7 +444,7 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
 
         if not embeddings_by_question:
             print("No embeddings found in this session. Skipping...\n")
-            continue
+            return {"status": "skipped", "reason": "No embeddings"}
 
         print(f"Found embeddings for {len(embeddings_by_question)} questions")
 
@@ -317,125 +471,77 @@ def main():  # pylint: disable=too-many-locals,too-many-branches,too-many-statem
             if df is None:
                 print(f"  ⚠️  Could not find CSV file: {csv_file}")
 
-        # Process each question's embeddings
-        for question_name, embeddings in embeddings_by_question.items():
-            print("\n" + "-"*80)
-            print(f"QUESTION: {question_name}")
-            print("-"*80)
-            print(f"Number of student responses: {len(embeddings)}")
+        # Process each question's embeddings in parallel
+        # Use max_workers based on number of questions to avoid overwhelming the system
+        max_workers_questions = min(len(embeddings_by_question), 8)
 
-            if len(embeddings) < 2:
-                print("Not enough embeddings to visualize (need at least 2)")
-                continue
+        with ThreadPoolExecutor(max_workers=max_workers_questions) as executor:
+            # Submit all questions for parallel processing
+            question_futures = {
+                executor.submit(
+                    process_question,
+                    question_name,
+                    embeddings,
+                    viz_dir,
+                    df,
+                    max_workers=6  # Each question runs up to 6 algorithms in parallel
+                ): question_name
+                for question_name, embeddings in embeddings_by_question.items()
+            }
 
-            # Sanitize question name for filename
-            safe_question_name = sanitize_filename(question_name)
-
-            # First, just visualize the raw embeddings
-            print("\n" + "  "*2 + "Raw Embeddings")
-            _ = visualize_embeddings_2d(
-                embeddings,
-                title=f"{question_name} - Raw Embeddings",
-                save_path=str(viz_dir / f"{safe_question_name}_raw.png"),
-                show_plot=False
-            )
-
-            # Now run all sampling algorithms and visualize
-            if len(embeddings) >= 3:  # Need at least 3 for meaningful clustering
-                # Determine number of samples for fixed algorithms (25 or all if less)
-                n_samples = min(25, len(embeddings))
-
-                algorithms_to_test = [
-                    (SamplingAlgorithm.KMEANS_AUTO, None, "KMeans Auto"),
-                    (SamplingAlgorithm.KMEANS_FIXED, n_samples, f"KMeans Fixed (k={n_samples})"),
-                    (SamplingAlgorithm.RANDOM, n_samples, f"Random (n={n_samples})"),
-                    (SamplingAlgorithm.MAXIMIN, n_samples, f"Maximin (n={n_samples})"),
-                    (SamplingAlgorithm.GPTSORT, n_samples, f"GPTSort (n={n_samples})"),
-                    (SamplingAlgorithm.IFOREST_GMM, n_samples, f"IForest+GMM (n={n_samples})")
-                ]
-
-                for algo_name, n_param, display_name in algorithms_to_test:
-                    print("\n" + "  "*2 + f"{display_name}")
-
-                    try:
-                        # Special handling for gptsort (uses text, not embeddings)
-                        if algo_name == SamplingAlgorithm.GPTSORT:
-                            if df is None:
-                                print("  ⚠️  Skipping gptsort: CSV data not available")
-                                continue
-
-                            # Build text_data dict from DataFrame
-                            text_data = {}
-                            for emb_id in embeddings.keys():
-                                if emb_id in df.index:
-                                    response_text = df.loc[emb_id, question_name]
-                                    # Handle NaN values
-                                    if not pd.isna(response_text):
-                                        text_data[emb_id] = str(response_text)
-                                    else:
-                                        text_data[emb_id] = ""
-
-                            if not text_data:
-                                print("  ⚠️  No text data found for gptsort")
-                                continue
-
-                            # Run gptsort asynchronously
-                            sample_ids = asyncio.run(gptsort_sampling(
-                                text_data,
-                                question_text=question_name,
-                                n_samples=n_param
-                            ))
-                            k = len(sample_ids)
-                            clusters = None
-
-                        else:
-                            # Run sampling algorithm for embedding-based methods
-                            if n_param is None:
-                                sample_ids, _, k = get_samples(
-                                    embeddings,
-                                    algorithm=algo_name
-                                )
-                            else:
-                                sample_ids, _, k = get_samples(
-                                    embeddings,
-                                    algorithm=algo_name,
-                                    n_samples=n_param
-                                )
-
-                            # Get cluster assignments if using kmeans or iforest_gmm
-                            clusters = None
-                            if algo_name in (
-                                SamplingAlgorithm.KMEANS_AUTO,
-                                SamplingAlgorithm.KMEANS_FIXED
-                            ):
-                                clusters, _, _, _ = cluster_with_kmean(embeddings, k)
-                            elif algo_name == SamplingAlgorithm.IFOREST_GMM:
-                                _, clusters, _ = iforest_gmm_sampling(embeddings, n_param)
-
-                        # Visualize with representatives
-                        _ = visualize_embeddings_2d(
-                            embeddings,
-                            clusters=clusters,
-                            representative_ids=sample_ids,
-                            title=f"{question_name} - {display_name}",
-                            save_path=str(viz_dir / f"{safe_question_name}_{algo_name.value}.png"),
-                            show_plot=False
-                        )
-
-                        # Save representative sample texts
-                        save_representative_texts(
-                            viz_dir=viz_dir,
-                            filename_base=f"{safe_question_name}_{algo_name.value}",
-                            question_name=question_name,
-                            sample_ids=sample_ids,
-                            df=df,
-                            algorithm_name=display_name
-                        )
-
-                    except (ValueError, RuntimeError, OSError, KeyError, IndexError) as e:
-                        print(f"  ⚠️  Failed to run {algo_name.value}: {e}")
+            # Wait for all questions to complete
+            for future in as_completed(question_futures):
+                try:
+                    future.result()
+                except (ValueError, RuntimeError, OSError, KeyError, IndexError) as e:
+                    question_name = question_futures[future]
+                    print(f"⚠️  Failed to process question '{question_name}': {e}")
 
         print()  # Blank line between sessions
+        return {"status": "success"}
+
+    except (ValueError, RuntimeError, OSError, KeyError, IndexError) as e:
+        print(f"⚠️  Failed to process session {session_file.name}: {e}")
+        return {"status": "error", "error": str(e)}
+
+
+def main():
+    """Main visualization test - processes all sessions in parallel."""
+    # Find the most recent session file
+    sessions_dir = Path('.tentanator_sessions')
+
+    if not sessions_dir.exists():
+        print("No sessions directory found. Run tentanator.py first to create sessions.")
+        return
+
+    session_files = list(sessions_dir.glob('*.json'))
+
+    if not session_files:
+        print("No session files found. Run tentanator.py first.")
+        return
+
+    print(f"Found {len(session_files)} session file(s)\n")
+
+    # Sort by modification time (most recent first)
+    session_files = sorted(session_files, key=lambda p: p.stat().st_mtime, reverse=True)
+
+    # Process ALL sessions in parallel
+    max_workers_sessions = min(len(session_files), 4)  # Limit concurrent sessions
+
+    with ThreadPoolExecutor(max_workers=max_workers_sessions) as executor:
+        # Submit all sessions for parallel processing
+        session_futures = {
+            executor.submit(process_session, session_file): session_file
+            for session_file in session_files
+        }
+
+        # Wait for all sessions to complete
+        for future in as_completed(session_futures):
+            try:
+                future.result()
+            except (ValueError, RuntimeError, OSError, KeyError, IndexError) as e:
+                session_file = session_futures[future]
+                print(f"⚠️  Failed to process session {session_file.name}: {e}")
 
     print("\n" + "="*80)
     print("Visualization complete!")
