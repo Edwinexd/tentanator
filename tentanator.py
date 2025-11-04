@@ -13,10 +13,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
+import numpy as np
 from openai import AsyncOpenAI
 
-from sampling import SamplingAlgorithm, get_samples
 from embeddings import get_embedding
+from sampling import SamplingAlgorithm, get_samples, get_features
 
 dotenv.load_dotenv()
 
@@ -28,6 +29,10 @@ NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples (used for km
 GRADING_THRESHOLD = 25  # Minimum number of manual grades required
 assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, \
     "Representative samples cannot exceed grading threshold"
+
+# Global bank directories for question matching
+GLOBAL_BANK_DIR = Path("global_bank")
+EMBEDDINGS_DIR = Path("global_banks_embeddings")
 
 # Sampling algorithm configuration
 # Available algorithms:
@@ -81,6 +86,7 @@ class QuestionGrades:
     question_name: str
     input_column: str
     exam_question: str = ""  # The actual exam question text
+    sample_answer: str = ""  # Optional sample answer from global bank
     graded_items: List[GradedItem] = field(default_factory=list)
     sampling_result: Optional[SamplingResult] = None  # Sampling result for this question
 
@@ -94,8 +100,305 @@ class GradingSession:
     output_columns: List[str]
     questions: Dict[str, QuestionGrades]  # output_column -> QuestionGrades
     last_updated: str = ""
-    # input_column -> {row_id -> embedding}
+    # input_column -> {row_id -> embedding} (raw embeddings, no question context)
     embeddings_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
+    # input_column -> {row_id -> feature_vector} (features with question context)
+    features_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
+
+
+def validate_grade(grade_str: str) -> Tuple[bool, str]:
+    """
+    Validate that a grade string is numeric.
+
+    Args:
+        grade_str: The grade string to validate
+
+    Returns:
+        Tuple of (is_valid, error_message). If valid, error_message is empty.
+    """
+    if not grade_str:
+        return False, "Grade cannot be empty"
+
+    try:
+        # Try to convert to float (handles both int and float values)
+        float(grade_str)
+        return True, ""
+    except ValueError:
+        return False, f"Invalid grade '{grade_str}' - must be numeric (e.g., 0, 5, 7.5)"
+
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """
+    Calculate cosine similarity between two vectors.
+
+    Args:
+        vec1: First embedding vector
+        vec2: Second embedding vector
+
+    Returns:
+        Cosine similarity score (0-1, higher is more similar)
+    """
+    if not vec1 or not vec2:
+        return 0.0
+
+    arr1 = np.array(vec1)
+    arr2 = np.array(vec2)
+
+    return float(np.dot(arr1, arr2) / (np.linalg.norm(arr1) * np.linalg.norm(arr2)))
+
+
+def load_global_bank_data() -> Tuple[
+    Dict[Tuple[str, str], Dict[str, List[float]]],
+    Dict[Tuple[str, str], Dict[str, Any]]
+]:
+    """
+    Load all embeddings and CSV data from global banks.
+
+    Returns:
+        Tuple of (embeddings_dict, csv_data_dict) where:
+        - embeddings_dict maps (csv_name, id) to {"se": [...], "en": [...]}
+        - csv_data_dict maps (csv_name, id) to full row data
+    """
+    all_embeddings: Dict[Tuple[str, str], Dict[str, List[float]]] = {}
+    all_csv_data: Dict[Tuple[str, str], Dict[str, Any]] = {}
+
+    if not EMBEDDINGS_DIR.exists():
+        return all_embeddings, all_csv_data
+
+    # Load each embeddings file
+    for embeddings_file in EMBEDDINGS_DIR.glob("*_embeddings.json"):
+        csv_name = embeddings_file.stem.replace("_embeddings", "")
+        csv_file = GLOBAL_BANK_DIR / f"{csv_name}.csv"
+
+        # Load embeddings
+        with open(embeddings_file, 'r', encoding='utf-8') as f:
+            embeddings = json.load(f)
+
+        # Load CSV data
+        csv_data = {}
+        if csv_file.exists():
+            with open(csv_file, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    row_id = row.get('id')
+                    if row_id:
+                        csv_data[row_id] = row
+
+        # Store with csv_name prefix for unique keys
+        for question_id, emb in embeddings.items():
+            all_embeddings[(csv_name, question_id)] = emb
+
+        for question_id, data in csv_data.items():
+            all_csv_data[(csv_name, question_id)] = data
+
+    return all_embeddings, all_csv_data
+
+
+async def find_best_matching_questions(
+    answer_samples: List[Tuple[str, str]],  # List of (row_id, answer_text) tuples
+    embeddings: Dict[Tuple[str, str], Dict[str, List[float]]],
+    csv_data: Dict[Tuple[str, str], Dict[str, Any]],
+    language: str = "en",
+    top_k: int = 3,
+    session: Optional[GradingSession] = None,
+    input_column: Optional[str] = None
+) -> Tuple[List[Tuple[float, Tuple[str, str], Dict[str, Any]]], Dict[str, List[float]]]:
+    """
+    Find best matching questions from global bank based on answer samples.
+    Uses raw embeddings (not context-aware features) for comparison.
+
+    Args:
+        answer_samples: List of (row_id, answer_text) tuples to analyze
+        embeddings: Dictionary of all question embeddings
+        csv_data: Dictionary of all question data
+        language: Language to use ("en" or "se")
+        top_k: Number of top matches to return
+        session: Optional grading session to save embeddings to
+        input_column: Optional input column name for caching
+
+    Returns:
+        Tuple of (matches_list, generated_embeddings_dict) where:
+        - matches_list is List of (similarity_score, question_key, question_data) tuples
+        - generated_embeddings_dict maps row_id to embedding
+    """
+    generated_embeddings: Dict[str, List[float]] = {}
+
+    if not answer_samples or not embeddings:
+        return [], generated_embeddings
+
+    # Generate raw embeddings for answer samples (no question context)
+    sample_embeddings = []
+    for row_id, answer in answer_samples[:10]:  # Limit to 10 samples to avoid excessive API calls
+        if answer.strip() and answer.strip() not in ["", "-", "N/A"]:
+            emb = await get_embedding(answer)
+            if emb:
+                sample_embeddings.append(emb)
+                generated_embeddings[row_id] = emb
+
+                # Save to session embeddings cache (raw embeddings)
+                if session and input_column:
+                    if input_column not in session.embeddings_cache:
+                        session.embeddings_cache[input_column] = {}
+                    session.embeddings_cache[input_column][row_id] = emb
+
+    if not sample_embeddings:
+        return [], generated_embeddings
+
+    # Calculate average embedding of all answer samples
+    avg_embedding = np.mean(sample_embeddings, axis=0).tolist()
+
+    # Calculate similarities with all questions
+    similarities = []
+    lang_key = "en" if language == "en" else "se"
+
+    for key, emb_data in embeddings.items():
+        question_embedding = emb_data.get(lang_key)
+
+        if not question_embedding:
+            continue
+
+        similarity = cosine_similarity(avg_embedding, question_embedding)
+        question_data = csv_data.get(key)
+
+        if question_data:
+            similarities.append((similarity, key, question_data))
+
+    # Sort by similarity (descending) and return top K
+    similarities.sort(reverse=True, key=lambda x: x[0])
+    return similarities[:top_k], generated_embeddings
+
+
+async def prompt_question_with_auto_match(
+    session: GradingSession,
+    output_col: str,
+    language: str = "en"
+) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Prompt user for exam question, with auto-matching from global bank as an option.
+
+    Args:
+        session: Current grading session
+        output_col: Output column being graded
+        language: Language preference for matching ("en" or "se")
+
+    Returns:
+        Tuple of (exam_question_text, sample_answer), either can be None if skipped
+    """
+    # Try to auto-match from global bank
+    print("   🔍 Attempting to auto-match question from global bank...")
+
+    try:
+        # Load global bank data
+        embeddings, csv_data = load_global_bank_data()
+
+        if not embeddings:
+            print("   ⚠ No global bank data found. Please enter question manually.")
+        else:
+            # Get answer samples from this output column
+            question = session.questions.get(output_col)
+            if not question:
+                print("   ⚠ Question not found in session.")
+            else:
+                # Load CSV to get answer samples
+                csv_file = Path(session.csv_file)
+                # Try with exams/ prefix if not absolute
+                if not csv_file.exists() and not csv_file.is_absolute():
+                    csv_file = Path("exams") / csv_file
+                if not csv_file.exists():
+                    print(f"   ⚠ CSV file not found: {csv_file}")
+                else:
+                    with open(csv_file, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        rows = list(reader)
+
+                    # Get samples from the INPUT column (student responses), not output column
+                    # Build list of (row_id, answer_text) tuples
+                    answer_samples: List[Tuple[str, str]] = []
+                    input_col = question.input_column
+                    for row in rows:
+                        # Build row_id from ID columns
+                        row_id_parts = [str(row.get(id_col, "")) for id_col in session.id_columns]
+                        row_id = "_".join(row_id_parts)
+
+                        answer = row.get(input_col, "").strip()
+                        if answer and answer not in ["", "-", "N/A"]:
+                            answer_samples.append((row_id, answer))
+                        if len(answer_samples) >= 10:
+                            break
+
+                    if not answer_samples:
+                        print("   ⚠ No valid answer samples found.")
+                    else:
+                        # Find best matches (pass session and input_col for caching)
+                        print(f"   Analyzing {len(answer_samples)} answer samples...")
+                        matches, _ = await find_best_matching_questions(
+                            answer_samples, embeddings, csv_data, language, top_k=3,
+                            session=session, input_column=input_col
+                        )
+
+                        if matches:
+                            print(f"\n   🎯 Found {len(matches)} potential matches:\n")
+                            q_col = "q_en" if language == "en" else "q_se"
+
+                            for i, (score, key, data) in enumerate(matches, 1):
+                                _, q_id = key
+                                question_text = str(data.get(q_col, "N/A")).strip()
+                                # Truncate long questions for display
+                                display_q = question_text[:100] + "..." \
+                                    if len(question_text) > 100 else question_text
+                                print(f"   [{i}] Score: {score:.3f}")
+                                print(f"       ID: {q_id}")
+                                print(f"       Q: {display_q}\n")
+
+                            # Ask user to select
+                            print("   Select a match [1-3], 'm' to enter manually, "
+                                  "or Enter to skip:")
+                            choice = input("   > ").strip().lower()
+
+                            if choice in ['1', '2', '3']:
+                                idx = int(choice) - 1
+                                if 0 <= idx < len(matches):
+                                    _, _, data = matches[idx]
+                                    selected_q = str(data.get(q_col, "")).strip()
+                                    print(f"   ✓ Selected: {selected_q[:80]}...")
+
+                                    # Also extract and offer sample answer
+                                    ans_col = "ans_en" if language == "en" else "ans_se"
+                                    sample_ans = str(data.get(ans_col, "")).strip()
+
+                                    if sample_ans:
+                                        print("\n   Sample answer from global bank:")
+                                        print(f"   {sample_ans[:150]}{'...' if len(sample_ans) > 150 else ''}")
+                                        print("\n   Use this sample answer? [y/n/e to edit] (default: y):")
+                                        ans_choice = input("   > ").strip().lower()
+
+                                        if ans_choice == 'n':
+                                            return selected_q, None
+                                        if ans_choice == 'e':
+                                            print("   📝 Edit the sample answer:")
+                                            edited_ans = input("   > ").strip()
+                                            return selected_q, edited_ans if edited_ans else sample_ans
+                                        # default 'y' or empty
+                                        return selected_q, sample_ans
+                                    else:
+                                        return selected_q, None
+                            elif choice == 'm':
+                                print("   📝 Enter the exam question text manually:")
+                                manual_q = input("   > ").strip()
+                                if manual_q:
+                                    return manual_q, None
+                            elif choice == "":
+                                return None, None
+                        else:
+                            print("   ⚠ No matches found.")
+
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        print(f"   ⚠ Auto-match failed: {e}")
+
+    # Fallback to manual entry
+    print("   📝 Enter the exam question text manually (or press Enter to skip):")
+    manual_q = input("   > ").strip()
+    return (manual_q, None) if manual_q else (None, None)
 
 
 def get_sessions_dir() -> Path:
@@ -134,12 +437,54 @@ def get_sessions_dir() -> Path:
     return sessions_dir
 
 
+def get_cache_filepath(session_name: str) -> Path:
+    """Get the cache file path for a session"""
+    sessions_dir = get_sessions_dir()
+    return sessions_dir / f"{session_name}.cache.json"
+
+
+def save_caches(session_name: str, embeddings_cache: Dict[str, Dict[str, List[float]]],
+                 features_cache: Dict[str, Dict[str, List[float]]]) -> None:
+    """Save embeddings and features caches to a separate file (compact JSON)"""
+    cache_file = get_cache_filepath(session_name)
+    cache_data = {
+        "embeddings_cache": embeddings_cache,
+        "features_cache": features_cache
+    }
+    with open(cache_file, 'w', encoding='utf-8') as f:
+        json.dump(cache_data, f)
+
+
+def load_caches(session_name: str) -> Tuple[Dict[str, Dict[str, List[float]]],
+                                             Dict[str, Dict[str, List[float]]]]:
+    """Load embeddings and features caches from a separate file if it exists"""
+    cache_file = get_cache_filepath(session_name)
+
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r', encoding='utf-8') as f:
+                cache_data = json.load(f)
+            return (
+                cache_data.get("embeddings_cache", {}),
+                cache_data.get("features_cache", {})
+            )
+        except (json.JSONDecodeError, OSError, KeyError) as e:
+            print(f"⚠️  Could not load cache file: {e}")
+
+    # Return empty caches if file doesn't exist or on error
+    return {}, {}
+
+
 def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
     """List all available sessions with their metadata"""
     sessions_dir = get_sessions_dir()
     sessions = []
 
     for session_file in sessions_dir.glob("*.json"):
+        # Skip cache files (e.g., "session.cache.json")
+        if ".cache.json" in session_file.name:
+            continue
+
         try:
             with open(session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -157,7 +502,7 @@ def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
 
 
 def save_session(session: GradingSession, session_name: Optional[str] = None) -> str:
-    """Save the current session to a JSON file"""
+    """Save the current session to a JSON file (caches saved separately)"""
     session.last_updated = datetime.now().isoformat()
 
     # If no session name provided, generate one from CSV filename
@@ -172,7 +517,10 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
     sessions_dir = get_sessions_dir()
     filename = sessions_dir / f"{session_name}.json"
 
-    # Convert to dict for JSON serialization
+    # Save caches to separate file
+    save_caches(session_name, session.embeddings_cache, session.features_cache)
+
+    # Convert to dict for JSON serialization (without caches)
     session_dict = {
         "session_name": session_name,
         "csv_file": session.csv_file,
@@ -180,7 +528,6 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
         "input_columns": session.input_columns,
         "output_columns": session.output_columns,
         "last_updated": session.last_updated,
-        "embeddings_cache": session.embeddings_cache,
         "questions": {}
     }
 
@@ -189,6 +536,7 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
             "question_name": question.question_name,
             "input_column": question.input_column,
             "exam_question": question.exam_question,
+            "sample_answer": question.sample_answer,
             "graded_items": [asdict(item) for item in question.graded_items],
             "sampling_result": asdict(question.sampling_result) if question.sampling_result else None
         }
@@ -203,23 +551,31 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
 async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[str, str]],
                                           session_name: str) -> None:
     """
-    Pre-generate embeddings for all responses in the CSV data
+    Pre-generate feature vectors for all responses in the CSV data.
+    Uses get_features() with question context, saves to session.features_cache.
 
     Args:
-        session: The GradingSession to populate with embeddings
+        session: The GradingSession to populate with feature vectors
         csv_data: List of CSV rows as dictionaries
         session_name: Name of the session for saving
     """
-    print("\n🔢 Pre-generating embeddings for all responses...")
+    print("\n🔢 Pre-generating feature vectors for all responses (with question context)...")
 
     total_generated = 0
     total_skipped = 0
 
     for input_column in session.input_columns:
-        if input_column not in session.embeddings_cache:
-            session.embeddings_cache[input_column] = {}
+        if input_column not in session.features_cache:
+            session.features_cache[input_column] = {}
 
         print(f"\n  Processing column: {input_column}")
+
+        # Find the question text for this input column (use exactly what's saved, no fallback)
+        question_text = None
+        for question in session.questions.values():
+            if question.input_column == input_column:
+                question_text = question.exam_question if question.exam_question else None
+                break
 
         # Collect all rows that need embeddings
         tasks = []
@@ -229,7 +585,7 @@ async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List
             row_id = get_row_id(row, session.id_columns)
 
             # Skip if already cached
-            if row_id in session.embeddings_cache[input_column]:
+            if row_id in session.features_cache[input_column]:
                 total_skipped += 1
                 continue
 
@@ -240,13 +596,13 @@ async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List
                 total_skipped += 1
                 continue
 
-            # Create task for generating embedding
-            tasks.append(get_embedding(response_text))
+            # Create task for generating feature vector with question context
+            tasks.append(get_features(response_text, question_text=question_text))
             row_ids_to_process.append(row_id)
 
-        # Generate all embeddings concurrently
+        # Generate all feature vectors concurrently
         if tasks:
-            print(f"    Generating {len(tasks)} embeddings concurrently...")
+            print(f"    Generating {len(tasks)} feature vectors concurrently...")
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
             for row_id, result in zip(row_ids_to_process, results):
@@ -256,47 +612,55 @@ async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List
 
                 # Type check: result should be List[float] if not an Exception
                 if isinstance(result, list):
-                    session.embeddings_cache[input_column][row_id] = result
+                    session.features_cache[input_column][row_id] = result
                 total_generated += 1
 
                 if total_generated % 10 == 0:
-                    print(f"    Generated {total_generated} embeddings...")
+                    print(f"    Generated {total_generated} feature vectors...")
 
     if total_generated > 0:
-        print(f"\n✓ Generated {total_generated} embeddings, skipped {total_skipped}")
+        print(f"\n✓ Generated {total_generated} feature vectors, skipped {total_skipped}")
         save_session(session, session_name)
     else:
-        print(f"✓ All embeddings already cached ({total_skipped} total)")
+        print(f"✓ All feature vectors already cached ({total_skipped} total)")
 
 
 async def create_graded_item_with_embedding(row_id: str, input_text: str, grade: str,
                                              session: Optional[GradingSession] = None,
                                              input_column: Optional[str] = None) -> GradedItem:
     """
-    Create a GradedItem and ensure embedding is cached
+    Create a GradedItem and ensure feature vector is cached.
+    Uses get_features() with question context.
 
     Args:
         row_id: Unique identifier for the row
         input_text: The student's response text
         grade: The grade assigned
-        session: Optional session to cache embeddings in
-        input_column: Optional column name for embedding cache
+        session: Optional session to cache feature vectors in
+        input_column: Optional column name for feature cache
 
     Returns:
-        GradedItem (embeddings stored separately in session.embeddings_cache)
+        GradedItem (feature vectors stored separately in session.features_cache)
     """
     # Ensure embedding is cached if session provided
     if session and input_column and input_text.strip() and input_text.strip() not in ['-', 'N/A']:
-        if input_column not in session.embeddings_cache:
-            session.embeddings_cache[input_column] = {}
+        if input_column not in session.features_cache:
+            session.features_cache[input_column] = {}
 
-        # Generate embedding if not already cached
-        if row_id not in session.embeddings_cache[input_column]:
+        # Generate feature vector if not already cached
+        if row_id not in session.features_cache[input_column]:
             try:
-                embedding = await get_embedding(input_text)
-                session.embeddings_cache[input_column][row_id] = embedding
+                # Find question text for this column (use exactly what's saved)
+                question_text = None
+                for question in session.questions.values():
+                    if question.input_column == input_column:
+                        question_text = question.exam_question if question.exam_question else None
+                        break
+
+                embedding = await get_features(input_text, question_text=question_text)
+                session.features_cache[input_column][row_id] = embedding
             except (OSError, ValueError, RuntimeError) as e:
-                print(f"⚠️  Failed to generate embedding: {e}")
+                print(f"⚠️  Failed to generate feature vector: {e}")
 
     return GradedItem(
         row_id=row_id,
@@ -307,7 +671,7 @@ async def create_graded_item_with_embedding(row_id: str, input_text: str, grade:
 
 
 def load_session(session_name: str) -> Optional[GradingSession]:
-    """Load a session from a JSON file"""
+    """Load a session from a JSON file (caches loaded separately)"""
     sessions_dir = get_sessions_dir()
     filename = sessions_dir / f"{session_name}.json"
 
@@ -317,6 +681,15 @@ def load_session(session_name: str) -> Optional[GradingSession]:
     try:
         with open(filename, 'r', encoding='utf-8') as f:
             data = json.load(f)
+
+        # Load caches from separate file (or from main file for backward compatibility)
+        embeddings_cache, features_cache = load_caches(session_name)
+
+        # Backward compatibility: if caches are in the main file, use them
+        if not embeddings_cache and "embeddings_cache" in data:
+            embeddings_cache = data.get("embeddings_cache", {})
+        if not features_cache and "features_cache" in data:
+            features_cache = data.get("features_cache", {})
 
         # Reconstruct the session
         questions = {}
@@ -346,6 +719,7 @@ def load_session(session_name: str) -> Optional[GradingSession]:
                 question_name=q_data["question_name"],
                 input_column=q_data["input_column"],
                 exam_question=q_data.get("exam_question", ""),
+                sample_answer=q_data.get("sample_answer", ""),
                 graded_items=graded_items,
                 sampling_result=sampling_result
             )
@@ -357,7 +731,8 @@ def load_session(session_name: str) -> Optional[GradingSession]:
             output_columns=data["output_columns"],
             questions=questions,
             last_updated=data.get("last_updated", ""),
-            embeddings_cache=data.get("embeddings_cache", {})
+            embeddings_cache=embeddings_cache,
+            features_cache=features_cache
         )
 
         return session
@@ -542,9 +917,10 @@ def select_representative_samples(
 ) -> Tuple[List[str], float, int]:
     """
     Select representative samples using specified sampling algorithm.
+    Reads feature vectors from session.features_cache.
 
     Args:
-        session: The GradingSession with cached embeddings
+        session: The GradingSession with cached feature vectors
         input_column: The input column to select samples from
         output_column: The output column (question) being graded (required for gptsort)
         algorithm: Sampling algorithm to use (defaults to SAMPLING_ALGORITHM constant)
@@ -557,12 +933,12 @@ def select_representative_samples(
     if algorithm is None:
         algorithm = SAMPLING_ALGORITHM
 
-    # Get embeddings for this column
-    if input_column not in session.embeddings_cache:
-        print(f"⚠️  No embeddings found for column {input_column}")
+    # Get feature vectors for this column
+    if input_column not in session.features_cache:
+        print(f"⚠️  No feature vectors found for column {input_column}")
         return [], 0.0, 0
 
-    embeddings_dict = session.embeddings_cache[input_column]
+    embeddings_dict = session.features_cache[input_column]
 
     # Filter out empty embeddings
     valid_embeddings = {
@@ -607,12 +983,12 @@ def select_representative_samples(
                 if row_id in valid_embeddings:  # Only include rows with valid embeddings
                     text_data[row_id] = row.get(input_column, "")
 
-            # Get question text from session
+            # Get question text from session (use exactly what's saved, no fallback)
             if output_column in session.questions:
                 question = session.questions[output_column]
-                question_text = question.exam_question or question.question_name
+                question_text = question.exam_question if question.exam_question else None
             else:
-                question_text = output_column
+                question_text = None
 
         selected_ids, quality_score, num_selected = get_samples(
             valid_embeddings,
@@ -632,6 +1008,7 @@ def select_representative_samples(
 
 async def perform_sampling_for_all_questions(
     session: GradingSession,
+    csv_data: List[Dict[str, str]],
     threshold: int = GRADING_THRESHOLD,
     session_name: Optional[str] = None
 ) -> None:
@@ -642,7 +1019,7 @@ async def perform_sampling_for_all_questions(
     print("Setting up representative samples for each question...")
     print("-" * 50)
 
-    # Initialize questions and perform sampling for each
+    # Phase 1: Collect question texts for all questions
     for col_idx, output_col in enumerate(session.output_columns):
         # Get or create QuestionGrades
         if output_col not in session.questions:
@@ -658,11 +1035,53 @@ async def perform_sampling_for_all_questions(
 
         question = session.questions[output_col]
 
+        print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
+
+        # Prompt for exam question text if not already set
+        if not question.exam_question:
+            try:
+                exam_question, sample_answer = await prompt_question_with_auto_match(
+                    session, output_col, language="en"
+                )
+                if exam_question:
+                    question.exam_question = exam_question
+                    print(f"   ✓ Saved question text ({len(exam_question)} chars)")
+                else:
+                    question.exam_question = ""  # Explicitly save empty string
+                    print("   ⊗ No question text saved (feature extraction without context)")
+
+                if sample_answer:
+                    question.sample_answer = sample_answer
+                    print(f"   ✓ Saved sample answer ({len(sample_answer)} chars)")
+
+                # Always save session after auto-match (embeddings may have been generated)
+                if session_name:
+                    save_session(session, session_name)
+            except KeyboardInterrupt:
+                print("\n   ⊗ Skipped - no question text saved")
+                question.exam_question = ""  # Explicitly save empty string
+                # Save session even after keyboard interrupt
+                if session_name:
+                    save_session(session, session_name)
+
+    # Phase 2: Pre-generate feature vectors for all responses (now that we have question texts)
+    if session_name:
+        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
+
+    # Phase 3: Perform sampling for each question
+    print("\n" + "-" * 50)
+    print("Selecting representative samples for each question...")
+    print("-" * 50)
+
+    for col_idx, output_col in enumerate(session.output_columns):
+        question = session.questions[output_col]
+
+        print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
+
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
                                 if item.input_text.strip() not in ["", "-", "N/A"])
 
-        print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
         print(f"   Already graded: {valid_graded_count}/{threshold} responses")
 
         if valid_graded_count >= threshold:
@@ -730,12 +1149,9 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                           threshold: int = GRADING_THRESHOLD,
                           session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
-    # Pre-generate embeddings for all responses before grading starts
-    if session_name:
-        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
-
     # Perform sampling for all questions upfront
-    await perform_sampling_for_all_questions(session, threshold, session_name)
+    # (includes feature generation after question text collection)
+    await perform_sampling_for_all_questions(session, csv_data, threshold, session_name)
 
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
@@ -829,7 +1245,10 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 if use_ai == 'y':
                     print("\nGrading with AI - you can review and modify each suggestion...")
 
-                    for row_idx, row in ungraded_rows:
+                    # Use while loop to allow going back
+                    ai_grading_idx = 0
+                    while ai_grading_idx < len(ungraded_rows):
+                        row_idx, row = ungraded_rows[ai_grading_idx]
                         row_id = get_row_id(row, session.id_columns)
                         response_text = row.get(question.input_column, "N/A")
 
@@ -847,37 +1266,54 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                             print("-" * 40)
                             print(f"\n🤖 AI Grade: {ai_suggestion}")
 
-                            # Let user confirm or modify
-                            prompt = "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
-                            user_input = input(prompt).strip()
+                            # Loop until valid grade or command is provided
+                            while True:
+                                # Let user confirm or modify
+                                prompt = (
+                                    "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
+                                )
+                                user_input = input(prompt).strip()
 
-                            # Handle back command
-                            if user_input.lower() == 'b' and len(question.graded_items) > 0:
-                                # Remove the last graded item
-                                removed = question.graded_items.pop()
-                                print(f"Removed grade for ID: {removed.row_id}")
+                                # Handle back command
+                                if user_input.lower() == 'b' and len(question.graded_items) > 0:
+                                    # Remove the last graded item
+                                    removed = question.graded_items.pop()
+                                    print(f"Removed grade for ID: {removed.row_id}")
+                                    save_session(session, session_name)
+                                    # Go back to previous item instead of restarting
+                                    ai_grading_idx = max(0, ai_grading_idx - 1)
+                                    break
+                                if user_input.lower() == 'q':
+                                    save_session(session, session_name)
+                                    print("\nSaved and exiting...")
+                                    return session
+
+                                # Determine final grade
+                                if user_input:
+                                    # User provided a custom grade - validate it
+                                    is_valid, error_msg = validate_grade(user_input)
+                                    if not is_valid:
+                                        print(f"  ❌ {error_msg}")
+                                        continue  # Ask for grade again
+                                    final_grade = user_input
+                                    print(f"✓ Modified to: {final_grade}")
+                                else:
+                                    # User pressed ENTER - accept AI suggestion
+                                    final_grade = ai_suggestion
+                                    print(f"✓ Accepted: {final_grade}")
+
+                                graded_item = await create_graded_item_with_embedding(
+                                    row_id, response_text, final_grade, session, question.input_column
+                                )
+                                question.graded_items.append(graded_item)
+
+                                # Save after EACH grade for safety
                                 save_session(session, session_name)
-                                # Restart the grading process to go back
-                                return await grade_questions(session, csv_data, threshold, session_name)
-                            if user_input.lower() == 'q':
-                                save_session(session, session_name)
-                                print("\nSaved and exiting...")
-                                return session
-                            if user_input:
-                                final_grade = user_input
-                                print(f"✓ Modified to: {final_grade}")
-                            else:
-                                final_grade = ai_suggestion
-                                print(f"✓ Accepted: {final_grade}")
+                                print(f"💾 Saved (Total graded: {len(question.graded_items)})")
+                                break  # Exit validation loop
 
-                            graded_item = await create_graded_item_with_embedding(
-                                row_id, response_text, final_grade, session, question.input_column
-                            )
-                            question.graded_items.append(graded_item)
-
-                            # Save after EACH grade for safety
-                            save_session(session, session_name)
-                            print(f"💾 Saved (Total graded: {len(question.graded_items)})")
+                        # Move to next item
+                        ai_grading_idx += 1
 
                     print(f"\n✅ Completed AI grading for {output_col}")
 
@@ -1000,11 +1436,15 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 prioritized_rows.append((row_idx, row))
 
         # Grade this column for each row (prioritizing representative samples)
-        for row_idx, row in prioritized_rows:
+        # Use while loop to allow going back
+        manual_grading_idx = 0
+        while manual_grading_idx < len(prioritized_rows):
             # Check if we've reached the threshold for valid grades
             if valid_graded_count >= threshold:
                 print(f"\n✓ Reached {threshold} valid grades for {output_col}!")
                 break
+
+            row_idx, row = prioritized_rows[manual_grading_idx]
 
             # Pre-compute suggestions for next window of responses
             if model_id and row_idx % 3 == 0:  # Update window every 3 responses
@@ -1017,6 +1457,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
             # Skip if already graded
             if row_id in graded_ids:
+                manual_grading_idx += 1
                 continue
 
             print(f"\n{'-'*60}")
@@ -1046,6 +1487,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 print(f"\n✓ Auto-graded as 0 (blank/dash response - not counted toward {threshold} goal)")
                 save_session(session, session_name)
                 # Don't increment valid_graded_count for auto-graded blank responses
+                manual_grading_idx += 1
                 continue
 
             # Show existing value if present in CSV
@@ -1076,19 +1518,34 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     return session
                 if grade.lower() == 's':
                     print("  Skipping this response...")
+                    manual_grading_idx += 1
                     break
                 if grade.lower() == 'b' and len(question.graded_items) > 0:
                     # Remove the last graded item
                     removed = question.graded_items.pop()
                     print(f"Removed grade for ID: {removed.row_id}")
+                    # Update valid count if it was a valid (non-blank) response
+                    if removed.input_text.strip() not in ["", "-", "N/A"]:
+                        valid_graded_count = max(0, valid_graded_count - 1)
+                    # Update graded_ids set
+                    graded_ids.discard(removed.row_id)
                     save_session(session, session_name)
-                    return await grade_questions(session, csv_data, threshold, session_name)
+                    # Go back to previous item instead of restarting
+                    manual_grading_idx = max(0, manual_grading_idx - 1)
+                    break
                 if grade:
+                    # Validate grade is numeric
+                    is_valid, error_msg = validate_grade(grade)
+                    if not is_valid:
+                        print(f"  ❌ {error_msg}")
+                        continue  # Ask for grade again
+
                     graded_item = await create_graded_item_with_embedding(
                         row_id, response_text, grade, session, question.input_column
                     )
                     question.graded_items.append(graded_item)
                     valid_graded_count += 1  # Increment valid count for manually graded items
+                    graded_ids.add(row_id)  # Add to graded_ids set
 
                     # Clear from cache once used
                     if row_id in ai_suggestion_cache.get(output_col, {}):
@@ -1101,6 +1558,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
                     # Save after each grade
                     save_session(session, session_name)
+                    manual_grading_idx += 1
                     break
                 print("  Please enter a grade or command")
 

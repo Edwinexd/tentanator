@@ -6,6 +6,7 @@ they capture the diversity of grade values (point classes) in their samples.
 Finds the minimum number of samples needed for each strategy.
 """
 import asyncio
+import json
 import os
 from typing import Dict, List, Tuple, Set, Optional
 from collections import Counter
@@ -13,19 +14,20 @@ from collections import Counter
 import pandas as pd
 import dotenv
 
-from embeddings import get_embedding
 from sampling import (
     SamplingAlgorithm,
     get_samples,
+    get_features,
 )
 
 dotenv.load_dotenv()
 
 # Configuration
 GRADED_EXAMS_DIR = "graded_exams"
-SAMPLE_SIZES = list(range(5, 35))  # Test sample sizes from 5 to 34
-MIN_SAMPLES_PER_CLASS = 3  # Minimum samples needed per point class
-TARGET_COVERAGE = 1.0  # Must cover all point classes
+SAMPLE_SIZES = list(range(5, 50))  # Test sample sizes from 5 to 49
+MIN_SAMPLES_PER_CLASS = 1  # Minimum samples needed per point class
+MIN_SAMPLES_INCLUDE = 1  # Minimum total samples for a class to be included in criteria
+TARGET_COVERAGE = 1.0  # Must cover all point classes (that meet MIN_SAMPLES_INCLUDE)
 STRATEGIES = [
     SamplingAlgorithm.KMEANS_AUTO,
     SamplingAlgorithm.KMEANS_FIXED,
@@ -35,20 +37,48 @@ STRATEGIES = [
 ]
 
 
-async def get_embeddings_for_responses(
-    responses: Dict[str, str]
+def load_sampling_config() -> Tuple[Dict[str, Dict[str, str]], Dict[str, Dict[str, str]]]:
+    """
+    Load question texts and sample answers from config file.
+
+    Returns:
+        Tuple of (question_texts, sample_answers) dictionaries
+    """
+    config_path = "test_sampling_config.json"
+    if os.path.exists(config_path):
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = json.load(f)
+            return config.get("question_texts", {}), config.get("sample_answers", {})
+    return {}, {}
+
+
+# Load question texts and sample answers from config file (if it exists)
+# Map CSV filename -> question name -> text/answer
+# If not specified, will use question name only
+QUESTION_TEXTS, SAMPLE_ANSWERS = load_sampling_config()
+
+
+async def get_features_for_responses(
+    responses: Dict[str, str],
+    question_text: Optional[str] = None,
+    sample_answer: Optional[str] = None
 ) -> Dict[str, List[float]]:
     """
-    Get embeddings for all responses.
+    Get feature vectors for all responses.
 
     Args:
         responses: Dictionary mapping IDs to response text
+        question_text: Optional question text for context
+        sample_answer: Optional sample answer for context
 
     Returns:
-        Dictionary mapping IDs to embedding vectors
+        Dictionary mapping IDs to feature vectors
     """
-    # Create tasks for all embeddings
-    tasks = [get_embedding(text) for text in responses.values()]
+    # Create tasks for all feature vectors
+    tasks = [
+        get_features(text, question_text=question_text, sample_answer=sample_answer)
+        for text in responses.values()
+    ]
     embeddings_list = await asyncio.gather(*tasks)
 
     # Map back to IDs
@@ -108,11 +138,12 @@ def load_graded_data(
     return questions_data
 
 
-def analyze_point_coverage(
+def analyze_point_coverage(  # pylint: disable=too-many-locals
     selected_ids: List[str],
     points_dict: Dict[str, float],
     min_samples_per_class: int,
-) -> Tuple[Set[float], float, bool, Dict[float, int]]:
+    min_samples_include: int,
+) -> Tuple[Set[float], float, bool, Dict[float, int], Set[float]]:
     """
     Analyze how well a sample covers different point classes.
 
@@ -120,33 +151,42 @@ def analyze_point_coverage(
         selected_ids: List of selected student IDs
         points_dict: Dictionary mapping all student IDs to points
         min_samples_per_class: Minimum samples required per class
+        min_samples_include: Minimum total samples for a class to be included in criteria
 
     Returns:
         Tuple of (
             set of unique points in sample,
-            coverage ratio,
-            meets_criteria (all classes have min samples or all available samples),
-            dict mapping point value to count in sample
+            coverage ratio (of included classes),
+            meets_criteria (all included classes have min samples or all available),
+            dict mapping point value to count in sample,
+            set of excluded point values (classes with < min_samples_include)
         )
     """
     # Count all available samples per point class
     all_points_counter = Counter(points_dict.values())
     all_unique_points = set(all_points_counter.keys())
 
+    # Filter classes based on min_samples_include
+    included_classes = {
+        pt for pt in all_unique_points
+        if all_points_counter[pt] >= min_samples_include
+    }
+    excluded_classes = all_unique_points - included_classes
+
     # Count selected samples per point class
     selected_points_list = [points_dict[id_] for id_ in selected_ids if id_ in points_dict]
     selected_points_counter = Counter(selected_points_list)
     selected_unique_points = set(selected_points_counter.keys())
 
-    # Calculate coverage ratio
+    # Calculate coverage ratio (only for included classes)
     coverage_ratio = (
-        len(selected_unique_points) / len(all_unique_points)
-        if all_unique_points else 0.0
+        len(selected_unique_points & included_classes) / len(included_classes)
+        if included_classes else 0.0
     )
 
-    # Check if criteria is met: each class has min samples OR all available samples
+    # Check if criteria is met: each INCLUDED class has min samples OR all available samples
     meets_criteria = True
-    for point_value in all_unique_points:
+    for point_value in included_classes:
         available_count = all_points_counter[point_value]
         selected_count = selected_points_counter.get(point_value, 0)
         required_count = min(min_samples_per_class, available_count)
@@ -155,7 +195,13 @@ def analyze_point_coverage(
             meets_criteria = False
             break
 
-    return selected_unique_points, coverage_ratio, meets_criteria, dict(selected_points_counter)
+    return (
+        selected_unique_points,
+        coverage_ratio,
+        meets_criteria,
+        dict(selected_points_counter),
+        excluded_classes
+    )
 
 
 async def test_strategy_with_sample_size(  # pylint: disable=too-many-arguments,too-many-positional-arguments
@@ -164,9 +210,9 @@ async def test_strategy_with_sample_size(  # pylint: disable=too-many-arguments,
     embeddings_dict: Dict[str, List[float]],
     responses_dict: Dict[str, str],
     points_dict: Dict[str, float],
-    question_name: str,
+    question_text: str,
     min_samples_per_class: int,
-) -> Optional[Tuple[float, bool, Dict[float, int], int]]:
+) -> Optional[Tuple[float, bool, Dict[float, int], int, Set[float]]]:
     """
     Test a single strategy with a specific sample size.
 
@@ -176,11 +222,11 @@ async def test_strategy_with_sample_size(  # pylint: disable=too-many-arguments,
         embeddings_dict: Embeddings for all responses
         responses_dict: Response text for all responses
         points_dict: Points for all responses
-        question_name: Name of the question
+        question_text: Text of the question (for GPTSort)
         min_samples_per_class: Minimum samples required per class
 
     Returns:
-        Tuple of (coverage_ratio, meets_criteria, class_counts, num_selected) or None if error
+        Tuple of (coverage, meets_criteria, class_counts, num_selected, excluded) or None
     """
     try:
         if strategy == SamplingAlgorithm.KMEANS_AUTO:
@@ -195,7 +241,7 @@ async def test_strategy_with_sample_size(  # pylint: disable=too-many-arguments,
                 algorithm=strategy,
                 n_samples=n_samples,
                 text_data=responses_dict,
-                question_text=question_name,
+                question_text=question_text,
             )
         else:
             # Other strategies require n_samples
@@ -206,16 +252,17 @@ async def test_strategy_with_sample_size(  # pylint: disable=too-many-arguments,
             )
 
         # Analyze coverage
-        _, coverage_ratio, meets_criteria, class_counts = analyze_point_coverage(
-            selected_ids, points_dict, min_samples_per_class
+        _, coverage_ratio, meets_criteria, class_counts, excluded = analyze_point_coverage(
+            selected_ids, points_dict, min_samples_per_class, MIN_SAMPLES_INCLUDE
         )
-        return coverage_ratio, meets_criteria, class_counts, num_selected
+        return coverage_ratio, meets_criteria, class_counts, num_selected, excluded
 
     except Exception:  # pylint: disable=broad-except
         return None
 
 
-async def test_sampling_for_question(  # pylint: disable=too-many-locals
+async def test_sampling_for_question(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements,too-many-nested-blocks
+    csv_file: str,
     question_name: str,
     responses_dict: Dict[str, str],
     points_dict: Dict[str, float],
@@ -225,6 +272,7 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals
     Test all sampling strategies with different sample sizes for a single question.
 
     Args:
+        csv_file: Name of the CSV file being processed
         question_name: Name of the question
         responses_dict: Maps student ID to response text
         points_dict: Maps student ID to points awarded
@@ -233,10 +281,22 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals
     Returns:
         Dictionary mapping strategy name to {sample_size: (coverage, meets_criteria, counts, num)}
     """
-    # Get embeddings for all responses
-    print(f"\nGetting embeddings for {len(responses_dict)} responses...")
-    embeddings_dict = await get_embeddings_for_responses(responses_dict)
-    print(f"✓ Got {len(embeddings_dict)} embeddings")
+    # Get question text and sample answer from config (if available)
+    csv_questions = QUESTION_TEXTS.get(csv_file, {})
+    question_text = csv_questions.get(question_name, question_name)
+    csv_answers = SAMPLE_ANSWERS.get(csv_file, {})
+    sample_answer = csv_answers.get(question_name, None)
+
+    # Get feature vectors for all responses
+    print(f"\nGetting feature vectors for {len(responses_dict)} responses...")
+    if question_text != question_name or sample_answer:
+        print(f"   Using question context: {question_text[:80]}...")
+        if sample_answer:
+            print(f"   Using sample answer: {sample_answer[:80]}...")
+    embeddings_dict = await get_features_for_responses(
+        responses_dict, question_text=question_text, sample_answer=sample_answer
+    )
+    print(f"✓ Got {len(embeddings_dict)} feature vectors")
 
     # Calculate unique points for coverage display
     unique_points = set(points_dict.values())
@@ -252,10 +312,10 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals
         if strategy == SamplingAlgorithm.KMEANS_AUTO:
             result = await test_strategy_with_sample_size(
                 strategy, 0, embeddings_dict, responses_dict,
-                points_dict, question_name, min_samples_per_class
+                points_dict, question_text, min_samples_per_class
             )
             if result:
-                coverage_ratio, meets_criteria, class_counts, num_selected = result
+                coverage_ratio, meets_criteria, class_counts, num_selected, excluded = result
                 results[strategy.value][num_selected] = (
                     coverage_ratio, meets_criteria, class_counts, num_selected
                 )
@@ -268,13 +328,18 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals
                     selected = class_counts.get(pt, 0)
                     available = all_points_counter[pt]
                     needed = min(min_samples_per_class, available)
-                    class_marker = "✓" if selected >= needed else "✗"
-                    class_status_parts.append(f"{pt}:{selected}/{needed}{class_marker}")
+                    if pt in excluded:
+                        class_status_parts.append(f"{pt}:{selected}/{needed}⊗")
+                    else:
+                        class_marker = "✓" if selected >= needed else "✗"
+                        class_status_parts.append(f"{pt}:{selected}/{needed}{class_marker}")
                 class_status = ", ".join(class_status_parts)
 
                 print(f"  {marker} Selected {num_selected} samples, "
                       f"Coverage: {coverage_ratio:.1%}")
                 print(f"     Classes: [{class_status}]")
+                if excluded:
+                    print(f"     Excluded (< {MIN_SAMPLES_INCLUDE} total): {sorted(excluded)}")
         else:
             # Test with different sample sizes
             for n_samples in SAMPLE_SIZES:
@@ -285,29 +350,37 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals
                 print(f"  Testing with n={n_samples} samples...")
                 result = await test_strategy_with_sample_size(
                     strategy, n_samples, embeddings_dict, responses_dict,
-                    points_dict, question_name, min_samples_per_class
+                    points_dict, question_text, min_samples_per_class
                 )
                 if result:
-                    coverage_ratio, meets_criteria, class_counts, num_selected = result
+                    coverage_ratio, meets_criteria, class_counts, num_selected, excluded = result
                     results[strategy.value][n_samples] = (
                         coverage_ratio, meets_criteria, class_counts, num_selected
                     )
-                    n_covered = int(coverage_ratio * len(unique_points))
+                    # Calculate included classes for correct display
+                    all_points_counter = Counter(points_dict.values())
+                    included_classes = {
+                        pt for pt in unique_points
+                        if all_points_counter[pt] >= MIN_SAMPLES_INCLUDE
+                    }
+                    n_covered = int(coverage_ratio * len(included_classes))
                     marker = "✓" if meets_criteria else "✗"
 
                     # Build per-class status string
-                    all_points_counter = Counter(points_dict.values())
                     class_status_parts = []
                     for pt in sorted(unique_points):
                         selected = class_counts.get(pt, 0)
                         available = all_points_counter[pt]
                         needed = min(min_samples_per_class, available)
-                        class_marker = "✓" if selected >= needed else "✗"
-                        class_status_parts.append(f"{pt}:{selected}/{needed}{class_marker}")
+                        if pt in excluded:
+                            class_status_parts.append(f"{pt}:{selected}/{needed}⊗")
+                        else:
+                            class_marker = "✓" if selected >= needed else "✗"
+                            class_status_parts.append(f"{pt}:{selected}/{needed}{class_marker}")
                     class_status = ", ".join(class_status_parts)
 
                     print(f"  {marker} Coverage: {coverage_ratio:.1%} "
-                          f"({n_covered}/{len(unique_points)} classes)")
+                          f"({n_covered}/{len(included_classes)} included classes)")
                     print(f"     Classes: [{class_status}]")
 
     return results
@@ -384,7 +457,7 @@ async def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,t
             print(f"Distribution: {dict(sorted(point_counts.items()))}")
 
             results = await test_sampling_for_question(
-                question_name, responses_dict, points_dict, MIN_SAMPLES_PER_CLASS
+                csv_file, question_name, responses_dict, points_dict, MIN_SAMPLES_PER_CLASS
             )
             all_results.append((
                 csv_file, question_name, len(responses_dict),
@@ -432,16 +505,20 @@ async def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,t
     print("="*80)
 
     # Aggregate minimum samples needed across all questions
-    strategy_min_samples = {strategy.value: [] for strategy in STRATEGIES}
-    strategy_coverages = {
-        strategy.value: {size: [] for size in SAMPLE_SIZES}
-        for strategy in STRATEGIES
-    }
+    # Build dynamically from results to handle variant strategy names
+    strategy_min_samples = {}
+    strategy_coverages = {}
 
     for _, _, _, _, _, results in all_results:
         for strategy_name, results_by_size in results.items():
             if not results_by_size:
                 continue
+
+            # Initialize if not seen before
+            if strategy_name not in strategy_min_samples:
+                strategy_min_samples[strategy_name] = []
+            if strategy_name not in strategy_coverages:
+                strategy_coverages[strategy_name] = {size: [] for size in SAMPLE_SIZES}
 
             # Track minimum samples needed
             min_samples = find_min_samples_for_target(results_by_size)
@@ -455,8 +532,7 @@ async def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,t
 
     print(f"\nMinimum samples to meet criteria "
           f"({MIN_SAMPLES_PER_CLASS} samples/class, {TARGET_COVERAGE:.0%} coverage):")
-    for strategy in STRATEGIES:
-        strategy_name = strategy.value
+    for strategy_name in sorted(strategy_min_samples.keys()):
         min_samples = strategy_min_samples[strategy_name]
 
         if min_samples:
@@ -464,26 +540,25 @@ async def main() -> None:  # pylint: disable=too-many-locals,too-many-branches,t
             min_of_min = min(min_samples)
             max_of_min = max(min_samples)
             success_rate = len(min_samples) / len(all_results)
-            print(f"  {strategy_name:15s}: avg={avg_min:5.1f}, "
+            print(f"  {strategy_name:20s}: avg={avg_min:5.1f}, "
                   f"min={min_of_min:2d}, max={max_of_min:2d} "
                   f"(achieved in {success_rate:.0%} of questions)")
         else:
-            print(f"  {strategy_name:15s}: Criteria not met in any question")
+            print(f"  {strategy_name:20s}: Criteria not met in any question")
 
     print("\nAverage coverage by strategy and sample size (selected sizes):")
     # Show subset of sample sizes for cleaner output
     display_sizes = [5, 10, 15, 20, 25, 30]
     display_sizes = [s for s in display_sizes if s in SAMPLE_SIZES]
 
-    print(f"{'Strategy':<15s} ", end="")
+    print(f"{'Strategy':<20s} ", end="")
     for size in display_sizes:
         print(f"n={size:2d}  ", end="")
     print()
     print("-" * 80)
 
-    for strategy in STRATEGIES:
-        strategy_name = strategy.value
-        print(f"{strategy_name:<15s} ", end="")
+    for strategy_name in sorted(strategy_coverages.keys()):
+        print(f"{strategy_name:<20s} ", end="")
 
         for size in display_sizes:
             coverages = strategy_coverages[strategy_name][size]

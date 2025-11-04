@@ -20,6 +20,8 @@ from sklearn.mixture import GaussianMixture
 from openai import AsyncOpenAI, APIError, APIConnectionError
 import dotenv
 
+from embeddings import get_embedding
+
 dotenv.load_dotenv()
 
 
@@ -34,6 +36,43 @@ class SamplingAlgorithm(str, Enum):
 
 # Initialize OpenAI client forf GPTSort algorithm
 openai_client = AsyncOpenAI()
+
+# 'spherical' - Fastest  (1 parameter per component)
+# 'diag'      - Fast     (d parameters per component)
+# 'tied'      - Slow     (d² parameters, shared across components)
+# 'full'      - Slowest  (d² parameters per component)
+GMM_COVARIANCE = "diag"  # Options: 'full', 'tied', 'diag', 'spherical'
+
+
+async def get_features(
+    response: str,
+    question_text: Optional[str] = None,
+    sample_answer: Optional[str] = None
+) -> List[float]:
+    """
+    Extract feature vector from a response text.
+
+    Currently uses OpenAI embeddings. This abstraction allows for easy swapping
+    of feature extraction methods in the future.
+
+    Args:
+        response: The student's response text
+        question_text: Optional question text for context
+        sample_answer: Optional sample answer for context
+
+    Returns:
+        Feature vector as a list of floats
+    """
+    # Currently just uses embeddings, but question_text and sample_answer
+    # could be used in future implementations (e.g., concatenating for context)
+    if question_text is None or sample_answer is None:
+        return await get_embedding(response)
+
+
+    _ = question_text  # Unused for now
+    _ = sample_answer  # Unused for now
+
+    return await get_embedding(response)
 
 
 def find_optimal_k(
@@ -199,7 +238,10 @@ def maximin_sampling(  # pylint: disable=too-many-locals
 
 
 def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,too-many-statements
-    data: Dict[str, List[float]], n_samples: int, contamination: float = 0.15
+    data: Dict[str, List[float]],
+    n_samples: int,
+    contamination: float = 0.15,
+    target_outliers: float = 0.15
 ) -> Tuple[List[str], Dict[str, int], np.ndarray]:
     """
     Select samples using Isolation Forest outlier detection + Gaussian Mixture Model clustering.
@@ -214,6 +256,7 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
         data: Dictionary mapping IDs to feature vectors
         n_samples: Number of samples to select
         contamination: Expected proportion of outliers for Isolation Forest (default: 0.15)
+        target_outliers: Target proportion of outlier samples to select (default: 0.35)
 
     Returns:
         Tuple of (list of selected sample IDs, cluster assignments dict, GMM centers)
@@ -251,10 +294,8 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
 
     # Determine how many samples to take from outliers vs clusters
     # For exam grading, prioritize outliers (exceptional/wrong answers)
-    # Aim for 35% of samples to be outliers, with a minimum of 5 if available
-    target_outliers = int(n_samples * 0.35)  # 35% target (more than contamination rate)
     min_outliers = min(5, n_outliers)  # At least 5, but not more than exist
-    outlier_samples = min(n_outliers, max(min_outliers, target_outliers))
+    outlier_samples = min(n_outliers, max(min_outliers, int(n_samples * target_outliers)))
     cluster_samples = n_samples - outlier_samples
 
     print(f"   Selecting {outlier_samples} outliers and {cluster_samples} from clusters")
@@ -292,7 +333,7 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
             for n_comp in test_components:
                 gmm = GaussianMixture(
                     n_components=n_comp,
-                    covariance_type='full',
+                    covariance_type=GMM_COVARIANCE,
                     random_state=42,
                     max_iter=100
                 )
@@ -308,7 +349,7 @@ def iforest_gmm_sampling(  # pylint: disable=too-many-locals,too-many-branches,t
         # Fit GMM with optimal components
         gmm = GaussianMixture(
             n_components=optimal_n_components,
-            covariance_type='full',
+            covariance_type=GMM_COVARIANCE,
             random_state=42,
             max_iter=100
         )
@@ -752,7 +793,9 @@ def get_samples(  # pylint: disable=too-many-return-statements,too-many-branches
 
         n_samples = min(n_samples, n_total)
 
-        selected_ids, _, _ = iforest_gmm_sampling(data, n_samples)
+        selected_ids, _, _ = iforest_gmm_sampling(
+            data, n_samples, contamination=0.15, target_outliers=0.15
+        )
         return selected_ids, 0.0, len(selected_ids)  # No quality score for IForest+GMM
 
     raise ValueError(f"Unknown algorithm: {algorithm}")
