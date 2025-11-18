@@ -49,6 +49,7 @@ class FineTuningJob:
     training_file: str  # JSONL file used for training
     question_name: str  # Question being trained
     exam_id: str = ""  # Exam identifier
+    global_question_id: Optional[str] = None  # Global question bank ID
     finished_at: Optional[str] = None
     fine_tuned_model: Optional[str] = None
     error: Optional[str] = None
@@ -59,13 +60,15 @@ class ModelRegistry:
     """Registry of fine-tuned models"""
     models: Dict[str, Dict[str, Any]]  # model_id -> model info
 
-    def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str, exam_id: str = ""):
+    def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str,
+                  exam_id: str = "", global_question_id: Optional[str] = None):
         """Add a model to the registry"""
         self.models[model_id] = {
             "model_id": model_id,
             "jsonl_file": jsonl_file,
             "question_name": question_name,
             "exam_id": exam_id,  # Which exam this model was trained on
+            "global_question_id": global_question_id,  # Global question bank ID for cross-exam reuse
             "job_id": job_id,
             "created_at": datetime.now().isoformat()
         }
@@ -201,7 +204,8 @@ class OpenAITrainer:
     def create_fine_tuning_job(self, training_file: TrainingFile,
                               jsonl_filename: str,
                               config: FineTuningConfig,
-                              exam_id: str = "") -> Optional[FineTuningJob]:
+                              exam_id: str = "",
+                              global_question_id: Optional[str] = None) -> Optional[FineTuningJob]:
         """Create a fine-tuning job with uploaded file"""
         print(f"🚀 Creating fine-tuning job for {training_file.question_name}...")
 
@@ -227,7 +231,8 @@ class OpenAITrainer:
                 created_at=datetime.now().isoformat(),
                 training_file=jsonl_filename,
                 question_name=training_file.question_name,
-                exam_id=exam_id
+                exam_id=exam_id,
+                global_question_id=global_question_id
             )
 
             print(f"✅ Fine-tuning job created! Job ID: {response.id}")
@@ -258,10 +263,13 @@ class OpenAITrainer:
                         jsonl_file=job.training_file,
                         question_name=job.question_name,
                         job_id=job.job_id,
-                        exam_id=job.exam_id
+                        exam_id=job.exam_id,
+                        global_question_id=job.global_question_id
                     )
                     self.model_registry.save()
                     print("   Added to models.json registry")
+                    if job.global_question_id:
+                        print(f"   🔗 Linked to global question ID: {job.global_question_id}")
 
             elif response.status == "failed":
                 job.error = response.error.message if response.error else "Unknown error"
@@ -463,23 +471,119 @@ def main():
         if jsonl_files:
             print("\n📁 Available JSONL files:")
             for idx, f in enumerate(jsonl_files, 1):
-                # Check if already used
-                already_used = any(
+                # Check if already trained
+                already_trained = any(
                     info['jsonl_file'] == f.name
                     for info in trainer.model_registry.models.values()
                 )
-                status = " ✅ (already trained)" if already_used else ""
+                # Check if actively training
+                active_job = next(
+                    (job for job in jobs
+                     if job.training_file == f.name
+                     and job.status in ["running", "created", "validating_files", "queued"]),
+                    None
+                )
+
+                if already_trained:
+                    status = " ✅ (trained)"
+                elif active_job:
+                    status = f" 🔄 ({active_job.status})"
+                else:
+                    status = ""
+
                 print(f"  {idx}. {f.name}{status}")
 
-            # Select one file for training
+            # Get files that are already trained or currently being trained
+            trained_files = {info['jsonl_file'] for info in trainer.model_registry.models.values()}
+            active_job_files = {job.training_file for job in jobs
+                               if job.status in ["running", "created", "validating_files", "queued"]}
+
+            # Filter out both trained and actively training files
             untrained_files = [f for f in jsonl_files
-                              if not any(info['jsonl_file'] == f.name
-                                       for info in trainer.model_registry.models.values())]
+                              if f.name not in trained_files and f.name not in active_job_files]
 
             if untrained_files:
-                choice = input("\nSelect a file to train (enter number, or 'q' to quit): ").strip()
+                print(f"\n💡 {len(untrained_files)} untrained file(s) available")
+                choice = input("\nSelect: [number] train one, [all] train all, [q] quit: ").strip()
 
-                if choice.lower() != 'q':
+                if choice.lower() == 'all':
+                    # Train all untrained files
+                    print(f"\n🚀 Training all {len(untrained_files)} files...")
+                    print("⚠️  Note: OpenAI limits to 6 concurrent fine-tuning jobs")
+                    print("   Jobs will queue automatically if limit is reached\n")
+
+                    successful_jobs = 0
+                    failed_jobs = 0
+                    rate_limited = False
+
+                    for idx, jsonl_file in enumerate(untrained_files, 1):
+                        print(f"\n{'='*60}")
+                        print(f"Processing {idx}/{len(untrained_files)}: {jsonl_file.name}")
+                        print(f"{'='*60}")
+
+                        # Extract question name and exam_id
+                        question_name = jsonl_file.stem.rsplit('_', 2)[0]
+                        filename_parts = jsonl_file.stem.split('_')
+                        exam_id = filename_parts[0] if len(filename_parts) > 2 else ""
+
+                        # Extract global_question_id if present in filename (format: gq{id}_...)
+                        global_question_id = None
+                        if filename_parts[0].startswith('gq'):
+                            global_question_id = filename_parts[0][2:]  # Remove 'gq' prefix
+
+                        # Upload file
+                        training_file = trainer.upload_training_file(jsonl_file, question_name)
+                        if not training_file:
+                            print(f"❌ Failed to upload {jsonl_file.name}")
+                            failed_jobs += 1
+                            continue
+
+                        files.append(training_file)
+
+                        # Create fine-tuning job (with rate limit handling)
+                        try:
+                            config = FineTuningConfig()
+                            job = trainer.create_fine_tuning_job(
+                                training_file, jsonl_file.name, config, exam_id, global_question_id
+                            )
+                            if job:
+                                jobs.append(job)
+                                print(f"✅ Job created: {job.job_id}")
+                                successful_jobs += 1
+                            else:
+                                print(f"❌ Failed to create job for {jsonl_file.name}")
+                                failed_jobs += 1
+                        except Exception as e:  # pylint: disable=broad-exception-caught
+                            error_msg = str(e)
+                            if 'rate_limit' in error_msg.lower() or '429' in error_msg:
+                                print(f"⚠️  Rate limit reached!")
+                                print(f"   OpenAI allows max 6 concurrent fine-tuning jobs")
+                                print(f"   Successfully queued: {successful_jobs}")
+                                print(f"   Remaining files: {len(untrained_files) - idx}")
+                                rate_limited = True
+                                break
+                            print(f"❌ Error creating job: {e}")
+                            failed_jobs += 1
+
+                    # Save session after all jobs created
+                    trainer.save_training_session(files, jobs)
+
+                    # Summary
+                    print(f"\n{'='*60}")
+                    print("SUMMARY")
+                    print(f"{'='*60}")
+                    print(f"✅ Jobs created: {successful_jobs}")
+                    if failed_jobs > 0:
+                        print(f"❌ Failed: {failed_jobs}")
+                    if rate_limited:
+                        print(f"⏸️  Stopped due to rate limit")
+                        print(f"\n💡 Wait for some jobs to complete, then run again to")
+                        print(f"   train the remaining {len(untrained_files) - successful_jobs} files")
+                    else:
+                        print(f"\n✨ All {successful_jobs} training jobs created!")
+                    print(f"\nUse 'python openai_trainer.py' to check job status")
+
+                elif choice.lower() != 'q':
                     try:
                         file_idx = int(choice) - 1
                         if 0 <= file_idx < len(jsonl_files):
@@ -511,14 +615,19 @@ def main():
                             if training_file:
                                 files.append(training_file)
 
-                                # Extract exam_id from filename (format: examid_question_timestamp.jsonl)
+                                # Extract exam_id and global_question_id from filename
                                 filename_parts = jsonl_file.stem.split('_')
                                 exam_id = filename_parts[0] if len(filename_parts) > 2 else ""
+
+                                # Extract global_question_id if present (format: gq{id}_...)
+                                global_question_id = None
+                                if filename_parts[0].startswith('gq'):
+                                    global_question_id = filename_parts[0][2:]  # Remove 'gq' prefix
 
                                 # Create fine-tuning job
                                 config = FineTuningConfig()
                                 job = trainer.create_fine_tuning_job(
-                                    training_file, jsonl_file.name, config, exam_id
+                                    training_file, jsonl_file.name, config, exam_id, global_question_id
                                 )
                                 if job:
                                     jobs.append(job)

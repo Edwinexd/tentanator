@@ -87,6 +87,7 @@ class QuestionGrades:
     input_column: str
     exam_question: str = ""  # The actual exam question text
     sample_answer: str = ""  # Optional sample answer from global bank
+    global_question_id: Optional[str] = None  # Global question bank ID for model reuse
     graded_items: List[GradedItem] = field(default_factory=list)
     sampling_result: Optional[SamplingResult] = None  # Sampling result for this question
 
@@ -272,7 +273,7 @@ async def prompt_question_with_auto_match(
     session: GradingSession,
     output_col: str,
     language: str = "en"
-) -> Tuple[Optional[str], Optional[str]]:
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """
     Prompt user for exam question, with auto-matching from global bank as an option.
 
@@ -282,7 +283,8 @@ async def prompt_question_with_auto_match(
         language: Language preference for matching ("en" or "se")
 
     Returns:
-        Tuple of (exam_question_text, sample_answer), either can be None if skipped
+        Tuple of (exam_question_text, sample_answer, global_question_id)
+        - Any of these can be None if skipped or not available
     """
     # Try to auto-match from global bank
     print("   🔍 Attempting to auto-match question from global bank...")
@@ -358,9 +360,13 @@ async def prompt_question_with_auto_match(
                             if choice in ['1', '2', '3']:
                                 idx = int(choice) - 1
                                 if 0 <= idx < len(matches):
-                                    _, _, data = matches[idx]
+                                    _, key, data = matches[idx]
                                     selected_q = str(data.get(q_col, "")).strip()
                                     print(f"   ✓ Selected: {selected_q[:80]}...")
+
+                                    # Extract global question ID from key
+                                    _, global_q_id = key
+                                    print(f"   📌 Global Question ID: {global_q_id}")
 
                                     # Also extract and offer sample answer
                                     ans_col = "ans_en" if language == "en" else "ans_se"
@@ -373,22 +379,22 @@ async def prompt_question_with_auto_match(
                                         ans_choice = input("   > ").strip().lower()
 
                                         if ans_choice == 'n':
-                                            return selected_q, None
+                                            return selected_q, None, global_q_id
                                         if ans_choice == 'e':
                                             print("   📝 Edit the sample answer:")
                                             edited_ans = input("   > ").strip()
-                                            return selected_q, edited_ans if edited_ans else sample_ans
+                                            return selected_q, edited_ans if edited_ans else sample_ans, global_q_id
                                         # default 'y' or empty
-                                        return selected_q, sample_ans
+                                        return selected_q, sample_ans, global_q_id
                                     else:
-                                        return selected_q, None
+                                        return selected_q, None, global_q_id
                             elif choice == 'm':
                                 print("   📝 Enter the exam question text manually:")
                                 manual_q = input("   > ").strip()
                                 if manual_q:
-                                    return manual_q, None
+                                    return manual_q, None, None
                             elif choice == "":
-                                return None, None
+                                return None, None, None
                         else:
                             print("   ⚠ No matches found.")
 
@@ -398,7 +404,7 @@ async def prompt_question_with_auto_match(
     # Fallback to manual entry
     print("   📝 Enter the exam question text manually (or press Enter to skip):")
     manual_q = input("   > ").strip()
-    return (manual_q, None) if manual_q else (None, None)
+    return (manual_q, None, None) if manual_q else (None, None, None)
 
 
 def get_sessions_dir() -> Path:
@@ -537,6 +543,7 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
             "input_column": question.input_column,
             "exam_question": question.exam_question,
             "sample_answer": question.sample_answer,
+            "global_question_id": question.global_question_id,
             "graded_items": [asdict(item) for item in question.graded_items],
             "sampling_result": asdict(question.sampling_result) if question.sampling_result else None
         }
@@ -720,6 +727,7 @@ def load_session(session_name: str) -> Optional[GradingSession]:
                 input_column=q_data["input_column"],
                 exam_question=q_data.get("exam_question", ""),
                 sample_answer=q_data.get("sample_answer", ""),
+                global_question_id=q_data.get("global_question_id"),
                 graded_items=graded_items,
                 sampling_result=sampling_result
             )
@@ -1043,7 +1051,7 @@ async def perform_sampling_for_all_questions(
         # Prompt for exam question text if not already set
         if not question.exam_question:
             try:
-                exam_question, sample_answer = await prompt_question_with_auto_match(
+                exam_question, sample_answer, global_q_id = await prompt_question_with_auto_match(
                     session, output_col, language="en"
                 )
                 if exam_question:
@@ -1056,6 +1064,10 @@ async def perform_sampling_for_all_questions(
                 if sample_answer:
                     question.sample_answer = sample_answer
                     print(f"   ✓ Saved sample answer ({len(sample_answer)} chars)")
+
+                if global_q_id:
+                    question.global_question_id = global_q_id
+                    print(f"   ✓ Linked to global question ID: {global_q_id}")
 
                 # Always save session after auto-match (embeddings may have been generated)
                 if session_name:
@@ -1076,10 +1088,27 @@ async def perform_sampling_for_all_questions(
     print("Selecting representative samples for each question...")
     print("-" * 50)
 
+    # Load model registry to check for existing models
+    model_registry = load_model_registry()
+
     for col_idx, output_col in enumerate(session.output_columns):
         question = session.questions[output_col]
 
         print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
+
+        # Check if a trained model already exists for this question (via global_question_id)
+        has_model = False
+        if question.global_question_id and model_registry:
+            for model_info in model_registry.values():
+                if model_info.get('global_question_id') == question.global_question_id:
+                    has_model = True
+                    model_name = model_info.get('question_name', 'unknown')
+                    print(f"   🤖 Model exists (trained on: {model_name})")
+                    print("   ⚡ Skipping sampling - will use existing model for AI grading")
+                    break
+
+        if has_model:
+            continue
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
@@ -1128,24 +1157,52 @@ async def perform_sampling_for_all_questions(
         else:
             print("   ⚠️  No sampling - will grade all responses manually")
 
-    # Show sampling summary
-    print("\n" + "=" * 50)
-    print("📊 SAMPLING SUMMARY")
-    print("=" * 50)
+    # Show sampling summary only if any sampling was done or models exist
+    has_any_sampling = False
+    has_any_models = False
 
     for output_col in session.output_columns:
         question = session.questions[output_col]
-        print(f"\n{output_col}:")
-        if question.sampling_result:
-            print(f"  Algorithm: {question.sampling_result.algorithm}")
-            print(f"  Samples: {question.sampling_result.num_samples}")
-            if question.sampling_result.quality_score > 0:
-                print(f"  Quality: {question.sampling_result.quality_score:.3f}")
-        else:
-            print("  No sampling (manual grading)")
 
-    print("\n" + "=" * 50)
-    input("\nPress Enter to start grading...")
+        # Check if model exists
+        if question.global_question_id and model_registry:
+            for model_info in model_registry.values():
+                if model_info.get('global_question_id') == question.global_question_id:
+                    has_any_models = True
+                    break
+
+        if question.sampling_result:
+            has_any_sampling = True
+
+    # Only show summary if there's something to show
+    if has_any_sampling or has_any_models:
+        print("\n" + "=" * 50)
+        print("📊 SAMPLING SUMMARY")
+        print("=" * 50)
+
+        for output_col in session.output_columns:
+            question = session.questions[output_col]
+
+            # Check if model exists
+            has_model = False
+            if question.global_question_id and model_registry:
+                for model_info in model_registry.values():
+                    if model_info.get('global_question_id') == question.global_question_id:
+                        has_model = True
+                        break
+
+            if has_model or question.sampling_result:
+                print(f"\n{output_col}:")
+                if has_model:
+                    print("  🤖 Using existing model (no sampling needed)")
+                elif question.sampling_result:
+                    print(f"  Algorithm: {question.sampling_result.algorithm}")
+                    print(f"  Samples: {question.sampling_result.num_samples}")
+                    if question.sampling_result.quality_score > 0:
+                        print(f"  Quality: {question.sampling_result.quality_score:.3f}")
+
+        print("\n" + "=" * 50)
+        input("\nPress Enter to start grading...")
 
 
 async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
@@ -1194,30 +1251,43 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             # Extract exam identifier from session
             exam_id = Path(session.csv_file).stem if session.csv_file else ""
 
-            # Look for a model trained on this question and exam
+            # Look for a model trained on this question
             print(f"\n🔍 Looking for model for: {output_col} (Exam: {exam_id})")
+            if question.global_question_id:
+                print(f"   🔗 Global Question ID: {question.global_question_id}")
 
-            for mid, info in model_registry.items():
-                model_question = info.get('question_name', '')
-                model_exam = info.get('exam_id', '')
-
-                # Display available models with their exam IDs
-                print(f"   Available model: {model_question} (Exam: {model_exam}) -> {mid[:30]}...")
-
-                # More flexible matching - handle both "Points 27" and "Points_27" formats
-                normalized_output = output_col.replace(' ', '_').lower()
-                normalized_model = model_question.replace(' ', '_').lower()
-
-                # Match if the output_col appears in the model's question_name
-                # (handles cases like "Points_27" matching "Exam123_Points_27")
-                if normalized_output in normalized_model:
-                    # Check if exam matches (if exam_id is present in model registry)
-                    if not model_exam or exam_id.lower() in model_exam.lower() or model_exam.lower() in exam_id.lower():
+            # Priority 1: Match on global_question_id (allows cross-exam reuse)
+            if question.global_question_id:
+                for mid, info in model_registry.items():
+                    model_global_q_id = info.get('global_question_id')
+                    if model_global_q_id == question.global_question_id:
                         model_id = mid
-                        print(f"\n✅ MATCHED! Using model for {output_col} from exam {model_exam or 'unknown'}")
+                        model_exam = info.get('exam_id', 'unknown')
+                        print("\n✅ MATCHED via global question ID!")
+                        print(f"   Model trained on: {model_exam}")
                         print(f"   Model ID: {model_id}")
                         break
-                    print(f"   ⚠️  Question matches but exam doesn't ({model_exam} != {exam_id})")
+
+            # Priority 2: Fallback to old matching logic (question_name + exam_id)
+            if not model_id:
+                print("   No global question ID match, trying legacy matching...")
+                for mid, info in model_registry.items():
+                    model_question = info.get('question_name', '')
+                    model_exam = info.get('exam_id', '')
+
+                    # More flexible matching - handle both "Points 27" and "Points_27" formats
+                    normalized_output = output_col.replace(' ', '_').lower()
+                    normalized_model = model_question.replace(' ', '_').lower()
+
+                    # Match if the output_col appears in the model's question_name
+                    if normalized_output in normalized_model:
+                        # Check if exam matches
+                        if not model_exam or exam_id.lower() in model_exam.lower() or model_exam.lower() in exam_id.lower():
+                            model_id = mid
+                            print("\n✅ MATCHED via legacy matching (question + exam)")
+                            print(f"   Model: {model_question} (Exam: {model_exam})")
+                            print(f"   Model ID: {model_id}")
+                            break
 
             if not model_id:
                 print(f"❌ No matching model found - manual grading only for {output_col}")
@@ -1639,10 +1709,16 @@ def export_to_jsonl(
     session: GradingSession,
     output_dir: str = "training_data",
     session_name: Optional[str] = None
-) -> None:
-    """Export graded data to JSONL format for fine-tuning"""
+) -> Dict[str, Optional[str]]:
+    """
+    Export graded data to JSONL format for fine-tuning
+
+    Returns:
+        Dict mapping output_column to global_question_id (None if no global ID)
+    """
     Path(output_dir).mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    partials_dir = Path(output_dir) / "partials"
+    partials_dir.mkdir(exist_ok=True)
 
     # Extract exam identifier from session name or CSV filename
     if session_name:
@@ -1652,6 +1728,9 @@ def export_to_jsonl(
 
     # Sanitize exam_id for filename
     exam_id = "".join(c if c.isalnum() or c in "_-" else "_" for c in exam_id)
+
+    # Track global question IDs for return value
+    question_id_map: Dict[str, Optional[str]] = {}
 
     # Create one JSONL file per question
     for output_col, question in session.questions.items():
@@ -1675,12 +1754,28 @@ def export_to_jsonl(
                     break
                 print("⚠ Exam question cannot be empty. Please enter the question:")
 
-        # Include exam ID in the filename for uniqueness
+        # Partial files go in partials/ subdirectory
         sanitized_col = output_col.replace(' ', '_').replace('/', '-')
-        jsonl_file = Path(output_dir) / f"{exam_id}_{sanitized_col}_{timestamp}.jsonl"
+        if question.global_question_id:
+            # Partial file: partials/gq{id}_{exam_id}_{column}.jsonl (for tracking)
+            partial_file = partials_dir / f"gq{question.global_question_id}_{exam_id}_{sanitized_col}.jsonl"
+            # Combined file: gq{id}.jsonl (ONLY global ID - no column name that can vary!)
+            combined_file = Path(output_dir) / f"gq{question.global_question_id}.jsonl"
+            question_id_map[output_col] = question.global_question_id
+        else:
+            # Fallback without global question ID
+            partial_file = partials_dir / f"{exam_id}_{sanitized_col}.jsonl"
+            combined_file = Path(output_dir) / f"{exam_id}_{sanitized_col}.jsonl"
+            question_id_map[output_col] = None
+
+        # Check if partial file exists
+        if partial_file.exists():
+            print(f"\n⚠️  {partial_file.name} already exists - overwriting")
+
         exported_count = 0
 
-        with open(jsonl_file, 'w', encoding='utf-8') as f:
+        # Write to partial file
+        with open(partial_file, 'w', encoding='utf-8') as f:
             for item in question.graded_items:
                 # Skip blank/dash responses as they are irrelevant for training
                 if item.input_text.strip() in ["", "-", "N/A"]:
@@ -1714,13 +1809,36 @@ def export_to_jsonl(
                 exported_count += 1
 
         if exported_count > 0:
-            print(f"✓ Exported {exported_count} examples for {output_col} to {jsonl_file}")
+            print(f"✓ Exported {exported_count} examples to {partial_file.name}")
             if len(question.graded_items) - exported_count > 0:
                 print(f"  (Excluded {len(question.graded_items) - exported_count} blank/dash responses)")
+
+            # Now combine all partials for this global question ID into the combined file
+            if question.global_question_id:
+                # Find all partial files for this global question ID (regardless of column name)
+                pattern = f"gq{question.global_question_id}_*.jsonl"
+                matching_partials = list(partials_dir.glob(pattern))
+
+                print(f"  📦 Combining {len(matching_partials)} partial file(s) into {combined_file.name}")
+
+                # Concatenate all partials into combined file
+                total_examples = 0
+                with open(combined_file, 'w', encoding='utf-8') as combined:
+                    for partial in sorted(matching_partials):
+                        with open(partial, 'r', encoding='utf-8') as p:
+                            for line in p:
+                                combined.write(line)
+                                total_examples += 1
+
+                print(f"  ✅ Combined file: {total_examples} total examples from {len(matching_partials)} exam(s)")
+                print(f"  🔗 Linked to global question ID: {question.global_question_id}")
         else:
             print(f"⚠ No valid examples to export for {output_col} (all were blank/dash responses)")
-            # Remove empty file
-            jsonl_file.unlink()
+            # Remove empty partial file
+            if partial_file.exists():
+                partial_file.unlink()
+
+    return question_id_map
 
 
 async def main() -> None:
