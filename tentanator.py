@@ -909,9 +909,6 @@ def select_csv_file(csv_files: List[str]) -> Optional[str]:
             print(f"Please enter a number between 1 and {len(csv_files)}")
         except ValueError:
             print("Please enter a valid number")
-        except KeyboardInterrupt:
-            print("\n\nExiting...")
-            return None
 
 
 def get_csv_columns(filepath: Path) -> List[str]:
@@ -943,9 +940,6 @@ def select_columns(columns: List[str], prompt: str, allow_multiple: bool = True)
             print(f"Please enter numbers between 1 and {len(columns)}")
         except ValueError:
             print("Please enter valid numbers")
-        except KeyboardInterrupt:
-            print("\n\nExiting...")
-            return []
 
 
 def read_csv_data(filepath: Path) -> List[Dict[str, str]]:
@@ -1206,11 +1200,11 @@ async def perform_sampling_for_all_questions(
                 if session_name:
                     save_session(session, session_name)
             except KeyboardInterrupt:
-                print("\n   ⊗ Skipped - no question text saved")
-                question.exam_question = ""  # Explicitly save empty string
-                # Save session even after keyboard interrupt
+                # Save session before exiting
                 if session_name:
                     save_session(session, session_name)
+                print("\n\nExiting...")
+                raise  # Re-raise to exit the program
 
     # Phase 2: Pre-generate feature vectors for all responses (now that we have question texts)
     if session_name:
@@ -1429,128 +1423,183 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         valid_graded_count = sum(1 for item in question.graded_items
                                 if item.input_text.strip() not in ["", "-", "N/A"])
 
-        # Skip if we already have enough valid grades for this question
-        if valid_graded_count >= threshold:
-            print(f"\n✓ Already have {threshold} manual grades for {output_col}")
+        # Check if there are ungraded rows
+        graded_ids = {item.row_id for item in question.graded_items}
+        ungraded_rows = []
+        for row_idx, row in enumerate(csv_data):
+            row_id = get_row_id(row, session.id_columns)
+            if row_id not in graded_ids:
+                response_text = row.get(question.input_column, "N/A")
+                # Skip blank responses
+                if response_text.strip() not in ["", "-", "N/A"]:
+                    ungraded_rows.append((row_idx, row))
 
-            # Check if there are ungraded rows that could benefit from AI grading
-            graded_ids = {item.row_id for item in question.graded_items}
-            ungraded_rows = []
-            for row_idx, row in enumerate(csv_data):
-                row_id = get_row_id(row, session.id_columns)
-                if row_id not in graded_ids:
+        # If model exists and we have ungraded rows, offer AI grading
+        if model_id and ungraded_rows:
+            if valid_graded_count >= threshold:
+                print(f"\n✓ Already have {threshold} manual grades for {output_col}")
+            else:
+                print(f"\n✓ Model exists for {output_col}")
+
+            print(f"🤖 Model available for {len(ungraded_rows)} ungraded responses")
+            use_ai = input("Use AI to grade all ungraded responses? [y/n]: ").strip().lower()
+
+            if use_ai == 'y':
+                print("\nGrading with AI - you can review and modify each suggestion...")
+                print("(AI grades are pre-fetched 10 ahead for smooth review)")
+
+                # Rolling window configuration
+                prefetch_buffer_size = 10
+                prefetch_tasks: Dict[int, asyncio.Task] = {}  # index -> task
+
+                def start_prefetch(
+                    idx: int,
+                    rows: List[Tuple[int, Dict[str, str]]],
+                    tasks: Dict[int, asyncio.Task],
+                    curr_model_id: str,
+                    curr_question: QuestionGrades
+                ):
+                    """Start prefetching grade for a specific index if not already started"""
+                    if idx >= len(rows) or idx in tasks:
+                        return
+                    _, row = rows[idx]
+                    response_text = row.get(curr_question.input_column, "N/A")
+                    task = asyncio.create_task(
+                        get_ai_grade_suggestion(curr_model_id, curr_question, response_text)
+                    )
+                    tasks[idx] = task
+
+                # Count non-blank responses for progress tracking
+                non_blank_count = sum(
+                    1 for _, row in ungraded_rows
+                    if row.get(question.input_column, "").strip() not in ["", "-", "N/A"]
+                    and len(row.get(question.input_column, "").strip()) >= 3
+                )
+
+                # Pre-fetch first 10
+                print(f"🚀 Pre-fetching first {prefetch_buffer_size} grades...")
+                for i in range(min(prefetch_buffer_size, len(ungraded_rows))):
+                    start_prefetch(i, ungraded_rows, prefetch_tasks, model_id, question)
+
+                # Use while loop to allow going back
+                ai_grading_idx = 0
+                while ai_grading_idx < len(ungraded_rows):
+
+                    row_idx, row = ungraded_rows[ai_grading_idx]
+                    row_id = get_row_id(row, session.id_columns)
                     response_text = row.get(question.input_column, "N/A")
-                    # Skip blank responses
-                    if response_text.strip() not in ["", "-", "N/A"]:
-                        ungraded_rows.append((row_idx, row))
 
-            if ungraded_rows and model_id:
-                print(f"🤖 Model available for remaining {len(ungraded_rows)} responses")
-                use_ai = input("Use AI to grade remaining responses? [y/n]: ").strip().lower()
-
-                if use_ai == 'y':
-                    print("\nGrading with AI - you can review and modify each suggestion...")
-
-                    # Use while loop to allow going back
-                    ai_grading_idx = 0
-                    while ai_grading_idx < len(ungraded_rows):
-                        row_idx, row = ungraded_rows[ai_grading_idx]
-                        row_id = get_row_id(row, session.id_columns)
-                        response_text = row.get(question.input_column, "N/A")
-
-                        # Get AI suggestion
+                    # Get AI suggestion from task (await if needed)
+                    task = prefetch_tasks.get(ai_grading_idx)
+                    if task:
+                        try:
+                            ai_suggestion = await task
+                        except Exception as e:  # pylint: disable=broad-exception-caught
+                            ai_suggestion = None
+                            print(f"\n⚠️  Failed to get AI suggestion: {e}")
+                            ai_grading_idx += 1
+                            continue
+                    else:
+                        # Fallback: fetch on-demand if not pre-fetched
                         ai_suggestion = await get_ai_grade_suggestion(
                             model_id, question, response_text
                         )
 
-                        if ai_suggestion:
-                            print(f"\n{'-'*60}")
-                            print(f"Student {row_idx + 1}/{len(csv_data)}")
-                            print("\nResponse:")
-                            print("-" * 40)
-                            print(response_text)  # Full response, no truncation
-                            print("-" * 40)
-                            print(f"\n🤖 AI Grade: {ai_suggestion}")
+                    if ai_suggestion:
+                        print(f"\n{'-'*60}")
+                        print(f"Student {row_idx + 1}/{len(csv_data)} ({non_blank_count} non-blank)")
+                        print("\nResponse:")
+                        print("-" * 40)
+                        print(response_text)  # Full response, no truncation
+                        print("-" * 40)
+                        print(f"\n🤖 AI Grade: {ai_suggestion}")
 
-                            # Loop until valid grade or command is provided
-                            while True:
-                                # Let user confirm or modify
-                                prompt = (
-                                    "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
-                                )
-                                user_input = input(prompt).strip()
+                        # Loop until valid grade or command is provided
+                        while True:
+                            # Let user confirm or modify
+                            prompt = (
+                                "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
+                            )
+                            user_input = input(prompt).strip()
 
-                                # Handle back command
-                                if user_input.lower() == 'b' and len(question.graded_items) > 0:
-                                    # Remove the last graded item
-                                    removed = question.graded_items.pop()
-                                    print(f"Removed grade for ID: {removed.row_id}")
-                                    save_session(session, session_name)
-                                    # Go back to previous item instead of restarting
-                                    ai_grading_idx = max(0, ai_grading_idx - 1)
-                                    break
-                                if user_input.lower() == 'q':
-                                    save_session(session, session_name)
-                                    print("\nSaved and exiting...")
-                                    return session
-
-                                # Determine final grade
-                                if user_input:
-                                    # User provided a custom grade - validate it
-                                    is_valid, error_msg = validate_grade(user_input)
-                                    if not is_valid:
-                                        print(f"  ❌ {error_msg}")
-                                        continue  # Ask for grade again
-                                    final_grade = user_input
-                                    print(f"✓ Modified to: {final_grade}")
-                                else:
-                                    # User pressed ENTER - accept AI suggestion
-                                    final_grade = ai_suggestion
-                                    print(f"✓ Accepted: {final_grade}")
-
-                                graded_item = await create_graded_item_with_embedding(
-                                    row_id, response_text, final_grade, session, question.input_column
-                                )
-                                question.graded_items.append(graded_item)
-
-                                # Save after EACH grade for safety
+                            # Handle back command
+                            if user_input.lower() == 'b' and len(question.graded_items) > 0:
+                                # Remove the last graded item
+                                removed = question.graded_items.pop()
+                                print(f"Removed grade for ID: {removed.row_id}")
                                 save_session(session, session_name)
-                                print(f"💾 Saved (Total graded: {len(question.graded_items)})")
-                                break  # Exit validation loop
+                                # Go back to previous item instead of restarting
+                                ai_grading_idx = max(0, ai_grading_idx - 1)
+                                break
+                            if user_input.lower() == 'q':
+                                save_session(session, session_name)
+                                print("\nSaved and exiting...")
+                                return session
 
-                        # Move to next item
-                        ai_grading_idx += 1
+                            # Determine final grade
+                            if user_input:
+                                # User provided a custom grade - validate it
+                                is_valid, error_msg = validate_grade(user_input)
+                                if not is_valid:
+                                    print(f"  ❌ {error_msg}")
+                                    continue  # Ask for grade again
+                                final_grade = user_input
+                                print(f"✓ Modified to: {final_grade}")
+                            else:
+                                # User pressed ENTER - accept AI suggestion
+                                final_grade = ai_suggestion
+                                print(f"✓ Accepted: {final_grade}")
 
-                    print(f"\n✅ Completed AI grading for {output_col}")
+                            graded_item = await create_graded_item_with_embedding(
+                                row_id, response_text, final_grade, session, question.input_column
+                            )
+                            question.graded_items.append(graded_item)
 
-                    # Auto-zero any remaining ungraded responses
-                    print("\n🔄 Auto-zeroing remaining ungraded responses...")
-                    auto_zeroed = 0
-                    graded_ids_set = {item.row_id for item in question.graded_items}
-                    tasks = []
-                    rows_to_grade = []
-                    for row in csv_data:
-                        row_id = get_row_id(row, session.id_columns)
-                        if row_id not in graded_ids_set:
-                            response_text = row.get(question.input_column, "-")
-                            # Auto-grade any ungraded response as 0
-                            tasks.append(create_graded_item_with_embedding(
-                                row_id, response_text, "0", session, question.input_column
-                            ))
-                            rows_to_grade.append(row_id)
+                            # Save after EACH grade for safety
+                            save_session(session, session_name)
+                            print(f"💾 Saved (Total graded: {len(question.graded_items)})")
 
-                    if tasks:
-                        graded_items = await asyncio.gather(*tasks)
-                        question.graded_items.extend(graded_items)
-                        auto_zeroed = len(graded_items)
+                            # Start prefetching next item in the rolling window
+                            next_prefetch_idx = ai_grading_idx + prefetch_buffer_size
+                            start_prefetch(
+                                next_prefetch_idx, ungraded_rows, prefetch_tasks, model_id, question
+                            )
 
-                    if auto_zeroed > 0:
-                        print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
-                        save_session(session, session_name)
+                            break  # Exit validation loop
 
-                    # Export to CSV after AI review and auto-zeroing
-                    print("\n📝 Exporting graded CSV...")
-                    export_to_csv(session, csv_data)
+                    # Move to next item
+                    ai_grading_idx += 1
+
+                print(f"\n✅ Completed AI grading for {output_col}")
+
+                # Auto-zero any remaining ungraded responses
+                print("\n🔄 Auto-zeroing remaining ungraded responses...")
+                auto_zeroed = 0
+                graded_ids_set = {item.row_id for item in question.graded_items}
+                tasks = []
+                rows_to_grade = []
+                for row in csv_data:
+                    row_id = get_row_id(row, session.id_columns)
+                    if row_id not in graded_ids_set:
+                        response_text = row.get(question.input_column, "-")
+                        # Auto-grade any ungraded response as 0
+                        tasks.append(create_graded_item_with_embedding(
+                            row_id, response_text, "0", session, question.input_column
+                        ))
+                        rows_to_grade.append(row_id)
+
+                if tasks:
+                    graded_items = await asyncio.gather(*tasks)
+                    question.graded_items.extend(graded_items)
+                    auto_zeroed = len(graded_items)
+
+                if auto_zeroed > 0:
+                    print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
+                    save_session(session, session_name)
+
+                # Export to CSV after AI review and auto-zeroing
+                print("\n📝 Exporting graded CSV...")
+                export_to_csv(session, csv_data)
 
             continue
 

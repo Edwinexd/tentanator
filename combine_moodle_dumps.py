@@ -56,6 +56,7 @@ def combine_moodle_dumps(grades_path: str, responses_path: str, output_path: str
         responses_path: Path to responses Excel file
         output_path: Path for output Excel file
     """
+    # pylint: disable=too-many-locals,too-many-branches,too-many-statements
     print(f"Reading grades file: {grades_path}")
     grades_df = pd.read_excel(grades_path)
 
@@ -80,19 +81,28 @@ def combine_moodle_dumps(grades_path: str, responses_path: str, output_path: str
     for col in zero_max_cols:
         print(f"  - {col}")
 
-    # Start building output dataframe with student info columns
-    output_df = pd.DataFrame()
+    # CRITICAL: Merge on Daisy ID to handle different row orders
+    # Start with student info from grades file - include ALL identifying columns
+    student_info_cols = ['Daisy ID', 'Last name', 'First name']
 
-    # Map common columns from grades file
-    output_df['Daisy ID'] = grades_df['Daisy ID']
-    output_df['Surname'] = grades_df['Last name']
-    output_df['First name'] = grades_df['First name']
+    # Add optional identifying columns if they exist
+    optional_cols = ['Username', 'Email address', 'ID number']
+    for col in optional_cols:
+        if col in grades_df.columns:
+            student_info_cols.append(col)
+
+    output_df = grades_df[student_info_cols].copy()
+
+    print("\nMerging on Daisy ID to handle row order differences...")
+    print(f"Including student info columns: {list(output_df.columns)}")
 
     # Get list of question numbers (excluding Kommentarer sections)
     question_cols_grades = [col for col in grades_df.columns
                            if col.startswith('Q. ') and col not in zero_max_cols]
 
-    # Build response/points columns pairs
+    # Build ordered list of (response_col, grade_col, output_grade_col) tuples
+    question_pairs = []
+
     for grade_col in question_cols_grades:
         # Parse question number/name from grade column
         # Format: 'Q. 1 /1.00' or 'Q. Kommentarer /0.00.1'
@@ -106,14 +116,12 @@ def combine_moodle_dumps(grades_path: str, responses_path: str, output_path: str
             if '/0.00.' in grade_col:
                 suffix_num = grade_col.split('/0.00.')[-1]
                 suffix = '.' + suffix_num
-                komm_name = f'Kommentarer - section {suffix_num}'
-            else:
-                komm_name = 'Kommentarer'
+            # Note: komm_name not needed in this refactored version
 
             resp_col_name = f'Response Kommentarer{suffix}'
 
             if resp_col_name in responses_df.columns:
-                output_df[komm_name] = responses_df[resp_col_name]
+                question_pairs.append((resp_col_name, None, None))
         else:
             # Regular question number
             try:
@@ -125,9 +133,19 @@ def combine_moodle_dumps(grades_path: str, responses_path: str, output_path: str
             resp_col_name = f'Response {q_num}'
 
             if resp_col_name in responses_df.columns:
-                # Add response and points columns
-                output_df[resp_col_name] = responses_df[resp_col_name]
-                output_df[f'Points {q_num}'] = grades_df[grade_col]
+                question_pairs.append((resp_col_name, grade_col, f'Points {q_num}'))
+
+    # Merge response and grade pairs one by one to maintain column order
+    for resp_col, grade_col, output_grade_col in question_pairs:
+        # Merge response column
+        resp_subset = responses_df[['Daisy ID', resp_col]].copy()
+        output_df = output_df.merge(resp_subset, on='Daisy ID', how='left')
+
+        # Merge grade column if it exists
+        if grade_col and output_grade_col:
+            grade_subset = grades_df[['Daisy ID', grade_col]].copy()
+            grade_subset.rename(columns={grade_col: output_grade_col}, inplace=True)
+            output_df = output_df.merge(grade_subset, on='Daisy ID', how='left')
 
     print(f"\nOutput shape: {output_df.shape}")
     print(f"Output columns: {len(output_df.columns)}")
