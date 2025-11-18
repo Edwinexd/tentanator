@@ -576,10 +576,128 @@ def get_sessions_dir() -> Path:
     return sessions_dir
 
 
-def get_cache_filepath(session_name: str) -> Path:
-    """Get the cache file path for a session"""
+def get_archive_dir() -> Path:
+    """Get the archive directory path, creating it if necessary"""
+    archive_dir = Path(".tentanator_sessions") / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    return archive_dir
+
+
+def is_session_complete(session: GradingSession, csv_data: List[Dict[str, str]]) -> bool:
+    """
+    Check if a session is complete (all questions have all rows graded).
+
+    Args:
+        session: The grading session to check
+        csv_data: The CSV data for the session
+
+    Returns:
+        True if all questions have all rows graded, False otherwise
+    """
+    if not session.questions:
+        return False
+
+    total_rows = len(csv_data)
+
+    for question in session.questions.values():
+        if len(question.graded_items) < total_rows:
+            return False
+
+    return True
+
+
+def archive_session(session_name: str) -> bool:
+    """
+    Move a session and its cache to the archive directory.
+
+    Args:
+        session_name: Name of the session to archive
+
+    Returns:
+        True if successful, False otherwise
+    """
     sessions_dir = get_sessions_dir()
-    return sessions_dir / f"{session_name}.cache.json"
+    archive_dir = get_archive_dir()
+
+    session_file = sessions_dir / f"{session_name}.json"
+    cache_file = get_cache_filepath(session_name)
+
+    if not session_file.exists():
+        print(f"⚠️  Session file not found: {session_name}")
+        return False
+
+    try:
+        # Move session file to archive
+        archive_session_file = archive_dir / f"{session_name}.json"
+        session_file.rename(archive_session_file)
+
+        # Move cache file to archive if it exists
+        if cache_file.exists():
+            archive_cache_file = archive_dir / f"{session_name}.cache.json"
+            cache_file.rename(archive_cache_file)
+
+        print(f"✓ Archived session: {session_name}")
+        return True
+
+    except OSError as e:
+        print(f"⚠️  Failed to archive session: {e}")
+        return False
+
+
+def unarchive_session(session_name: str) -> bool:
+    """
+    Move a session and its cache from archive back to active sessions.
+
+    Args:
+        session_name: Name of the session to unarchive
+
+    Returns:
+        True if successful, False otherwise
+    """
+    sessions_dir = get_sessions_dir()
+    archive_dir = get_archive_dir()
+
+    archive_session_file = archive_dir / f"{session_name}.json"
+    archive_cache_file = archive_dir / f"{session_name}.cache.json"
+
+    if not archive_session_file.exists():
+        print(f"⚠️  Archived session file not found: {session_name}")
+        return False
+
+    try:
+        # Move session file back to active
+        session_file = sessions_dir / f"{session_name}.json"
+        archive_session_file.rename(session_file)
+
+        # Move cache file back if it exists
+        if archive_cache_file.exists():
+            cache_file = get_cache_filepath(session_name)
+            archive_cache_file.rename(cache_file)
+
+        print(f"✓ Unarchived session: {session_name}")
+        return True
+
+    except OSError as e:
+        print(f"⚠️  Failed to unarchive session: {e}")
+        return False
+
+
+def get_cache_filepath(session_name: str, archived: bool = False) -> Path:
+    """
+    Get the cache file path for a session
+
+    Args:
+        session_name: Name of the session
+        archived: If True, look in archive directory
+
+    Returns:
+        Path to the cache file
+    """
+    if archived:
+        base_dir = get_archive_dir()
+    else:
+        base_dir = get_sessions_dir()
+    return base_dir / f"{session_name}.cache.json"
 
 
 def save_caches(session_name: str, embeddings_cache: Dict[str, Dict[str, List[float]]],
@@ -594,10 +712,19 @@ def save_caches(session_name: str, embeddings_cache: Dict[str, Dict[str, List[fl
         json.dump(cache_data, f)
 
 
-def load_caches(session_name: str) -> Tuple[Dict[str, Dict[str, List[float]]],
+def load_caches(session_name: str, archived: bool = False) -> Tuple[Dict[str, Dict[str, List[float]]],
                                              Dict[str, Dict[str, List[float]]]]:
-    """Load embeddings and features caches from a separate file if it exists"""
-    cache_file = get_cache_filepath(session_name)
+    """
+    Load embeddings and features caches from a separate file if it exists
+
+    Args:
+        session_name: Name of the session
+        archived: If True, look in archive directory
+
+    Returns:
+        Tuple of (embeddings_cache, features_cache)
+    """
+    cache_file = get_cache_filepath(session_name, archived=archived)
 
     if cache_file.exists():
         try:
@@ -614,12 +741,24 @@ def load_caches(session_name: str) -> Tuple[Dict[str, Dict[str, List[float]]],
     return {}, {}
 
 
-def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
-    """List all available sessions with their metadata"""
-    sessions_dir = get_sessions_dir()
+def list_sessions(archived: bool = False) -> List[Tuple[str, Dict[str, Any]]]:
+    """
+    List available sessions with their metadata (only those with existing CSV files)
+
+    Args:
+        archived: If True, list archived sessions; if False, list active sessions
+
+    Returns:
+        List of (session_name, metadata) tuples sorted by last_updated
+    """
+    if archived:
+        base_dir = get_archive_dir()
+    else:
+        base_dir = get_sessions_dir()
+
     sessions = []
 
-    for session_file in sessions_dir.glob("*.json"):
+    for session_file in base_dir.glob("*.json"):
         # Skip cache files (e.g., "session.cache.json")
         if ".cache.json" in session_file.name:
             continue
@@ -628,10 +767,19 @@ def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
             with open(session_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
                 session_name = session_file.stem
+                csv_file = data.get("csv_file", "")
+
+                # Check if CSV file exists
+                csv_path = Path("exams") / csv_file
+                if not csv_path.exists():
+                    # Skip sessions with missing CSV files
+                    continue
+
                 metadata = {
-                    "csv_file": data.get("csv_file", "Unknown"),
+                    "csv_file": csv_file,
                     "last_updated": data.get("last_updated", "Unknown"),
-                    "num_questions": len(data.get("questions", {}))
+                    "num_questions": len(data.get("questions", {})),
+                    "archived": archived
                 }
                 sessions.append((session_name, metadata))
         except (json.JSONDecodeError, KeyError):
@@ -640,8 +788,19 @@ def list_sessions() -> List[Tuple[str, Dict[str, Any]]]:
     return sorted(sessions, key=lambda x: x[1].get("last_updated", ""), reverse=True)
 
 
-def save_session(session: GradingSession, session_name: Optional[str] = None) -> str:
-    """Save the current session to a JSON file (caches saved separately)"""
+def save_session(session: GradingSession, session_name: Optional[str] = None,
+                 archived: bool = False) -> str:
+    """
+    Save the current session to a JSON file (caches saved separately)
+
+    Args:
+        session: The GradingSession to save
+        session_name: Optional name for the session
+        archived: If True, save to archive directory
+
+    Returns:
+        The session name used for saving
+    """
     session.last_updated = datetime.now().isoformat()
 
     # If no session name provided, generate one from CSV filename
@@ -653,11 +812,21 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
     # Ensure session name is filesystem-safe
     session_name = "".join(c if c.isalnum() or c in "_-" else "_" for c in session_name)
 
-    sessions_dir = get_sessions_dir()
-    filename = sessions_dir / f"{session_name}.json"
+    if archived:
+        base_dir = get_archive_dir()
+    else:
+        base_dir = get_sessions_dir()
 
-    # Save caches to separate file
-    save_caches(session_name, session.embeddings_cache, session.features_cache)
+    filename = base_dir / f"{session_name}.json"
+
+    # Save caches to separate file (in same directory as session file)
+    cache_file = base_dir / f"{session_name}.cache.json"
+    cache_data = {
+        "embeddings_cache": session.embeddings_cache,
+        "features_cache": session.features_cache
+    }
+    with open(cache_file, 'w', encoding='utf-8') as f:
+        json.dump(cache_data, f)
 
     # Convert to dict for JSON serialization (without caches)
     session_dict = {
@@ -684,7 +853,10 @@ def save_session(session: GradingSession, session_name: Optional[str] = None) ->
 
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(session_dict, f, indent=2)
-    print(f"✓ Session saved as '{session_name}'")
+    if archived:
+        print(f"✓ Session saved to archive as '{session_name}'")
+    else:
+        print(f"✓ Session saved as '{session_name}'")
     return session_name
 
 
@@ -810,10 +982,23 @@ async def create_graded_item_with_embedding(row_id: str, input_text: str, grade:
     )
 
 
-def load_session(session_name: str) -> Optional[GradingSession]:
-    """Load a session from a JSON file (caches loaded separately)"""
-    sessions_dir = get_sessions_dir()
-    filename = sessions_dir / f"{session_name}.json"
+def load_session(session_name: str, archived: bool = False) -> Optional[GradingSession]:
+    """
+    Load a session from a JSON file (caches loaded separately)
+
+    Args:
+        session_name: Name of the session to load
+        archived: If True, load from archive directory
+
+    Returns:
+        GradingSession object or None if loading fails
+    """
+    if archived:
+        base_dir = get_archive_dir()
+    else:
+        base_dir = get_sessions_dir()
+
+    filename = base_dir / f"{session_name}.json"
 
     if not filename.exists():
         return None
@@ -823,7 +1008,7 @@ def load_session(session_name: str) -> Optional[GradingSession]:
             data = json.load(f)
 
         # Load caches from separate file (or from main file for backward compatibility)
-        embeddings_cache, features_cache = load_caches(session_name)
+        embeddings_cache, features_cache = load_caches(session_name, archived=archived)
 
         # Backward compatibility: if caches are in the main file, use them
         if not embeddings_cache and "embeddings_cache" in data:
@@ -2032,10 +2217,12 @@ async def main() -> None:
 
     # Check for existing sessions
     existing_sessions = list_sessions()
+    archived_sessions = list_sessions(archived=True)
     selected_session = None
     current_session_name = None
+    is_archived = False
 
-    if existing_sessions:
+    if existing_sessions or archived_sessions:
         print("Found existing sessions:\n")
         for i, (name, metadata) in enumerate(existing_sessions, 1):
             print(f"{i}. {name}")
@@ -2044,9 +2231,55 @@ async def main() -> None:
             print(f"   Questions: {metadata['num_questions']}\n")
 
         print(f"{len(existing_sessions) + 1}. Create new session")
+        if archived_sessions:
+            print(f"a. View archived sessions ({len(archived_sessions)} available)")
 
         while True:
-            choice = input(f"\nSelect session [1-{len(existing_sessions) + 1}]: ").strip()
+            choice = input(
+                f"\nSelect session [1-{len(existing_sessions) + 1}, a]: "
+            ).strip().lower()
+
+            # Handle archive option
+            if choice == 'a' and archived_sessions:
+                print("\n📦 Archived Sessions:\n")
+                for i, (name, metadata) in enumerate(archived_sessions, 1):
+                    print(f"{i}. {name}")
+                    print(f"   CSV: {metadata['csv_file']}")
+                    print(f"   Last updated: {metadata['last_updated']}")
+                    print(f"   Questions: {metadata['num_questions']}\n")
+
+                print(f"{len(archived_sessions) + 1}. Back to main menu")
+
+                archive_choice = input(
+                    f"\nSelect archived session [1-{len(archived_sessions) + 1}]: "
+                ).strip()
+                try:
+                    archive_choice_num = int(archive_choice)
+                    if 1 <= archive_choice_num <= len(archived_sessions):
+                        current_session_name, _ = archived_sessions[archive_choice_num - 1]
+                        selected_session = load_session(current_session_name, archived=True)
+                        if selected_session:
+                            print(f"\n✓ Loaded archived session '{current_session_name}'")
+                            is_archived = True
+
+                            # Ask if user wants to unarchive
+                            unarchive = input(
+                                "\nUnarchive this session (move to active)? [y/n]: "
+                            ).strip().lower()
+                            if unarchive == 'y':
+                                if unarchive_session(current_session_name):
+                                    is_archived = False
+                            break
+                        print(f"Error loading archived session '{current_session_name}'")
+                    elif archive_choice_num == len(archived_sessions) + 1:
+                        # Back to main menu
+                        continue
+                    else:
+                        print("Invalid choice. Please try again.")
+                except ValueError:
+                    print("Invalid input. Please enter a number.")
+                continue
+
             try:
                 choice_num = int(choice)
                 if 1 <= choice_num <= len(existing_sessions):
@@ -2062,7 +2295,7 @@ async def main() -> None:
                 else:
                     print("Invalid choice. Please try again.")
             except ValueError:
-                print("Invalid input. Please enter a number.")
+                print("Invalid input. Please enter a number or 'a' for archived sessions.")
 
     if selected_session:
         print("\n=== Resuming Session ===")
@@ -2088,7 +2321,10 @@ async def main() -> None:
         session = await grade_questions(selected_session, csv_data,
                                          session_name=current_session_name)
 
-        # Check if we only did manual grading (50) without AI review
+        # Check if session is complete
+        session_complete = is_session_complete(session, csv_data)
+
+        # Check if we only did manual grading (threshold) without AI review
         # If so, ask about JSONL export for training
         all_fully_graded = all(
             len(q.graded_items) >= len(csv_data)  # All rows graded
@@ -2101,6 +2337,19 @@ async def main() -> None:
             if export_now == 'y':
                 export_to_jsonl(session, session_name=current_session_name)
         # If all_fully_graded is True, we already exported CSV and don't need JSONL
+
+        # If session is complete and not already archived, offer to archive it
+        if session_complete and not is_archived and current_session_name:
+            print(f"\n{'='*60}")
+            print("✅ SESSION COMPLETE!")
+            print(f"All {len(csv_data)} rows have been graded for all questions.")
+            print(f"{'='*60}")
+
+            archive_choice = input(
+                "\nArchive this completed session? [y/n]: "
+            ).strip().lower()
+            if archive_choice == 'y':
+                archive_session(current_session_name)
 
         return
 
@@ -2183,7 +2432,10 @@ async def main() -> None:
     # Start grading
     session = await grade_questions(session, csv_data, session_name=session_name)
 
-    # Check if we only did manual grading (50) without AI review
+    # Check if session is complete
+    session_complete = is_session_complete(session, csv_data)
+
+    # Check if we only did manual grading (threshold) without AI review
     # If so, ask about JSONL export for training
     if session.questions:
         all_fully_graded = all(
@@ -2197,6 +2449,19 @@ async def main() -> None:
             if export_now == 'y':
                 export_to_jsonl(session, session_name=session_name)
         # If all_fully_graded is True, we already exported CSV and don't need JSONL
+
+        # If session is complete, offer to archive it
+        if session_complete:
+            print(f"\n{'='*60}")
+            print("✅ SESSION COMPLETE!")
+            print(f"All {len(csv_data)} rows have been graded for all questions.")
+            print(f"{'='*60}")
+
+            archive_choice = input(
+                "\nArchive this completed session? [y/n]: "
+            ).strip().lower()
+            if archive_choice == 'y':
+                archive_session(session_name)
 
 
 if __name__ == "__main__":

@@ -574,7 +574,7 @@ class OpenAITrainer:
         print(f"💾 Session saved to {self.session_file}")
 
     def load_training_session(self) -> Tuple[List[TrainingFile], List[FineTuningJob]]:
-        """Load training session from file and clean up cancelled jobs"""
+        """Load training session from file and clean up completed jobs"""
         if not Path(self.session_file).exists():
             return [], []
 
@@ -585,18 +585,20 @@ class OpenAITrainer:
             files = [TrainingFile(**f) for f in data.get("uploaded_files", [])]
             all_jobs = [FineTuningJob(**j) for j in data.get("fine_tuning_jobs", [])]
 
-            # Filter out cancelled jobs
+            # Filter out completed jobs (succeeded, failed, cancelled)
             active_jobs = []
+            removed_jobs = []
             for job in all_jobs:
-                if job.status == "cancelled":
-                    print(f"🗑️  Removing cancelled job: {job.job_id} ({job.question_name})")
+                if job.status in ["succeeded", "failed", "cancelled"]:
+                    removed_jobs.append(job)
+                    print(f"🗑️  Removing {job.status} job: {job.job_id} ({job.question_name})")
                 else:
                     active_jobs.append(job)
 
             # Save cleaned session if any jobs were removed
             if len(active_jobs) < len(all_jobs):
                 self.save_training_session(files, active_jobs)
-                print(f"✅ Cleaned up {len(all_jobs) - len(active_jobs)} cancelled jobs")
+                print(f"✅ Cleaned up {len(removed_jobs)} completed job(s)")
 
             return files, active_jobs
 
@@ -627,17 +629,17 @@ def main():
         updated_jobs = []
         for job in jobs:
             print(f"  - {job.question_name} ({job.job_id}): {job.status}")
-            if job.status in ["running", "created", "validating_files"]:
+            if job.status in ["running", "created", "validating_files", "queued"]:
                 # Check current status
                 updated_job = trainer.check_job_status(job)
                 job.status = updated_job.status
                 job.fine_tuned_model = updated_job.fine_tuned_model
 
-            # Only keep non-cancelled jobs
-            if job.status != "cancelled":
+            # Only keep active jobs (not succeeded, failed, or cancelled)
+            if job.status not in ["succeeded", "failed", "cancelled"]:
                 updated_jobs.append(job)
             else:
-                print("    🗑️  Removing cancelled job")
+                print(f"    🗑️  Removing {job.status} job")
 
         if len(updated_jobs) != len(jobs):
             jobs = updated_jobs
