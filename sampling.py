@@ -17,6 +17,7 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import StandardScaler
 from sklearn.ensemble import IsolationForest
 from sklearn.mixture import GaussianMixture
+from sklearn.decomposition import PCA
 from openai import AsyncOpenAI, APIError, APIConnectionError
 import dotenv
 
@@ -73,6 +74,46 @@ async def get_features(
     _ = sample_answer  # Unused for now
 
     return await get_embedding(response)
+
+
+def optimize_features(
+    data: Dict[str, List[float]],
+    variance_ratio: float = 0.9
+) -> Dict[str, List[float]]:
+    """
+    Optimize feature vectors using PCA dimensionality reduction.
+
+    Reduces the dimensionality of feature vectors while preserving the specified
+    fraction of variance. This is called after get_features() has collected all
+    embeddings and before sampling algorithms are applied.
+
+    Args:
+        data: Dictionary mapping IDs to feature vectors (embeddings)
+        variance_ratio: Fraction of variance to preserve (default: 0.9 for 90%)
+
+    Returns:
+        Dictionary mapping IDs to PCA-reduced feature vectors
+    """
+
+    if len(data) < 2:
+        return data
+
+    all_ids = list(data.keys())
+    embeddings_array = np.array([data[id_] for id_ in all_ids])
+    original_dim = embeddings_array.shape[1]
+
+    # Fit PCA with desired variance ratio
+    pca = PCA(n_components=variance_ratio, random_state=42)
+    reduced_embeddings = pca.fit_transform(embeddings_array)
+
+    reduced_dim = reduced_embeddings.shape[1]
+    actual_variance = pca.explained_variance_ratio_.sum()
+
+    print(f"🔬 PCA: Reduced dimensions from {original_dim} to {reduced_dim} "
+          f"(retained {actual_variance:.1%} variance)")
+
+    # Convert back to dictionary
+    return {id_: reduced_embeddings[i].tolist() for i, id_ in enumerate(all_ids)}
 
 
 def find_optimal_k(

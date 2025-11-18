@@ -15,7 +15,7 @@ import pandas as pd
 from sklearn.decomposition import PCA
 
 from sampling import (SamplingAlgorithm, cluster_with_kmean, get_samples,
-                      gptsort_sampling, iforest_gmm_sampling)
+                      gptsort_sampling, iforest_gmm_sampling, optimize_features)
 
 
 def visualize_embeddings_2d(  # pylint: disable=too-many-arguments,too-many-positional-arguments,too-many-locals
@@ -371,6 +371,9 @@ def process_question(  # pylint: disable=too-many-arguments,too-many-positional-
     if len(embeddings) < 2:
         print("Not enough embeddings to visualize (need at least 2)")
         return
+
+    # Apply PCA dimensionality reduction (90% variance retention)
+    embeddings = optimize_features(embeddings, variance_ratio=0.9)
 
     # Sanitize question name for filename
     safe_question_name = sanitize_filename(question_name)

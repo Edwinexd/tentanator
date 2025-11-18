@@ -17,7 +17,7 @@ import numpy as np
 from openai import AsyncOpenAI
 
 from embeddings import get_embedding
-from sampling import SamplingAlgorithm, get_samples, get_features
+from sampling import SamplingAlgorithm, get_samples, get_features, optimize_features
 
 dotenv.load_dotenv()
 
@@ -950,6 +950,9 @@ def select_representative_samples(
         print(f"⚠️  Not enough valid embeddings ({len(valid_embeddings)}) for sampling")
         return list(valid_embeddings.keys()), 0.0, len(valid_embeddings)
 
+    # Apply PCA dimensionality reduction (90% variance retention)
+    optimized_embeddings = optimize_features(valid_embeddings, variance_ratio=0.9)
+
     # Use the get_samples function with the specified algorithm
     try:
         print(f"\n📊 Sampling with algorithm: {algorithm}")
@@ -991,7 +994,7 @@ def select_representative_samples(
                 question_text = None
 
         selected_ids, quality_score, num_selected = get_samples(
-            valid_embeddings,
+            optimized_embeddings,
             algorithm=algorithm,
             n_samples=effective_n_samples,
             text_data=text_data,

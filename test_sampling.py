@@ -18,6 +18,7 @@ from sampling import (
     SamplingAlgorithm,
     get_samples,
     get_features,
+    optimize_features,
 )
 
 dotenv.load_dotenv()
@@ -297,6 +298,9 @@ async def test_sampling_for_question(  # pylint: disable=too-many-locals,too-man
         responses_dict, question_text=question_text, sample_answer=sample_answer
     )
     print(f"✓ Got {len(embeddings_dict)} feature vectors")
+
+    # Apply PCA dimensionality reduction (90% variance retention)
+    embeddings_dict = optimize_features(embeddings_dict, variance_ratio=0.9)
 
     # Calculate unique points for coverage display
     unique_points = set(points_dict.values())
