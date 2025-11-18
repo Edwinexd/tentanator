@@ -102,6 +102,157 @@ class OpenAITrainer:
         self.session_file = ".tentanator_training_session.json"
         self.model_registry = ModelRegistry.load()
 
+    def moderate_content(self, text: str) -> Tuple[bool, Dict[str, Any]]:
+        """
+        Check content using OpenAI moderation API
+        Returns: (is_flagged, moderation_result)
+        """
+        try:
+            response = self.client.moderations.create(
+                model="omni-moderation-latest",
+                input=text
+            )
+            result = response.results[0]
+            categories_dict = (result.categories.model_dump()
+                              if hasattr(result.categories, 'model_dump')
+                              else dict(result.categories))
+            scores_dict = (result.category_scores.model_dump()
+                          if hasattr(result.category_scores, 'model_dump')
+                          else dict(result.category_scores))
+            return result.flagged, {
+                "flagged": result.flagged,
+                "categories": categories_dict,
+                "category_scores": scores_dict
+            }
+        except (OSError, RuntimeError, ValueError) as e:
+            print(f"⚠️  Moderation API error: {e}")
+            # If moderation fails, don't flag (fail open)
+            return False, {"error": str(e)}
+
+    def validate_and_moderate_jsonl(
+            self, filepath: Path
+    ) -> Tuple[bool, str, int, Optional[Path]]:
+        """
+        Validate JSONL file format and moderate content for OpenAI fine-tuning
+        Returns: (is_valid, message, num_examples, moderated_filepath)
+        """
+        if not filepath.exists():
+            return False, f"File not found: {filepath}", 0, None
+
+        examples = []
+        flagged_examples = []
+        moderation_stats = {
+            "total": 0,
+            "flagged": 0,
+            "categories": {}
+        }
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line_num, line in enumerate(f, 1):
+                    try:
+                        example = json.loads(line)
+
+                        # Validate structure
+                        if "messages" not in example:
+                            return False, f"Line {line_num}: Missing 'messages' field", 0, None
+
+                        messages = example["messages"]
+                        if not isinstance(messages, list) or len(messages) < 2:
+                            msg = (f"Line {line_num}: 'messages' must be a list "
+                                   "with at least 2 items")
+                            return False, msg, 0, None
+
+                        # Check for required roles
+                        roles = [msg.get("role") for msg in messages]
+                        if "system" not in roles and "user" not in roles:
+                            msg = (f"Line {line_num}: Messages must include "
+                                   "'system' or 'user' role")
+                            return False, msg, 0, None
+
+                        if "assistant" not in roles:
+                            msg = (f"Line {line_num}: Messages must include "
+                                   "'assistant' role")
+                            return False, msg, 0, None
+
+                        # Moderate content
+                        moderation_stats["total"] += 1
+                        example_flagged = False
+
+                        for msg in messages:
+                            content = msg.get("content", "")
+                            if content:
+                                is_flagged, mod_result = self.moderate_content(content)
+                                if is_flagged:
+                                    example_flagged = True
+                                    moderation_stats["flagged"] += 1
+                                    # Track which categories were flagged
+                                    for cat, flagged in (
+                                            mod_result.get("categories", {}).items()):
+                                        if flagged:
+                                            cat_count = (
+                                                moderation_stats["categories"]
+                                                .get(cat, 0) + 1)
+                                            moderation_stats["categories"][cat] = (
+                                                cat_count)
+                                    break  # No need to check other messages
+
+                        if example_flagged:
+                            flagged_examples.append(line_num)
+                        else:
+                            examples.append(example)
+
+                    except json.JSONDecodeError as e:
+                        return False, f"Line {line_num}: Invalid JSON - {e}", 0, None
+
+        except (OSError, json.JSONDecodeError) as e:
+            return False, f"Error reading file: {e}", 0, None
+
+        # Report moderation results
+        if moderation_stats["flagged"] > 0:
+            total = moderation_stats["total"]
+            flagged = moderation_stats["flagged"]
+            flagged_pct = (flagged / total) * 100
+            print("\n⚠️  Content Moderation Results:")
+            print(f"   Total examples: {total}")
+            print(f"   Flagged: {flagged} ({flagged_pct:.1f}%)")
+            if moderation_stats["categories"]:
+                print("   Flagged categories:")
+                sorted_cats = sorted(
+                    moderation_stats["categories"].items(),
+                    key=lambda x: x[1],
+                    reverse=True)
+                for cat, count in sorted_cats:
+                    print(f"     - {cat}: {count}")
+
+            # If too many examples are flagged, abort
+            if flagged_pct > 50:
+                msg = (f"Training not possible: {flagged_pct:.1f}% of "
+                       "content flagged as harmful")
+                return False, msg, total, None
+
+        # Check minimum examples (OpenAI recommends at least 10)
+        if len(examples) < 10:
+            msg = (f"Warning: Only {len(examples)} examples remaining "
+                   "after moderation. OpenAI recommends at least 10.")
+            return False, msg, len(examples), None
+
+        # If content was flagged, create a new filtered file
+        moderated_filepath = None
+        if moderation_stats["flagged"] > 0:
+            mod_name = f"{filepath.stem}_moderated.jsonl"
+            moderated_filepath = filepath.parent / mod_name
+            with open(moderated_filepath, 'w', encoding='utf-8') as f:
+                for example in examples:
+                    f.write(json.dumps(example) + '\n')
+            print(f"✅ Created filtered file: {moderated_filepath.name}")
+            print(f"   Clean examples: {len(examples)}")
+
+        num_flagged = moderation_stats['flagged']
+        msg = (f"Valid: {len(examples)} training examples "
+               f"(excluded {num_flagged} flagged)")
+        return True, msg, len(examples), moderated_filepath
+
     def validate_jsonl_file(self, filepath: Path) -> Tuple[bool, str, int]:
         """
         Validate JSONL file format for OpenAI fine-tuning
@@ -147,29 +298,52 @@ class OpenAITrainer:
 
         return True, f"Valid: {len(examples)} training examples", len(examples)
 
-    def upload_training_file(self, filepath: Path, question_name: str) -> Optional[TrainingFile]:
+    def upload_training_file(
+            self, filepath: Path, question_name: str,
+            moderate: bool = True
+    ) -> Optional[TrainingFile]:
         """Upload JSONL file to OpenAI for fine-tuning"""
-        # Validate file first
-        is_valid, message, num_examples = self.validate_jsonl_file(filepath)
-        if not is_valid and num_examples == 0:
-            print(f"❌ Validation failed: {message}")
-            return None
-        if not is_valid:
-            print(f"⚠️  {message}")
-            proceed = input("Continue anyway? [y/n]: ").strip().lower()
-            if proceed != 'y':
+        moderated_filepath: Optional[Path] = None
+
+        # Validate and moderate file
+        if moderate:
+            validation_result = self.validate_and_moderate_jsonl(filepath)
+            is_valid, message, num_examples, moderated_filepath = validation_result
+            if not is_valid and num_examples == 0:
+                print(f"❌ Validation/moderation failed: {message}")
                 return None
+            if not is_valid:
+                print(f"⚠️  {message}")
+                proceed = input("Continue anyway? [y/n]: ").strip().lower()
+                if proceed != 'y':
+                    return None
 
-        # Create a temporary file with "exam" removed from the filename for OpenAI
-        temp_filepath = filepath.parent / filepath.name.replace("exam", "").replace("Exam", "")
+            # Use moderated file if it was created
+            upload_filepath = moderated_filepath if moderated_filepath else filepath
+        else:
+            # Skip moderation, just validate
+            is_valid, message, num_examples = self.validate_jsonl_file(filepath)
+            if not is_valid and num_examples == 0:
+                print(f"❌ Validation failed: {message}")
+                return None
+            if not is_valid:
+                print(f"⚠️  {message}")
+                proceed = input("Continue anyway? [y/n]: ").strip().lower()
+                if proceed != 'y':
+                    return None
+            upload_filepath = filepath
 
-        # If no change needed, use original file
-        if temp_filepath == filepath:
-            temp_filepath = filepath
-            print(f"📤 Uploading {filepath.name} ({num_examples} examples)...")
+        # Create a temporary file with "exam" removed from filename for OpenAI
+        clean_name = upload_filepath.name.replace("exam", "").replace("Exam", "")
+        temp_filepath = upload_filepath.parent / clean_name
+
+        # If no change needed, use upload_filepath
+        if temp_filepath == upload_filepath:
+            temp_filepath = upload_filepath
+            print(f"📤 Uploading {upload_filepath.name} ({num_examples} examples)...")
         else:
             # Copy to temp file with new name
-            shutil.copy2(filepath, temp_filepath)
+            shutil.copy2(upload_filepath, temp_filepath)
             print(f"📤 Uploading as {temp_filepath.name} ({num_examples} examples)...")
 
         try:
@@ -187,18 +361,24 @@ class OpenAITrainer:
                 created_at=datetime.now().isoformat()
             )
 
-            # Clean up temporary file if we created one
-            if temp_filepath != filepath and temp_filepath.exists():
+            # Clean up temporary files if we created them
+            if temp_filepath != upload_filepath and temp_filepath.exists():
                 temp_filepath.unlink()
+            # Clean up moderated file after successful upload
+            if moderated_filepath and moderated_filepath.exists():
+                moderated_filepath.unlink()
+                print("🗑️  Cleaned up temporary moderated file")
 
             print(f"✅ Uploaded successfully! File ID: {response.id}")
             return training_file
 
         except (OSError, RuntimeError, ValueError) as e:
             print(f"❌ Upload failed: {e}")
-            # Clean up temporary file on error
-            if temp_filepath != filepath and temp_filepath.exists():
+            # Clean up temporary files on error
+            if temp_filepath != upload_filepath and temp_filepath.exists():
                 temp_filepath.unlink()
+            if moderated_filepath and moderated_filepath.exists():
+                moderated_filepath.unlink()
             return None
 
     def create_fine_tuning_job(self, training_file: TrainingFile,
