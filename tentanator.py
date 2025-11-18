@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
 import numpy as np
+import requests
 from openai import AsyncOpenAI
 
 from embeddings import get_embedding
@@ -146,6 +147,138 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     arr2 = np.array(vec2)
 
     return float(np.dot(arr1, arr2) / (np.linalg.norm(arr1) * np.linalg.norm(arr2)))
+
+
+async def download_and_refresh_global_banks() -> None:
+    """
+    Download global banks CSV from URL and regenerate embeddings if needed.
+    URL is specified in .env as GLOBAL_BANKS_URL.
+    """
+    global_banks_url = os.getenv("GLOBAL_BANKS_URL")
+    if not global_banks_url:
+        return
+
+    print("\n🌐 Checking global banks from URL...")
+
+    # Create directories if they don't exist
+    GLOBAL_BANK_DIR.mkdir(exist_ok=True)
+    EMBEDDINGS_DIR.mkdir(exist_ok=True)
+
+    # Extract filename from URL (last part of the path)
+    csv_name = Path(global_banks_url).stem
+    local_csv_path = GLOBAL_BANK_DIR / f"{csv_name}.csv"
+    embeddings_file = EMBEDDINGS_DIR / f"{csv_name}_embeddings.json"
+
+    # Download the CSV file to a temporary location first
+    try:
+        print(f"   Downloading from: {global_banks_url}")
+        response = requests.get(global_banks_url, timeout=30)
+        response.raise_for_status()
+        new_content = response.text
+
+        # Check if content has changed by comparing with existing file
+        # Normalize line endings for comparison to avoid false positives
+        csv_changed = True
+        if local_csv_path.exists():
+            with open(local_csv_path, 'r', encoding='utf-8') as f:
+                old_content = f.read()
+            # Normalize line endings for comparison
+            new_normalized = new_content.replace('\r\n', '\n').replace('\r', '\n')
+            old_normalized = old_content.replace('\r\n', '\n').replace('\r', '\n')
+            csv_changed = (new_normalized != old_normalized)
+
+        if csv_changed:
+            # Save the new CSV (preserving original line endings)
+            with open(local_csv_path, 'w', encoding='utf-8', newline='') as f:
+                f.write(new_content)
+            print(f"   ✓ Downloaded to: {local_csv_path}")
+        else:
+            print(f"   ✓ CSV unchanged - using cached version")
+
+    except (requests.RequestException, OSError) as e:
+        print(f"   ⚠ Failed to download global banks: {e}")
+        # Continue with existing file if available
+        if not local_csv_path.exists():
+            return
+        csv_changed = False
+
+    # Check if embeddings need to be regenerated
+    needs_regeneration = False
+
+    if not embeddings_file.exists():
+        print("   📊 No embeddings found - generating new embeddings...")
+        needs_regeneration = True
+    elif csv_changed:
+        print("   📊 CSV updated - regenerating embeddings...")
+        needs_regeneration = True
+    else:
+        print("   ✓ Embeddings up to date")
+
+    # Regenerate embeddings if needed
+    if needs_regeneration:
+        try:
+            # Read the CSV
+            with open(local_csv_path, 'r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                rows = list(reader)
+
+            embeddings_dict: Dict[str, Dict[str, List[float]]] = {}
+
+            # Generate embeddings for each question (both languages)
+            print(f"   Generating embeddings for {len(rows)} questions...")
+
+            tasks_en = []
+            tasks_se = []
+            row_ids = []
+
+            for row in rows:
+                question_id = row.get('id', '')
+                if not question_id:
+                    continue
+
+                q_en = row.get('q_en', '').strip()
+                q_se = row.get('q_se', '').strip()
+
+                # Create tasks for both languages if available
+                if q_en:
+                    tasks_en.append(get_embedding(q_en))
+                else:
+                    tasks_en.append(None)
+
+                if q_se:
+                    tasks_se.append(get_embedding(q_se))
+                else:
+                    tasks_se.append(None)
+
+                row_ids.append(question_id)
+
+            # Execute all embedding tasks concurrently
+            results_en = await asyncio.gather(*[t if t else asyncio.sleep(0) for t in tasks_en],
+                                               return_exceptions=True)
+            results_se = await asyncio.gather(*[t if t else asyncio.sleep(0) for t in tasks_se],
+                                               return_exceptions=True)
+
+            # Store results
+            for i, question_id in enumerate(row_ids):
+                embeddings_dict[question_id] = {}
+
+                # Type check: ensure result is a list (embedding vector) not an exception or None
+                if tasks_en[i] and isinstance(results_en[i], list):
+                    en_embedding: List[float] = results_en[i]  # type: ignore
+                    embeddings_dict[question_id]['en'] = en_embedding
+
+                if tasks_se[i] and isinstance(results_se[i], list):
+                    se_embedding: List[float] = results_se[i]  # type: ignore
+                    embeddings_dict[question_id]['se'] = se_embedding
+
+            # Save embeddings
+            with open(embeddings_file, 'w', encoding='utf-8') as f:
+                json.dump(embeddings_dict, f)
+
+            print(f"   ✓ Generated embeddings for {len(embeddings_dict)} questions")
+
+        except (OSError, csv.Error, json.JSONDecodeError) as e:
+            print(f"   ⚠ Failed to generate embeddings: {e}")
 
 
 def load_global_bank_data() -> Tuple[
@@ -1844,6 +1977,9 @@ def export_to_jsonl(
 async def main() -> None:
     """Main function to run the CLI tool."""
     print("=== Tentanator - CSV Grading Assistant ===\n")
+
+    # Download and refresh global banks from URL if configured
+    await download_and_refresh_global_banks()
 
     # Check for existing sessions
     existing_sessions = list_sessions()
