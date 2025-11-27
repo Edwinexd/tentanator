@@ -463,25 +463,37 @@ class OpenAITrainer:
             print(f"❌ Failed to check job status: {e}")
             return job
 
-    def monitor_job(self, job: FineTuningJob, check_interval: int = 30) -> FineTuningJob:
-        """Monitor a fine-tuning job until completion"""
+    def monitor_job(self, job: FineTuningJob, files: List[TrainingFile],
+                    jobs: List[FineTuningJob], check_interval: int = 30) -> FineTuningJob:
+        """Monitor a fine-tuning job until completion, saving progress after each check"""
         print(f"📊 Monitoring job {job.job_id}...")
         print("   This may take 10-30 minutes depending on dataset size")
+        print("   Press Ctrl+C to stop monitoring (progress will be saved)")
 
-        while job.status not in ["succeeded", "failed", "cancelled"]:
-            time.sleep(check_interval)
-            job = self.check_job_status(job)
+        try:
+            while job.status not in ["succeeded", "failed", "cancelled"]:
+                time.sleep(check_interval)
+                job = self.check_job_status(job)
 
-            # Show progress events
-            try:
-                events = self.client.fine_tuning.jobs.list_events(
-                    fine_tuning_job_id=job.job_id,
-                    limit=5
-                )
-                for event in events.data[:1]:  # Show latest event
-                    print(f"   [{event.created_at}] {event.message}")
-            except (OSError, RuntimeError, ValueError, AttributeError):
-                pass
+                # Save session after each status check
+                self.save_training_session(files, jobs)
+
+                # Show progress events
+                try:
+                    events = self.client.fine_tuning.jobs.list_events(
+                        fine_tuning_job_id=job.job_id,
+                        limit=5
+                    )
+                    for event in events.data[:1]:  # Show latest event
+                        print(f"   [{event.created_at}] {event.message}")
+                except (OSError, RuntimeError, ValueError, AttributeError):
+                    pass
+
+        except KeyboardInterrupt:
+            print("\n⚠️  Monitoring interrupted by user")
+            # Final save before exiting
+            self.save_training_session(files, jobs)
+            print("✅ Progress saved. Job continues running on OpenAI servers.")
 
         return job
 
@@ -813,14 +825,14 @@ def main():
                                 )
                                 if job:
                                     jobs.append(job)
+                                    # Save immediately after creating job
+                                    trainer.save_training_session(files, jobs)
 
                                     # Monitor job
-                                    monitor = input("Monitor job until completion? [y/n]: ").strip().lower()
+                                    prompt = "Monitor job until completion? [y/n]: "
+                                    monitor = input(prompt).strip().lower()
                                     if monitor == 'y':
-                                        job = trainer.monitor_job(job)
-
-                                # Save session
-                                trainer.save_training_session(files, jobs)
+                                        job = trainer.monitor_job(job, files, jobs)
                         else:
                             print("Invalid selection")
                     except ValueError:
