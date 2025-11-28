@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import dotenv
 import numpy as np
 import requests
+from aioconsole import ainput
 from openai import AsyncOpenAI
 
 from embeddings import get_embedding
@@ -488,7 +489,7 @@ async def prompt_question_with_auto_match(
                             # Ask user to select
                             print("   Select a match [1-3], 'm' to enter manually, "
                                   "or Enter to skip:")
-                            choice = input("   > ").strip().lower()
+                            choice = (await ainput("   > ")).strip().lower()
 
                             if choice in ['1', '2', '3']:
                                 idx = int(choice) - 1
@@ -509,13 +510,13 @@ async def prompt_question_with_auto_match(
                                         print("\n   Sample answer from global bank:")
                                         print(f"   {sample_ans[:150]}{'...' if len(sample_ans) > 150 else ''}")
                                         print("\n   Use this sample answer? [y/n/e to edit] (default: y):")
-                                        ans_choice = input("   > ").strip().lower()
+                                        ans_choice = (await ainput("   > ")).strip().lower()
 
                                         if ans_choice == 'n':
                                             return selected_q, None, global_q_id
                                         if ans_choice == 'e':
                                             print("   📝 Edit the sample answer:")
-                                            edited_ans = input("   > ").strip()
+                                            edited_ans = (await ainput("   > ")).strip()
                                             return selected_q, edited_ans if edited_ans else sample_ans, global_q_id
                                         # default 'y' or empty
                                         return selected_q, sample_ans, global_q_id
@@ -523,7 +524,7 @@ async def prompt_question_with_auto_match(
                                         return selected_q, None, global_q_id
                             elif choice == 'm':
                                 print("   📝 Enter the exam question text manually:")
-                                manual_q = input("   > ").strip()
+                                manual_q = (await ainput("   > ")).strip()
                                 if manual_q:
                                     return manual_q, None, None
                             elif choice == "":
@@ -536,7 +537,7 @@ async def prompt_question_with_auto_match(
 
     # Fallback to manual entry
     print("   📝 Enter the exam question text manually (or press Enter to skip):")
-    manual_q = input("   > ").strip()
+    manual_q = (await ainput("   > ")).strip()
     return (manual_q, None, None) if manual_q else (None, None, None)
 
 
@@ -1075,7 +1076,7 @@ def list_csv_files(directory: str = "exams") -> List[str]:
     return sorted([f.name for f in csv_path.glob("*.csv")])
 
 
-def select_csv_file(csv_files: List[str]) -> Optional[str]:
+async def select_csv_file(csv_files: List[str]) -> Optional[str]:
     """Prompt user to select a CSV file."""
     if not csv_files:
         print("No CSV files found in the exams/ directory.")
@@ -1087,7 +1088,7 @@ def select_csv_file(csv_files: List[str]) -> Optional[str]:
 
     while True:
         try:
-            choice = input("\nSelect a CSV file (enter number): ").strip()
+            choice = (await ainput("\nSelect a CSV file (enter number): ")).strip()
             choice_idx = int(choice) - 1
             if 0 <= choice_idx < len(csv_files):
                 return csv_files[choice_idx]
@@ -1104,7 +1105,7 @@ def get_csv_columns(filepath: Path) -> List[str]:
     return headers
 
 
-def select_columns(columns: List[str], prompt: str, allow_multiple: bool = True) -> List[str]:
+async def select_columns(columns: List[str], prompt: str, allow_multiple: bool = True) -> List[str]:
     """Prompt user to select columns from the list."""
     print(f"\n{prompt}")
     print("Available columns:")
@@ -1114,10 +1115,10 @@ def select_columns(columns: List[str], prompt: str, allow_multiple: bool = True)
     while True:
         try:
             if allow_multiple:
-                choice = input("\nEnter column numbers separated by commas (e.g., 1,3,5): ").strip()
+                choice = (await ainput("\nEnter column numbers separated by commas (e.g., 1,3,5): ")).strip()
                 indices = [int(x.strip()) - 1 for x in choice.split(',')]
             else:
-                choice = input("\nEnter column number: ").strip()
+                choice = (await ainput("\nEnter column number: ")).strip()
                 indices = [int(choice) - 1]
 
             if all(0 <= idx < len(columns) for idx in indices):
@@ -1183,7 +1184,7 @@ async def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
         return None
 
 
-def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorithm]:
+async def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorithm]:
     """
     Ask the user which sampling algorithm to use.
     Returns None if user wants to skip sampling.
@@ -1192,9 +1193,9 @@ def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorit
     if question.sampling_result:
         print(f"\n📊 Previous sampling: {question.sampling_result.algorithm} "
               f"(selected {question.sampling_result.num_samples} samples)")
-        response = input(
+        response = (await ainput(
             "Use previous sampling? [y]es/[n]o to select new algorithm: "
-        ).strip().lower()
+        )).strip().lower()
         if response in ['y', 'yes', '']:
             return None  # Will use existing sampling
 
@@ -1208,7 +1209,7 @@ def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorit
     print("7. [s]kip - Skip sampling (grade all manually)")
 
     while True:
-        choice = input("Enter choice (1-7 or 's'): ").strip().lower()
+        choice = (await ainput("Enter choice (1-7 or 's'): ")).strip().lower()
 
         if choice in ['s', 'skip']:
             return None
@@ -1440,7 +1441,7 @@ async def perform_sampling_for_all_questions(
 
         # Ask user for sampling algorithm for this question
         print(f"   Needs {threshold - valid_graded_count} more graded responses")
-        chosen_algorithm = ask_sampling_algorithm(question)
+        chosen_algorithm = await ask_sampling_algorithm(question)
 
         if chosen_algorithm:
             # Run sampling with chosen algorithm
@@ -1514,7 +1515,7 @@ async def perform_sampling_for_all_questions(
                         print(f"  Quality: {question.sampling_result.quality_score:.3f}")
 
         print("\n" + "=" * 50)
-        input("\nPress Enter to start grading...")
+        await ainput("\nPress Enter to start grading...")
 
 
 async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
@@ -1627,7 +1628,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 print(f"\n✓ Model exists for {output_col}")
 
             print(f"🤖 Model available for {len(ungraded_rows)} ungraded responses")
-            use_ai = input("Use AI to grade all ungraded responses? [y/n]: ").strip().lower()
+            use_ai = (await ainput("Use AI to grade all ungraded responses? [y/n]: ")).strip().lower()
 
             if use_ai == 'y':
                 print("\nGrading with AI - you can review and modify each suggestion...")
@@ -1705,7 +1706,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                             prompt = (
                                 "Accept grade? [ENTER=yes, b=back, q=quit, or type new grade]: "
                             )
-                            user_input = input(prompt).strip()
+                            user_input = (await ainput(prompt)).strip()
 
                             # Handle back command
                             if user_input.lower() == 'b' and len(question.graded_items) > 0:
@@ -1944,13 +1945,13 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
             while True:
                 if ai_suggestion:
-                    grade = input(f"\nGrade for {output_col} [{ai_suggestion}]: ").strip()
+                    grade = (await ainput(f"\nGrade for {output_col} [{ai_suggestion}]: ")).strip()
                     # If empty, accept AI suggestion
                     if not grade:
                         grade = ai_suggestion
                         print(f"✓ Accepted AI suggestion: {grade}")
                 else:
-                    grade = input(f"\nEnter grade for {output_col}: ").strip()
+                    grade = (await ainput(f"\nEnter grade for {output_col}: ")).strip()
 
                 if grade.lower() == 'q':
                     save_session(session, session_name)
@@ -2016,7 +2017,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
         # Export to JSONL for training
         print("\n📤 Exporting training data to JSONL...")
-        export_to_jsonl(session, session_name=session_name)
+        await export_to_jsonl(session, session_name=session_name)
 
         print("\n💡 Next steps:")
         print("   1. Train a model using the exported JSONL files")
@@ -2072,7 +2073,7 @@ def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]],
     return ""
 
 
-def export_to_jsonl(
+async def export_to_jsonl(
     session: GradingSession,
     output_dir: str = "training_data",
     session_name: Optional[str] = None
@@ -2113,7 +2114,7 @@ def export_to_jsonl(
             print("Please enter the exam question that students were answering:")
             print("(This will be included in the training data for context)")
             while True:
-                exam_question = input("> ").strip()
+                exam_question = (await ainput("> ")).strip()
                 if exam_question:
                     question.exam_question = exam_question
                     # Save the updated session with the exam question
@@ -2235,9 +2236,9 @@ async def main() -> None:
             print(f"a. View archived sessions ({len(archived_sessions)} available)")
 
         while True:
-            choice = input(
+            choice = (await ainput(
                 f"\nSelect session [1-{len(existing_sessions) + 1}, a]: "
-            ).strip().lower()
+            )).strip().lower()
 
             # Handle archive option
             if choice == 'a' and archived_sessions:
@@ -2250,9 +2251,9 @@ async def main() -> None:
 
                 print(f"{len(archived_sessions) + 1}. Back to main menu")
 
-                archive_choice = input(
+                archive_choice = (await ainput(
                     f"\nSelect archived session [1-{len(archived_sessions) + 1}]: "
-                ).strip()
+                )).strip()
                 try:
                     archive_choice_num = int(archive_choice)
                     if 1 <= archive_choice_num <= len(archived_sessions):
@@ -2263,9 +2264,9 @@ async def main() -> None:
                             is_archived = True
 
                             # Ask if user wants to unarchive
-                            unarchive = input(
+                            unarchive = (await ainput(
                                 "\nUnarchive this session (move to active)? [y/n]: "
-                            ).strip().lower()
+                            )).strip().lower()
                             if unarchive == 'y':
                                 if unarchive_session(current_session_name):
                                     is_archived = False
@@ -2333,9 +2334,9 @@ async def main() -> None:
 
         if not all_fully_graded:
             # We only graded the manual threshold, ask about JSONL export for training
-            export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
+            export_now = (await ainput("\nExport to JSONL for fine-tuning? [y/n]: ")).strip().lower()
             if export_now == 'y':
-                export_to_jsonl(session, session_name=current_session_name)
+                await export_to_jsonl(session, session_name=current_session_name)
         # If all_fully_graded is True, we already exported CSV and don't need JSONL
 
         # If session is complete and not already archived, offer to archive it
@@ -2345,9 +2346,9 @@ async def main() -> None:
             print(f"All {len(csv_data)} rows have been graded for all questions.")
             print(f"{'='*60}")
 
-            archive_choice = input(
+            archive_choice = (await ainput(
                 "\nArchive this completed session? [y/n]: "
-            ).strip().lower()
+            )).strip().lower()
             if archive_choice == 'y':
                 archive_session(current_session_name)
 
@@ -2355,7 +2356,7 @@ async def main() -> None:
 
     # Start new session
     csv_files = list_csv_files()
-    selected_file = select_csv_file(csv_files)
+    selected_file = await select_csv_file(csv_files)
 
     if not selected_file:
         return
@@ -2373,7 +2374,7 @@ async def main() -> None:
 
     # Select ID columns
     prompt = "Select columns to use as unique IDENTIFIERS (e.g., student ID, name):"
-    id_columns = select_columns(columns, prompt, allow_multiple=True)
+    id_columns = await select_columns(columns, prompt, allow_multiple=True)
     if not id_columns:
         print("Warning: No ID columns selected. Using row number as identifier.")
         id_columns = ["_row_number"]
@@ -2382,7 +2383,7 @@ async def main() -> None:
 
     # Select input columns
     prompt = "Select columns to use as INPUT (student responses):"
-    input_columns = select_columns(columns, prompt, allow_multiple=True)
+    input_columns = await select_columns(columns, prompt, allow_multiple=True)
     if not input_columns:
         return
 
@@ -2390,7 +2391,7 @@ async def main() -> None:
 
     # Select output columns (one per question)
     prompt = "Select columns to use as OUTPUT (grading targets, one per question):"
-    output_columns = select_columns(columns, prompt, allow_multiple=True)
+    output_columns = await select_columns(columns, prompt, allow_multiple=True)
     if not output_columns:
         return
 
@@ -2408,7 +2409,7 @@ async def main() -> None:
     print(f"Output Columns: {', '.join(output_columns)}")
 
     # Ask for session name
-    session_name_input = input("\nEnter a name for this session (or press Enter for auto-generated): ").strip()
+    session_name_input = (await ainput("\nEnter a name for this session (or press Enter for auto-generated): ")).strip()
     if not session_name_input:
         csv_base = Path(selected_file).stem
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -2445,9 +2446,9 @@ async def main() -> None:
 
         if not all_fully_graded:
             # We only graded the manual threshold, ask about JSONL export for training
-            export_now = input("\nExport to JSONL for fine-tuning? [y/n]: ").strip().lower()
+            export_now = (await ainput("\nExport to JSONL for fine-tuning? [y/n]: ")).strip().lower()
             if export_now == 'y':
-                export_to_jsonl(session, session_name=session_name)
+                await export_to_jsonl(session, session_name=session_name)
         # If all_fully_graded is True, we already exported CSV and don't need JSONL
 
         # If session is complete, offer to archive it
@@ -2457,9 +2458,9 @@ async def main() -> None:
             print(f"All {len(csv_data)} rows have been graded for all questions.")
             print(f"{'='*60}")
 
-            archive_choice = input(
+            archive_choice = (await ainput(
                 "\nArchive this completed session? [y/n]: "
-            ).strip().lower()
+            )).strip().lower()
             if archive_choice == 'y':
                 archive_session(session_name)
 

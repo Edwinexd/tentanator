@@ -15,6 +15,7 @@ import logging
 
 import numpy as np
 import dotenv
+from aioconsole import ainput
 from openai import AsyncOpenAI
 from embeddings import get_embedding
 
@@ -348,7 +349,7 @@ async def main() -> None:
     while True:
         try:
             # Get user input
-            query = input("Search: ").strip()
+            query = (await ainput("Search: ")).strip()
 
             if not query:
                 continue
@@ -371,7 +372,7 @@ async def main() -> None:
             # Handle detail view requests
             while True:
                 try:
-                    detail_input = input().strip()
+                    detail_input = (await ainput()).strip()
 
                     if not detail_input:
                         break

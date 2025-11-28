@@ -21,11 +21,13 @@ Usage:
 """
 
 import argparse
+import asyncio
 import json
 import shutil
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional
+from aioconsole import ainput
 
 
 # Workspace configuration
@@ -272,7 +274,7 @@ def unload_workspace(name: Optional[str] = None) -> bool:
     return True
 
 
-def delete_workspace(name: str, force: bool = False) -> bool:
+async def delete_workspace(name: str, force: bool = False) -> bool:
     """Delete a workspace"""
     workspace_path = WORKSPACES_DIR / name
     if not workspace_path.exists():
@@ -290,7 +292,7 @@ def delete_workspace(name: str, force: bool = False) -> bool:
     if not force:
         print(f"⚠️  WARNING: This will permanently delete workspace '{name}'")
         print(f"   Location: {workspace_path}")
-        response = input("   Type 'yes' to confirm: ").strip().lower()
+        response = (await ainput("   Type 'yes' to confirm: ")).strip().lower()
         if response != 'yes':
             print("Deletion cancelled")
             return False
@@ -343,7 +345,7 @@ def show_current_workspace() -> None:
                 print(f"   • {item}")
 
 
-def main():
+async def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
         description="Manage Tentanator workspaces",
@@ -418,7 +420,7 @@ def main():
         unload_workspace(args.name)
 
     elif args.command == "delete":
-        delete_workspace(args.name, args.force)
+        await delete_workspace(args.name, args.force)
 
     elif args.command == "current":
         show_current_workspace()
@@ -429,4 +431,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

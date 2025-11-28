@@ -12,7 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Dict, Any, Tuple
 
+import asyncio
 import dotenv
+from aioconsole import ainput
 from openai import OpenAI
 
 dotenv.load_dotenv()
@@ -298,7 +300,7 @@ class OpenAITrainer:
 
         return True, f"Valid: {len(examples)} training examples", len(examples)
 
-    def upload_training_file(
+    async def upload_training_file(
             self, filepath: Path, question_name: str,
             moderate: bool = True
     ) -> Optional[TrainingFile]:
@@ -314,7 +316,7 @@ class OpenAITrainer:
                 return None
             if not is_valid:
                 print(f"⚠️  {message}")
-                proceed = input("Continue anyway? [y/n]: ").strip().lower()
+                proceed = (await ainput("Continue anyway? [y/n]: ")).strip().lower()
                 if proceed != 'y':
                     return None
 
@@ -328,7 +330,7 @@ class OpenAITrainer:
                 return None
             if not is_valid:
                 print(f"⚠️  {message}")
-                proceed = input("Continue anyway? [y/n]: ").strip().lower()
+                proceed = (await ainput("Continue anyway? [y/n]: ")).strip().lower()
                 if proceed != 'y':
                     return None
             upload_filepath = filepath
@@ -619,7 +621,7 @@ class OpenAITrainer:
             return [], []
 
 
-def main():
+async def main():
     """Example usage and testing"""
     print("=== OpenAI Fine-Tuning Manager ===\n")
 
@@ -698,7 +700,7 @@ def main():
 
             if untrained_files:
                 print(f"\n💡 {len(untrained_files)} untrained file(s) available")
-                choice = input("\nSelect: [number] train one, [all] train all, [q] quit: ").strip()
+                choice = (await ainput("\nSelect: [number] train one, [all] train all, [q] quit: ")).strip()
 
                 if choice.lower() == 'all':
                     # Train all untrained files
@@ -726,7 +728,7 @@ def main():
                             global_question_id = filename_parts[0][2:]  # Remove 'gq' prefix
 
                         # Upload file
-                        training_file = trainer.upload_training_file(jsonl_file, question_name)
+                        training_file = await trainer.upload_training_file(jsonl_file, question_name)
                         if not training_file:
                             print(f"❌ Failed to upload {jsonl_file.name}")
                             failed_jobs += 1
@@ -805,7 +807,7 @@ def main():
 
                             # Upload file
                             print(f"\n📤 Processing {jsonl_file.name}")
-                            training_file = trainer.upload_training_file(jsonl_file, question_name)
+                            training_file = await trainer.upload_training_file(jsonl_file, question_name)
                             if training_file:
                                 files.append(training_file)
 
@@ -830,7 +832,7 @@ def main():
 
                                     # Monitor job
                                     prompt = "Monitor job until completion? [y/n]: "
-                                    monitor = input(prompt).strip().lower()
+                                    monitor = (await ainput(prompt)).strip().lower()
                                     if monitor == 'y':
                                         job = trainer.monitor_job(job, files, jobs)
                         else:
@@ -842,4 +844,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
