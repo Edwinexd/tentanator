@@ -62,8 +62,20 @@ class ModelRegistry:
     """Registry of fine-tuned models"""
     models: Dict[str, Dict[str, Any]]  # model_id -> model info
 
+    def remove_model_by_jsonl(self, jsonl_file: str) -> Optional[str]:
+        """
+        Remove a model from the registry by jsonl_file name
+        Returns: the removed model_id if found, None otherwise
+        """
+        for model_id, info in list(self.models.items()):
+            if info['jsonl_file'] == jsonl_file:
+                del self.models[model_id]
+                return model_id
+        return None
+
     def add_model(self, model_id: str, jsonl_file: str, question_name: str, job_id: str,
-                  exam_id: str = "", global_question_id: Optional[str] = None):
+                  exam_id: str = "", global_question_id: Optional[str] = None,
+                  file_mtime: Optional[float] = None):
         """Add a model to the registry"""
         self.models[model_id] = {
             "model_id": model_id,
@@ -72,7 +84,8 @@ class ModelRegistry:
             "exam_id": exam_id,  # Which exam this model was trained on
             "global_question_id": global_question_id,  # Global question bank ID for cross-exam reuse
             "job_id": job_id,
-            "created_at": datetime.now().isoformat()
+            "created_at": datetime.now().isoformat(),
+            "file_mtime": file_mtime  # Modification time of training file when model was trained
         }
 
     def save(self, filepath: str = "models.json"):
@@ -440,13 +453,25 @@ class OpenAITrainer:
 
                 # Add to model registry
                 if job.fine_tuned_model:
+                    # Get file modification time
+                    training_file_path = Path("training_data") / job.training_file
+                    file_mtime = None
+                    if training_file_path.exists():
+                        file_mtime = training_file_path.stat().st_mtime
+
+                    # Remove old model if this is a re-training
+                    old_model_id = self.model_registry.remove_model_by_jsonl(job.training_file)
+                    if old_model_id:
+                        print(f"   🔄 Replacing old model: {old_model_id}")
+
                     self.model_registry.add_model(
                         model_id=job.fine_tuned_model,
                         jsonl_file=job.training_file,
                         question_name=job.question_name,
                         job_id=job.job_id,
                         exam_id=job.exam_id,
-                        global_question_id=job.global_question_id
+                        global_question_id=job.global_question_id,
+                        file_mtime=file_mtime
                     )
                     self.model_registry.save()
                     print("   Added to models.json registry")
@@ -620,6 +645,46 @@ class OpenAITrainer:
             print(f"⚠️  Failed to load session: {e}")
             return [], []
 
+    def check_stale_models(self, jsonl_files: List[Path]) -> Dict[str, Dict[str, Any]]:
+        """
+        Check for models whose training files have been modified since training
+        Returns: dict mapping jsonl_file name to model info for stale models
+        """
+        stale_models = {}
+
+        for jsonl_file in jsonl_files:
+            # Check if this file has a trained model
+            model_info = None
+            for info in self.model_registry.models.values():
+                if info['jsonl_file'] == jsonl_file.name:
+                    model_info = info
+                    break
+
+            if not model_info:
+                continue  # No model trained for this file
+
+            # Get current file modification time
+            current_mtime = jsonl_file.stat().st_mtime
+
+            # Get stored modification time (use created_at as fallback for backward compatibility)
+            stored_mtime = model_info.get('file_mtime')
+            if stored_mtime is None:
+                # Backward compatibility: use created_at timestamp
+                created_at_str = model_info.get('created_at')
+                if created_at_str:
+                    try:
+                        created_dt = datetime.fromisoformat(created_at_str)
+                        stored_mtime = created_dt.timestamp()
+                    except (ValueError, AttributeError):
+                        # If we can't parse, assume file is up-to-date
+                        continue
+
+            # Compare timestamps
+            if stored_mtime and current_mtime > stored_mtime:
+                stale_models[jsonl_file.name] = model_info
+
+        return stale_models
+
 
 async def main():
     """Example usage and testing"""
@@ -665,8 +730,13 @@ async def main():
         jsonl_files = list(training_dir.glob("*.jsonl"))
 
         if jsonl_files:
+            # Check for stale models (files modified since training)
+            stale_models = trainer.check_stale_models(jsonl_files)
+
             print("\n📁 Available JSONL files:")
             for idx, f in enumerate(jsonl_files, 1):
+                # Check if stale (file modified since training)
+                is_stale = f.name in stale_models
                 # Check if already trained
                 already_trained = any(
                     info['jsonl_file'] == f.name
@@ -680,10 +750,13 @@ async def main():
                     None
                 )
 
-                if already_trained:
-                    status = " ✅ (trained)"
-                elif active_job:
+                # Priority: active job > stale > trained > untrained
+                if active_job:
                     status = f" 🔄 ({active_job.status})"
+                elif is_stale:
+                    status = " ⚠️  (needs re-training)"
+                elif already_trained:
+                    status = " ✅ (trained)"
                 else:
                     status = ""
 
@@ -694,17 +767,26 @@ async def main():
             active_job_files = {job.training_file for job in jobs
                                if job.status in ["running", "created", "validating_files", "queued"]}
 
-            # Filter out both trained and actively training files
-            untrained_files = [f for f in jsonl_files
-                              if f.name not in trained_files and f.name not in active_job_files]
+            # Filter: include untrained files AND stale files (exclude only up-to-date trained and active jobs)
+            files_needing_training = [f for f in jsonl_files
+                                     if (f.name not in trained_files or f.name in stale_models)
+                                     and f.name not in active_job_files]
 
-            if untrained_files:
-                print(f"\n💡 {len(untrained_files)} untrained file(s) available")
+            if files_needing_training:
+                # Count stale vs untrained
+                num_stale = len([f for f in files_needing_training if f.name in stale_models])
+                num_untrained = len(files_needing_training) - num_stale
+                status_msg = []
+                if num_untrained > 0:
+                    status_msg.append(f"{num_untrained} untrained")
+                if num_stale > 0:
+                    status_msg.append(f"{num_stale} needs re-training")
+                print(f"\n💡 {' and '.join(status_msg)} file(s) available")
                 choice = (await ainput("\nSelect: [number] train one, [all] train all, [q] quit: ")).strip()
 
                 if choice.lower() == 'all':
-                    # Train all untrained files
-                    print(f"\n🚀 Training all {len(untrained_files)} files...")
+                    # Train all files needing training
+                    print(f"\n🚀 Training all {len(files_needing_training)} files...")
                     print("⚠️  Note: OpenAI limits to 6 concurrent fine-tuning jobs")
                     print("   Jobs will queue automatically if limit is reached\n")
 
@@ -712,9 +794,13 @@ async def main():
                     failed_jobs = 0
                     rate_limited = False
 
-                    for idx, jsonl_file in enumerate(untrained_files, 1):
+                    for idx, jsonl_file in enumerate(files_needing_training, 1):
                         print(f"\n{'='*60}")
-                        print(f"Processing {idx}/{len(untrained_files)}: {jsonl_file.name}")
+                        print(f"Processing {idx}/{len(files_needing_training)}: {jsonl_file.name}")
+                        # Show if this is a re-training
+                        if jsonl_file.name in stale_models:
+                            old_model_id = stale_models[jsonl_file.name]['model_id']
+                            print(f"⚠️  Re-training (replacing {old_model_id})")
                         print(f"{'='*60}")
 
                         # Extract question name and exam_id
@@ -752,10 +838,10 @@ async def main():
                         except Exception as e:  # pylint: disable=broad-exception-caught
                             error_msg = str(e)
                             if 'rate_limit' in error_msg.lower() or '429' in error_msg:
-                                print(f"⚠️  Rate limit reached!")
-                                print(f"   OpenAI allows max 6 concurrent fine-tuning jobs")
+                                print("⚠️  Rate limit reached!")
+                                print("   OpenAI allows max 6 concurrent fine-tuning jobs")
                                 print(f"   Successfully queued: {successful_jobs}")
-                                print(f"   Remaining files: {len(untrained_files) - idx}")
+                                print(f"   Remaining files: {len(files_needing_training) - idx}")
                                 rate_limited = True
                                 break
                             print(f"❌ Error creating job: {e}")
@@ -774,7 +860,7 @@ async def main():
                     if rate_limited:
                         print(f"⏸️  Stopped due to rate limit")
                         print(f"\n💡 Wait for some jobs to complete, then run again to")
-                        print(f"   train the remaining {len(untrained_files) - successful_jobs} files")
+                        print(f"   train the remaining {len(files_needing_training) - successful_jobs} files")
                     else:
                         print(f"\n✨ All {successful_jobs} training jobs created!")
                     print(f"\nUse 'python openai_trainer.py' to check job status")
@@ -785,10 +871,14 @@ async def main():
                         if 0 <= file_idx < len(jsonl_files):
                             jsonl_file = jsonl_files[file_idx]
 
-                            # Double-check if already trained
-                            if any(info['jsonl_file'] == jsonl_file.name
-                                  for info in trainer.model_registry.models.values()):
-                                print(f"❌ {jsonl_file.name} has already been trained!")
+                            # Check if stale (needs re-training)
+                            is_stale = jsonl_file.name in stale_models
+
+                            # Check if already trained (and NOT stale)
+                            already_trained = any(info['jsonl_file'] == jsonl_file.name
+                                                 for info in trainer.model_registry.models.values())
+                            if already_trained and not is_stale:
+                                print(f"❌ {jsonl_file.name} has already been trained and is up-to-date!")
                                 print("   Model exists in registry. Cannot train again.")
                                 return
 
@@ -801,6 +891,11 @@ async def main():
                                 print(f"❌ {jsonl_file.name} already has an active training job!")
                                 print(f"   Job {active_job.job_id} is {active_job.status}")
                                 return
+
+                            # Show if this is a re-training
+                            if is_stale:
+                                old_model_id = stale_models[jsonl_file.name]['model_id']
+                                print(f"\n⚠️  Re-training {jsonl_file.name} (replacing {old_model_id})")
 
                             # Extract question name from filename
                             question_name = jsonl_file.stem.rsplit('_', 2)[0]
