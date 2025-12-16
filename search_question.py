@@ -15,7 +15,7 @@ import logging
 
 import numpy as np
 import dotenv
-from aioconsole import ainput
+from aioconsole import ainput, aprint
 from openai import AsyncOpenAI
 from embeddings import get_embedding
 
@@ -216,7 +216,7 @@ def truncate_text(text: str, max_length: int) -> str:
     return text[:max_length-1] + "…"
 
 
-def display_results(  # pylint: disable=too-many-locals
+async def display_results(  # pylint: disable=too-many-locals
         results: List[Tuple[float, Tuple[str, str], Dict[str, Any]]],
         language: str
     ) -> None:
@@ -228,7 +228,7 @@ def display_results(  # pylint: disable=too-many-locals
         language: Language preference for display
     """
     if not results:
-        print("\nNo results found.\n")
+        await aprint("\nNo results found.\n")
         return
 
     # Get terminal width
@@ -258,12 +258,12 @@ def display_results(  # pylint: disable=too-many-locals
     q_width = max(20, q_width)
     a_width = max(20, a_width)
 
-    print(f"\n{'═'*term_width}")
-    print(f"Top {len(results)} Results (Language: {language.upper()})")
-    print(f"{'═'*term_width}")
-    print(f"{'#':<{num_col}} {'Scr':<{score_col}} {'ID':<{id_col}} "
+    await aprint(f"\n{'═'*term_width}")
+    await aprint(f"Top {len(results)} Results (Language: {language.upper()})")
+    await aprint(f"{'═'*term_width}")
+    await aprint(f"{'#':<{num_col}} {'Scr':<{score_col}} {'ID':<{id_col}} "
           f"{'Ch':<{ch_col}} {'Subj':<{subj_col}} {'Question':<{q_width}} {'Answer':<{a_width}}")
-    print(f"{'─'*term_width}")
+    await aprint(f"{'─'*term_width}")
 
     for i, (score, key, data) in enumerate(results, 1):
         _, question_id = key
@@ -276,16 +276,16 @@ def display_results(  # pylint: disable=too-many-locals
         q_short = truncate_text(question, q_width)
         a_short = truncate_text(answer, a_width)
 
-        print(f"{i:<{num_col}} {score:.3f} {question_id:<{id_col}} "
+        await aprint(f"{i:<{num_col}} {score:.3f} {question_id:<{id_col}} "
               f"{chapter:<{ch_col}} {subject:<{subj_col}} "
               f"{q_short:<{q_width}} {a_short:<{a_width}}")
 
     # Show detailed view option
-    print(f"{'─'*term_width}")
-    print("\nEnter result # for details (1-5) or press Enter to search again: ", end="")
+    await aprint(f"{'─'*term_width}")
+    await aprint("\nEnter result # for details (1-5) or press Enter to search again: ", end="")
 
 
-def show_detail(  # pylint: disable=too-many-locals
+async def show_detail(  # pylint: disable=too-many-locals
         result: Tuple[float, Tuple[str, str], Dict[str, Any]],
         language: str,
         index: int
@@ -314,37 +314,37 @@ def show_detail(  # pylint: disable=too-many-locals
     subject = str(data.get("subject", "N/A"))
     q_type = str(data.get("type", "N/A"))
 
-    print(f"\n{'═'*term_width}")
-    print(f"Result #{index} - Full Details")
-    print(f"{'═'*term_width}")
-    print(f"ID: {question_id} | Chapter: {chapter} | Subject: {subject} | "
+    await aprint(f"\n{'═'*term_width}")
+    await aprint(f"Result #{index} - Full Details")
+    await aprint(f"{'═'*term_width}")
+    await aprint(f"ID: {question_id} | Chapter: {chapter} | Subject: {subject} | "
           f"Type: {q_type} | Score: {score:.4f}")
-    print(f"{'─'*term_width}")
-    print("\nQuestion:")
+    await aprint(f"{'─'*term_width}")
+    await aprint("\nQuestion:")
     wrapped_q = textwrap.fill(question, width=content_width)
-    print(f"  {wrapped_q}")
-    print("\nAnswer:")
+    await aprint(f"  {wrapped_q}")
+    await aprint("\nAnswer:")
     wrapped_a = textwrap.fill(answer, width=content_width)
-    print(f"  {wrapped_a}")
-    print(f"{'─'*term_width}\n")
+    await aprint(f"  {wrapped_a}")
+    await aprint(f"{'─'*term_width}\n")
 
 
 async def main() -> None:
     """
     Main interactive loop for searching questions.
     """
-    print("Loading embeddings and question data...")
+    await aprint("Loading embeddings and question data...")
     embeddings, csv_data = load_all_data()
 
     if not embeddings:
-        print("No embeddings found. Exiting.")
+        await aprint("No embeddings found. Exiting.")
         return
 
     num_csvs = len(set(k[0] for k in embeddings))
-    print(f"Loaded {len(embeddings)} questions from {num_csvs} CSV file(s).")
-    print("\nWelcome to the Question Search Tool!")
-    print("Enter your search query to find similar questions.")
-    print("Language is automatically detected. Type 'quit', 'exit', or 'q' to exit.\n")
+    await aprint(f"Loaded {len(embeddings)} questions from {num_csvs} CSV file(s).")
+    await aprint("\nWelcome to the Question Search Tool!")
+    await aprint("Enter your search query to find similar questions.")
+    await aprint("Language is automatically detected. Type 'quit', 'exit', or 'q' to exit.\n")
 
     while True:
         try:
@@ -356,18 +356,18 @@ async def main() -> None:
 
             # Check for exit commands
             if query.lower() in ['quit', 'exit', 'q']:
-                print("\nGoodbye!")
+                await aprint("\nGoodbye!")
                 break
 
             # Auto-detect language
-            print("Detecting language and searching...")
+            await aprint("Detecting language and searching...")
             language = await detect_language(query)
 
             # Perform search
             results = await search_questions(query, embeddings, csv_data, language)
 
             # Display results
-            display_results(results, language)
+            await display_results(results, language)
 
             # Handle detail view requests
             while True:
@@ -381,24 +381,26 @@ async def main() -> None:
                     try:
                         result_num = int(detail_input)
                         if 1 <= result_num <= len(results):
-                            show_detail(results[result_num - 1], language, result_num)
-                            print("Enter another number or press Enter to search again: ", end="")
+                            await show_detail(results[result_num - 1], language, result_num)
+                            await aprint(
+                                "Enter another number or press Enter to search again: ", end="")
                         else:
-                            print(f"Please enter a number between 1 and {len(results)}: ", end="")
+                            await aprint(
+                                f"Please enter a number between 1 and {len(results)}: ", end="")
                     except ValueError:
-                        print("Invalid input. Enter a number or press Enter: ", end="")
+                        await aprint("Invalid input. Enter a number or press Enter: ", end="")
 
                 except KeyboardInterrupt:
-                    print()
+                    await aprint()
                     break
 
         except KeyboardInterrupt:
-            print("\n\nInterrupted. Goodbye!")
+            await aprint("\n\nInterrupted. Goodbye!")
             break
         except Exception as e:  # pylint: disable=broad-exception-caught
             logger.error("Error during search: %s", str(e), exc_info=True)
-            print(f"\nError occurred: {e}")
-            print("Please try again.\n")
+            await aprint(f"\nError occurred: {e}")
+            await aprint("Please try again.\n")
 
 
 if __name__ == "__main__":
