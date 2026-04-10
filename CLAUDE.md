@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Tentanator is a Python-based AI-powered exam grading system that combines manual grading with in-context learning (few-shot prompting). The workflow: grade sample responses manually → use graded examples as few-shot context → AI suggests grades for remaining responses via Cerebras inference.
+Tentanator is a Python-based AI-powered exam grading system that combines manual grading with in-context learning (few-shot prompting). The workflow: grade sample responses manually → use graded examples as few-shot context → AI suggests grades for remaining responses via Cerebras inference. Works natively with Excel files (.xlsx) for both input and output.
 
 ## Development Setup
 
@@ -27,9 +27,6 @@ echo "CEREBRAS_API_KEY=your-cerebras-key-here" >> .env  # For chat/grading infer
 # Run main grading application
 python tentanator.py
 
-# Export graded CSVs to Excel format
-python make_excel.py
-
 # Lint code
 pylint tentanator.py openai_trainer.py sampling.py embeddings.py make_excel.py
 
@@ -46,10 +43,12 @@ python -m py_compile tentanator.py
 - Data classes: `GradedItem`, `QuestionGrades`, `GradingSession`
 - Key functions:
   - `grade_questions()`: Interactive grading CLI
-  - `export_to_csv()`: Export graded data
+  - `export_to_excel()`: Export graded data directly to .xlsx
   - `get_ai_grade_suggestion()`: Get AI suggestions via in-context learning (few-shot)
   - `_build_icl_messages()`: Build few-shot prompt from graded examples
-- Uses Cerebras (llama-4-scout) for chat completions via OpenAI-compatible API
+  - `read_exam_data()`: Read .xlsx or .csv files as list of dicts
+  - `list_exam_files()`: List .xlsx and .csv files in exams/ directory
+- Uses Cerebras (qwen-3-235b) for chat completions via OpenAI-compatible API
 - Uses OpenAI only for text embeddings (sampling algorithms)
 - Session persistence in `.tentanator_sessions/` directory
 - Embeddings caching for sampling algorithms
@@ -71,15 +70,16 @@ python -m py_compile tentanator.py
 - Uses `text-embedding-3-large` model
 - Async API calls for performance
 
-**make_excel.py**
-- Batch converts CSV files from `graded_exams/` to Excel format
-- Auto-adjusts column widths for readability
+**make_excel.py** (legacy utility)
+- Converts between CSV and Excel formats
+- No longer needed in main workflow since tentanator.py reads/writes Excel natively
 
 ### Data Flow
 
-1. **Manual Grading**: CSV → tentanator.py → session saved to `.tentanator_sessions/`
-2. **AI Grading**: Graded examples used as few-shot context → `get_ai_grade_suggestion()` → suggested grades via Cerebras
-3. **Export**: Completed session → export_to_csv() → `graded_exams/*.csv` → make_excel.py → Excel
+1. **Input**: Place Excel files (.xlsx) in `exams/` directory
+2. **Manual Grading**: Excel → tentanator.py → session saved to `.tentanator_sessions/`
+3. **AI Grading**: Graded examples used as few-shot context → `get_ai_grade_suggestion()` → suggested grades via Cerebras
+4. **Export**: Completed session → `export_to_excel()` → `graded_exams/*.xlsx`
 
 ### Key Configuration
 
@@ -94,15 +94,15 @@ In `tentanator.py`:
 
 ### Directory Structure
 
-- `exams/`: Input CSV files with student responses
-- `graded_exams/`: Output CSV files with completed grades
-- `graded_exams_out/`: Excel exports
+- `exams/`: Input Excel (.xlsx) or CSV files with student responses
+- `graded_exams/`: Output Excel (.xlsx) files with completed grades
 - `.tentanator_sessions/`: Saved grading sessions (JSON)
+- `global_bank/`: Downloaded question bank CSV files (internal)
 - `backups/`: Archived sessions and models
 
 ### Session Management
 
-Sessions are automatically saved after each grade to `.tentanator_sessions/{csv_name}_{timestamp}.json`. Sessions track:
+Sessions are automatically saved after each grade to `.tentanator_sessions/{name}_{timestamp}.json`. Sessions track:
 - ID/input/output column mappings
 - All graded items with timestamps
 - Embeddings cache for sampling algorithms

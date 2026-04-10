@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tentanator - CSV grading assistant with in-context learning support
+Tentanator - Excel grading assistant with in-context learning support
 """
 
 import asyncio
@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import dotenv
 import numpy as np
+import pandas as pd
 import requests
 from aioconsole import ainput
 from openai import AsyncOpenAI
@@ -446,17 +447,22 @@ async def prompt_question_with_auto_match(
             if not question:
                 print("   ⚠ Question not found in session.")
             else:
-                # Load CSV to get answer samples
-                csv_file = Path(session.csv_file)
-                # Try with exams/ prefix if not absolute
-                if not csv_file.exists() and not csv_file.is_absolute():
-                    csv_file = Path("exams") / csv_file
-                if not csv_file.exists():
-                    print(f"   ⚠ CSV file not found: {csv_file}")
+                # Load exam file to get answer samples
+                exam_file = Path(session.csv_file)
+                if not exam_file.exists() and not exam_file.is_absolute():
+                    exam_file = Path("exams") / exam_file
+                # Try alternate extension if not found
+                if not exam_file.exists():
+                    stem = exam_file.stem
+                    for ext in ('.xlsx', '.csv'):
+                        alt = Path("exams") / f"{stem}{ext}"
+                        if alt.exists():
+                            exam_file = alt
+                            break
+                if not exam_file.exists():
+                    print(f"   ⚠ Exam file not found: {exam_file}")
                 else:
-                    with open(csv_file, 'r', encoding='utf-8') as f:
-                        reader = csv.DictReader(f)
-                        rows = list(reader)
+                    rows = read_exam_data(exam_file)
 
                     # Get samples from the INPUT column (student responses), not output column
                     # Build list of (row_id, answer_text) tuples
@@ -755,7 +761,7 @@ def load_caches(session_name: str, archived: bool = False) -> Tuple[Dict[str, Di
 
 def list_sessions(archived: bool = False) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    List available sessions with their metadata (only those with existing CSV files)
+    List available sessions with their metadata (only those with existing exam files)
 
     Args:
         archived: If True, list archived sessions; if False, list active sessions
@@ -781,11 +787,17 @@ def list_sessions(archived: bool = False) -> List[Tuple[str, Dict[str, Any]]]:
                 session_name = session_file.stem
                 csv_file = data.get("csv_file", "")
 
-                # Check if CSV file exists
-                csv_path = Path("exams") / csv_file
-                if not csv_path.exists():
-                    # Skip sessions with missing CSV files
-                    continue
+                # Check if exam file exists (.xlsx or .csv)
+                exam_path = Path("exams") / csv_file
+                if not exam_path.exists():
+                    # Try alternate extension
+                    stem = Path(csv_file).stem
+                    alt = Path("exams") / f"{stem}.xlsx"
+                    if not alt.exists():
+                        alt = Path("exams") / f"{stem}.csv"
+                    if not alt.exists():
+                        continue
+                    exam_path = alt
 
                 metadata = {
                     "csv_file": csv_file,
@@ -1079,37 +1091,43 @@ def load_session(session_name: str, archived: bool = False) -> Optional[GradingS
         return None
 
 
-def list_csv_files(directory: str = "exams") -> List[str]:
-    """List all CSV files in the specified directory."""
-    csv_path = Path(directory)
-    if not csv_path.exists():
+def list_exam_files(directory: str = "exams") -> List[str]:
+    """List all exam files (.xlsx and .csv) in the specified directory."""
+    exam_path = Path(directory)
+    if not exam_path.exists():
         return []
-    return sorted([f.name for f in csv_path.glob("*.csv")])
+    xlsx = [f.name for f in exam_path.glob("*.xlsx")]
+    csv_files = [f.name for f in exam_path.glob("*.csv")]
+    return sorted(xlsx + csv_files)
 
 
-async def select_csv_file(csv_files: List[str]) -> Optional[str]:
-    """Prompt user to select a CSV file."""
-    if not csv_files:
-        print("No CSV files found in the exams/ directory.")
+async def select_exam_file(exam_files: List[str]) -> Optional[str]:
+    """Prompt user to select an exam file."""
+    if not exam_files:
+        print("No exam files found in the exams/ directory.")
         return None
 
-    print("\nAvailable CSV files:")
-    for idx, filename in enumerate(csv_files, 1):
+    print("\nAvailable exam files:")
+    for idx, filename in enumerate(exam_files, 1):
         print(f"{idx}. {filename}")
 
     while True:
         try:
-            choice = (await ainput("\nSelect a CSV file (enter number): ")).strip()
+            prompt = "\nSelect an exam file (enter number): "
+            choice = (await ainput(prompt)).strip()
             choice_idx = int(choice) - 1
-            if 0 <= choice_idx < len(csv_files):
-                return csv_files[choice_idx]
-            print(f"Please enter a number between 1 and {len(csv_files)}")
+            if 0 <= choice_idx < len(exam_files):
+                return exam_files[choice_idx]
+            print(f"Enter a number between 1 and {len(exam_files)}")
         except ValueError:
             print("Please enter a valid number")
 
 
-def get_csv_columns(filepath: Path) -> List[str]:
-    """Read and return column headers from CSV file."""
+def get_exam_columns(filepath: Path) -> List[str]:
+    """Read and return column headers from an exam file (.xlsx or .csv)."""
+    if filepath.suffix.lower() in ('.xlsx', '.xls'):
+        df = pd.read_excel(filepath, nrows=0)
+        return list(df.columns)
     with open(filepath, 'r', encoding='utf-8') as f:
         reader = csv.reader(f)
         headers = next(reader)
@@ -1139,11 +1157,13 @@ async def select_columns(columns: List[str], prompt: str, allow_multiple: bool =
             print("Please enter valid numbers")
 
 
-def read_csv_data(filepath: Path) -> List[Dict[str, str]]:
-    """Read all rows from CSV file as list of dictionaries"""
-    with open(filepath, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        return list(reader)
+def read_exam_data(filepath: Path) -> List[Dict[str, str]]:
+    """Read all rows from an exam file (.xlsx or .csv) as list of dicts."""
+    if filepath.suffix.lower() in ('.xlsx', '.xls'):
+        df = pd.read_excel(filepath, dtype=str).fillna("")
+    else:
+        df = pd.read_csv(filepath, dtype=str).fillna("")
+    return df.to_dict(orient='records')
 
 
 def get_row_id(row: Dict[str, str], id_columns: List[str]) -> str:
@@ -1335,8 +1355,16 @@ def select_representative_samples(
             if output_column is None:
                 raise ValueError("output_column is required for gptsort algorithm")
 
-            # Load CSV data to get text responses
-            csv_data = read_csv_data(Path(session.csv_file))
+            # Load exam data to get text responses
+            exam_path = Path("exams") / session.csv_file
+            if not exam_path.exists():
+                stem = Path(session.csv_file).stem
+                for ext in ('.xlsx', '.csv'):
+                    alt = Path("exams") / f"{stem}{ext}"
+                    if alt.exists():
+                        exam_path = alt
+                        break
+            csv_data = read_exam_data(exam_path)
 
             # Build text_data dict mapping row_id to response text
             text_data = {}
@@ -1729,9 +1757,9 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     print(f"✓ Auto-zeroed {auto_zeroed} remaining responses")
                     save_session(session, session_name)
 
-                # Export to CSV after AI review and auto-zeroing
-                print("\n📝 Exporting graded CSV...")
-                export_to_csv(session, csv_data)
+                # Export to Excel after AI review and auto-zeroing
+                print("\n📝 Exporting graded Excel...")
+                export_to_excel(session, csv_data)
 
             continue
 
@@ -1879,7 +1907,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             # Show existing value if present in CSV
             existing = row.get(output_col, "")
             if existing:
-                print(f"\nCurrent grade in CSV: {existing}")
+                print(f"\nCurrent grade: {existing}")
 
             # Check if we have a pre-computed AI suggestion
             ai_suggestion = ai_suggestion_cache.get(output_col, {}).get(row_id)
@@ -1967,16 +1995,20 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
     return session
 
 
-def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]],
-                  output_dir: str = "graded_exams") -> str:
-    """Export graded data to CSV file with grades filled in"""
+def export_to_excel(  # pylint: disable=too-many-locals
+    session: GradingSession,
+    csv_data: List[Dict[str, str]],
+    output_dir: str = "graded_exams",
+) -> str:
+    """Export graded data to Excel file with grades filled in."""
     Path(output_dir).mkdir(exist_ok=True)
 
-    # Use the same filename as the original CSV
-    output_file = Path(output_dir) / session.csv_file
+    # Use .xlsx extension regardless of input format
+    base_name = Path(session.csv_file).stem
+    output_file = Path(output_dir) / f"{base_name}.xlsx"
 
     # Create a mapping of row_id to grades for all questions
-    grades_by_row: Dict[str, Dict[str, str]] = {}  # row_id -> {output_col -> grade}
+    grades_by_row: Dict[str, Dict[str, str]] = {}
 
     for output_col, question in session.questions.items():
         for item in question.graded_items:
@@ -1984,28 +2016,37 @@ def export_to_csv(session: GradingSession, csv_data: List[Dict[str, str]],
                 grades_by_row[item.row_id] = {}
             grades_by_row[item.row_id][output_col] = item.grade
 
-    # Update the CSV data with grades
+    # Update the data with grades
     updated_rows = []
     for row in csv_data:
         row_id = get_row_id(row, session.id_columns)
         updated_row = row.copy()
 
-        # Add grades for this row
         if row_id in grades_by_row:
             for output_col, grade in grades_by_row[row_id].items():
                 updated_row[output_col] = grade
 
         updated_rows.append(updated_row)
 
-    # Write the updated CSV
     if updated_rows:
-        fieldnames = list(updated_rows[0].keys())
-        with open(output_file, 'w', newline='', encoding='utf-8') as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            writer.writeheader()
-            writer.writerows(updated_rows)
+        df = pd.DataFrame(updated_rows)
 
-        print(f"✓ Exported graded CSV to: {output_file}")
+        with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
+
+            # Auto-adjust column widths
+            worksheet = writer.sheets['Sheet1']
+            for col_name in df.columns:
+                col_width = max(
+                    df[col_name].astype(str).map(len).max(),
+                    len(str(col_name))
+                )
+                col_width = min(int(col_width), 50)
+                col_idx = int(df.columns.get_loc(col_name))
+                col_letter = worksheet.cell(1, col_idx + 1).column_letter
+                worksheet.column_dimensions[col_letter].width = col_width + 2
+
+        print(f"✓ Exported graded Excel to: {output_file}")
         return str(output_file)
 
     return ""
@@ -2165,7 +2206,7 @@ async def main() -> None:
         print("Found existing sessions:\n")
         for i, (name, metadata) in enumerate(existing_sessions, 1):
             print(f"{i}. {name}")
-            print(f"   CSV: {metadata['csv_file']}")
+            print(f"   File: {metadata['csv_file']}")
             print(f"   Last updated: {metadata['last_updated']}")
             print(f"   Questions: {metadata['num_questions']}\n")
 
@@ -2183,7 +2224,7 @@ async def main() -> None:
                 print("\n📦 Archived Sessions:\n")
                 for i, (name, metadata) in enumerate(archived_sessions, 1):
                     print(f"{i}. {name}")
-                    print(f"   CSV: {metadata['csv_file']}")
+                    print(f"   File: {metadata['csv_file']}")
                     print(f"   Last updated: {metadata['last_updated']}")
                     print(f"   Questions: {metadata['num_questions']}\n")
 
@@ -2238,7 +2279,7 @@ async def main() -> None:
 
     if selected_session:
         print("\n=== Resuming Session ===")
-        print(f"CSV: {selected_session.csv_file}")
+        print(f"File: {selected_session.csv_file}")
 
         # Count valid grades only (excluding blank/dash)
         valid_graded = sum(
@@ -2253,9 +2294,16 @@ async def main() -> None:
             print(f"         ({auto_graded} blank/dash responses auto-graded as 0)")
         print(f"Questions: {len(selected_session.questions)} questions in progress\n")
 
-        # Load CSV data
+        # Load exam data (try exact path, then alternate extension)
         filepath = Path("exams") / selected_session.csv_file
-        csv_data = read_csv_data(filepath)
+        if not filepath.exists():
+            stem = filepath.stem
+            for ext in ('.xlsx', '.csv'):
+                alt = Path("exams") / f"{stem}{ext}"
+                if alt.exists():
+                    filepath = alt
+                    break
+        csv_data = read_exam_data(filepath)
 
         session = await grade_questions(selected_session, csv_data,
                                          session_name=current_session_name)
@@ -2279,8 +2327,8 @@ async def main() -> None:
         return
 
     # Start new session
-    csv_files = list_csv_files()
-    selected_file = await select_csv_file(csv_files)
+    exam_files = list_exam_files()
+    selected_file = await select_exam_file(exam_files)
 
     if not selected_file:
         return
@@ -2288,12 +2336,12 @@ async def main() -> None:
     filepath = Path("exams") / selected_file
     print(f"\nSelected: {selected_file}")
 
-    # Get columns from CSV
+    # Get columns from exam file
     try:
-        columns = get_csv_columns(filepath)
-        csv_data = read_csv_data(filepath)
-    except (OSError, csv.Error, UnicodeDecodeError) as e:
-        print(f"Error reading CSV file: {e}")
+        columns = get_exam_columns(filepath)
+        csv_data = read_exam_data(filepath)
+    except (OSError, ValueError, UnicodeDecodeError) as e:
+        print(f"Error reading exam file: {e}")
         return
 
     # Select ID columns
@@ -2327,7 +2375,7 @@ async def main() -> None:
         print("Each output column will be paired with the corresponding input column by index.")
 
     print("\n=== Configuration Complete ===")
-    print(f"CSV File: {selected_file}")
+    print(f"Exam File: {selected_file}")
     print(f"ID Columns: {', '.join(id_columns)}")
     print(f"Input Columns: {', '.join(input_columns)}")
     print(f"Output Columns: {', '.join(output_columns)}")
