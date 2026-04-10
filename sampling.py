@@ -35,8 +35,12 @@ class SamplingAlgorithm(str, Enum):
     GPTSORT = "gptsort"
     IFOREST_GMM = "iforest_gmm"
 
-# Initialize OpenAI client forf GPTSort algorithm
-openai_client = AsyncOpenAI()
+# Initialize Cerebras client for GPTSort algorithm (OpenAI-compatible API)
+CEREBRAS_GPTSORT_MODEL = "qwen-3-235b-a22b-instruct-2507"
+cerebras_client = AsyncOpenAI(
+    api_key=os.getenv("CEREBRAS_API_KEY"),
+    base_url="https://api.cerebras.ai/v1"
+)
 
 # 'spherical' - Fastest  (1 parameter per component)
 # 'diag'      - Fast     (d parameters per component)
@@ -506,8 +510,8 @@ For example: 3,1,5,2,4
 Your ranking (numbers only, comma-separated):"""
 
     try:
-        response = await openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+        response = await cerebras_client.chat.completions.create(
+            model=CEREBRAS_GPTSORT_MODEL,
             messages=[{"role": "user", "content": prompt}],
             temperature=0.0,
             max_tokens=100,
@@ -542,7 +546,7 @@ Your ranking (numbers only, comma-separated):"""
         return sorted_ids
 
     except (APIError, APIConnectionError) as e:
-        print(f"⚠️  OpenAI API error sorting chunk: {e}")
+        print(f"⚠️  Cerebras API error sorting chunk: {e}")
         # Fallback to original order
         return [r[0] for r in responses]
     except (AttributeError, IndexError, KeyError) as e:

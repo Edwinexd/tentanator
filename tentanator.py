@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tentanator - CSV grading assistant with AI fine-tuning support
+Tentanator - CSV grading assistant with in-context learning support
 """
 
 import asyncio
@@ -23,8 +23,19 @@ from sampling import SamplingAlgorithm, get_samples, get_features, optimize_feat
 
 dotenv.load_dotenv()
 
-# Initialize OpenAI client globally
-client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize Cerebras client for chat completions (OpenAI-compatible API)
+# Note: OpenAI client for embeddings lives in embeddings.py
+cerebras_client = AsyncOpenAI(
+    api_key=os.getenv("CEREBRAS_API_KEY"),
+    base_url="https://api.cerebras.ai/v1"
+)
+
+# Cerebras model for grading inference
+CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
+
+# In-context learning settings
+MIN_ICL_EXAMPLES = 5  # Minimum graded items needed before offering AI suggestions
+MAX_ICL_EXAMPLES = 20  # Maximum few-shot examples to include in prompt
 
 # Constants
 NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples (used for kmeans_fixed)
@@ -1140,39 +1151,66 @@ def get_row_id(row: Dict[str, str], id_columns: List[str]) -> str:
     return "_".join([row.get(col, "") for col in id_columns])
 
 
-def load_model_registry() -> Dict[str, Dict[str, Any]]:
-    """Load the models.json registry"""
-    models_file = Path("models.json")
-    if models_file.exists():
-        try:
-            with open(models_file, 'r', encoding='utf-8') as f:
-                registry = json.load(f)
-                print(f"📚 Loaded {len(registry)} models from registry")
-                return registry
-        except (json.JSONDecodeError, OSError) as e:
-            print(f"⚠️  Failed to load models.json: {e}")
+def _has_enough_icl_examples(question: QuestionGrades) -> bool:
+    """Check if question has enough graded items for in-context learning."""
+    valid_count = sum(
+        1 for item in question.graded_items
+        if item.input_text.strip() not in ["", "-", "N/A"]
+    )
+    return valid_count >= MIN_ICL_EXAMPLES
+
+
+def _build_icl_messages(question: QuestionGrades,
+                        response_text: str) -> List[Dict[str, str]]:
+    """Build few-shot messages from graded examples for in-context learning."""
+    # Build system prompt with exam question
+    if question.exam_question:
+        system_content = BASE_SYSTEM_PROMPT.format(exam_question=question.exam_question)
     else:
-        print("📚 No models.json found - no trained models available")
-    return {}
+        system_content = f"You are grading responses for: {question.question_name}"
+
+    messages: List[Dict[str, str]] = [{"role": "system", "content": system_content}]
+
+    # Collect valid graded items as few-shot examples (skip blank/dash)
+    examples = [
+        item for item in question.graded_items
+        if item.input_text.strip() not in ["", "-", "N/A"]
+    ]
+
+    # Limit to MAX_ICL_EXAMPLES, sampling evenly across grades for diversity
+    if len(examples) > MAX_ICL_EXAMPLES:
+        # Sort by grade value for even sampling across the grade range
+        def _grade_sort_key(x: GradedItem) -> float:
+            grade = x.grade.replace('.', '', 1).lstrip('-')
+            return float(x.grade) if grade.isdigit() else 0
+        sorted_examples = sorted(examples, key=_grade_sort_key)
+        step = len(sorted_examples) / MAX_ICL_EXAMPLES
+        examples = [sorted_examples[int(i * step)] for i in range(MAX_ICL_EXAMPLES)]
+
+    # Add few-shot examples as user/assistant turns
+    for item in examples:
+        # Truncate very long responses in examples to save context
+        example_text = item.input_text
+        if len(example_text) > 1000:
+            example_text = example_text[:1000] + "..."
+        messages.append({"role": "user", "content": example_text})
+        messages.append({"role": "assistant", "content": item.grade})
+
+    # Add the new response to grade
+    messages.append({"role": "user", "content": response_text})
+
+    return messages
 
 
-async def get_ai_grade_suggestion(model_id: str, question: QuestionGrades,
+async def get_ai_grade_suggestion(question: QuestionGrades,
                                    response_text: str) -> Optional[str]:
-    """Get AI-suggested grade from fine-tuned model"""
+    """Get AI-suggested grade using in-context learning with Cerebras."""
     try:
-        # Build system prompt with exam question
-        if question.exam_question:
-            system_content = BASE_SYSTEM_PROMPT.format(exam_question=question.exam_question)
-        else:
-            system_content = f"You are grading responses for: {question.question_name}"
+        messages = _build_icl_messages(question, response_text)
 
-        # Get grade from model
-        response = await client.chat.completions.create(
-            model=model_id,
-            messages=[
-                {"role": "system", "content": system_content},
-                {"role": "user", "content": response_text}
-            ],
+        response = await cerebras_client.chat.completions.create(
+            model=CEREBRAS_MODEL,
+            messages=messages,
             max_tokens=10,
             temperature=0.0
         )
@@ -1401,27 +1439,10 @@ async def perform_sampling_for_all_questions(
     print("Selecting representative samples for each question...")
     print("-" * 50)
 
-    # Load model registry to check for existing models
-    model_registry = load_model_registry()
-
     for col_idx, output_col in enumerate(session.output_columns):
         question = session.questions[output_col]
 
         print(f"\n📋 Question {col_idx + 1}/{len(session.output_columns)}: {output_col}")
-
-        # Check if a trained model already exists for this question (via global_question_id)
-        has_model = False
-        if question.global_question_id and model_registry:
-            for model_info in model_registry.values():
-                if model_info.get('global_question_id') == question.global_question_id:
-                    has_model = True
-                    model_name = model_info.get('question_name', 'unknown')
-                    print(f"   🤖 Model exists (trained on: {model_name})")
-                    print("   ⚡ Skipping sampling - will use existing model for AI grading")
-                    break
-
-        if has_model:
-            continue
 
         # Count only valid (non-blank) graded items
         valid_graded_count = sum(1 for item in question.graded_items
@@ -1470,25 +1491,13 @@ async def perform_sampling_for_all_questions(
         else:
             print("   ⚠️  No sampling - will grade all responses manually")
 
-    # Show sampling summary only if any sampling was done or models exist
-    has_any_sampling = False
-    has_any_models = False
+    # Show sampling summary if any sampling was done
+    has_any_sampling = any(
+        session.questions[col].sampling_result
+        for col in session.output_columns
+    )
 
-    for output_col in session.output_columns:
-        question = session.questions[output_col]
-
-        # Check if model exists
-        if question.global_question_id and model_registry:
-            for model_info in model_registry.values():
-                if model_info.get('global_question_id') == question.global_question_id:
-                    has_any_models = True
-                    break
-
-        if question.sampling_result:
-            has_any_sampling = True
-
-    # Only show summary if there's something to show
-    if has_any_sampling or has_any_models:
+    if has_any_sampling:
         print("\n" + "=" * 50)
         print("📊 SAMPLING SUMMARY")
         print("=" * 50)
@@ -1496,23 +1505,12 @@ async def perform_sampling_for_all_questions(
         for output_col in session.output_columns:
             question = session.questions[output_col]
 
-            # Check if model exists
-            has_model = False
-            if question.global_question_id and model_registry:
-                for model_info in model_registry.values():
-                    if model_info.get('global_question_id') == question.global_question_id:
-                        has_model = True
-                        break
-
-            if has_model or question.sampling_result:
+            if question.sampling_result:
                 print(f"\n{output_col}:")
-                if has_model:
-                    print("  🤖 Using existing model (no sampling needed)")
-                elif question.sampling_result:
-                    print(f"  Algorithm: {question.sampling_result.algorithm}")
-                    print(f"  Samples: {question.sampling_result.num_samples}")
-                    if question.sampling_result.quality_score > 0:
-                        print(f"  Quality: {question.sampling_result.quality_score:.3f}")
+                print(f"  Algorithm: {question.sampling_result.algorithm}")
+                print(f"  Samples: {question.sampling_result.num_samples}")
+                if question.sampling_result.quality_score > 0:
+                    print(f"  Quality: {question.sampling_result.quality_score:.3f}")
 
         print("\n" + "=" * 50)
         await ainput("\nPress Enter to start grading...")
@@ -1529,11 +1527,8 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
     print("Commands: [q]uit, [s]kip, [b]ack, or enter grade value")
-    print("AI models (if available) will grade remaining responses after threshold is reached")
+    print("AI (in-context learning) will suggest grades once enough examples are graded")
     print("-" * 50)
-
-    # Load model registry to check for trained models
-    model_registry = load_model_registry()
 
     # Cache for pre-computed AI suggestions (rolling window)
     ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
@@ -1558,57 +1553,6 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             print(f"\n📊 Using {question.sampling_result.algorithm} sampling")
             print(f"   {question.sampling_result.num_samples} representative samples to grade")
 
-        # Check if there's a trained model for this question
-        model_id = None
-        if model_registry:
-            # Extract exam identifier from session
-            exam_id = Path(session.csv_file).stem if session.csv_file else ""
-
-            # Look for a model trained on this question
-            print(f"\n🔍 Looking for model for: {output_col} (Exam: {exam_id})")
-            if question.global_question_id:
-                print(f"   🔗 Global Question ID: {question.global_question_id}")
-
-            # Priority 1: Match on global_question_id (allows cross-exam reuse)
-            if question.global_question_id:
-                for mid, info in model_registry.items():
-                    model_global_q_id = info.get('global_question_id')
-                    if model_global_q_id == question.global_question_id:
-                        model_id = mid
-                        model_exam = info.get('exam_id', 'unknown')
-                        print("\n✅ MATCHED via global question ID!")
-                        print(f"   Model trained on: {model_exam}")
-                        print(f"   Model ID: {model_id}")
-                        break
-
-            # Priority 2: Fallback to old matching logic (question_name + exam_id)
-            if not model_id:
-                print("   No global question ID match, trying legacy matching...")
-                for mid, info in model_registry.items():
-                    model_question = info.get('question_name', '')
-                    model_exam = info.get('exam_id', '')
-
-                    # More flexible matching - handle both "Points 27" and "Points_27" formats
-                    normalized_output = output_col.replace(' ', '_').lower()
-                    normalized_model = model_question.replace(' ', '_').lower()
-
-                    # Match if the output_col appears in the model's question_name
-                    if normalized_output in normalized_model:
-                        # Check if exam matches
-                        if not model_exam or exam_id.lower() in model_exam.lower() or model_exam.lower() in exam_id.lower():
-                            model_id = mid
-                            print("\n✅ MATCHED via legacy matching (question + exam)")
-                            print(f"   Model: {model_question} (Exam: {model_exam})")
-                            print(f"   Model ID: {model_id}")
-                            break
-
-            if not model_id:
-                print(f"❌ No matching model found - manual grading only for {output_col}")
-
-        # Count only valid (non-blank) graded items
-        valid_graded_count = sum(1 for item in question.graded_items
-                                if item.input_text.strip() not in ["", "-", "N/A"])
-
         # Check if there are ungraded rows
         graded_ids = {item.row_id for item in question.graded_items}
         ungraded_rows = []
@@ -1620,18 +1564,21 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 if response_text.strip() not in ["", "-", "N/A"]:
                     ungraded_rows.append((row_idx, row))
 
-        # If model exists and we have ungraded rows, offer AI grading
-        if model_id and ungraded_rows:
-            if valid_graded_count >= threshold:
-                print(f"\n✓ Already have {threshold} manual grades for {output_col}")
-            else:
-                print(f"\n✓ Model exists for {output_col}")
+        # Check if we have enough graded examples for in-context learning
+        icl_ready = _has_enough_icl_examples(question)
 
-            print(f"🤖 Model available for {len(ungraded_rows)} ungraded responses")
-            use_ai = (await ainput("Use AI to grade all ungraded responses? [y/n]: ")).strip().lower()
+        # If we have enough examples and ungraded rows, offer AI grading via ICL
+        if icl_ready and valid_graded_count >= threshold and ungraded_rows:
+            print(f"\n✓ Already have {threshold} manual grades for {output_col}")
+            print(f"🤖 In-context learning available for {len(ungraded_rows)} ungraded responses")
+            n_examples = min(len(question.graded_items), MAX_ICL_EXAMPLES)
+            print(f"   (using {n_examples} graded examples as few-shot context)")
+            prompt_msg = "Use AI to grade all ungraded responses? [y/n]: "
+            use_ai = (await ainput(prompt_msg)).strip().lower()
 
             if use_ai == 'y':
-                print("\nGrading with AI - you can review and modify each suggestion...")
+                print("\nGrading with AI (in-context learning)"
+                      " - review and modify each suggestion...")
                 print("(AI grades are pre-fetched 10 ahead for smooth review)")
 
                 # Rolling window configuration
@@ -1642,7 +1589,6 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     idx: int,
                     rows: List[Tuple[int, Dict[str, str]]],
                     tasks: Dict[int, asyncio.Task],
-                    curr_model_id: str,
                     curr_question: QuestionGrades
                 ):
                     """Start prefetching grade for a specific index if not already started"""
@@ -1651,7 +1597,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     _, row = rows[idx]
                     response_text = row.get(curr_question.input_column, "N/A")
                     task = asyncio.create_task(
-                        get_ai_grade_suggestion(curr_model_id, curr_question, response_text)
+                        get_ai_grade_suggestion(curr_question, response_text)
                     )
                     tasks[idx] = task
 
@@ -1665,7 +1611,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 # Pre-fetch first 10
                 print(f"🚀 Pre-fetching first {prefetch_buffer_size} grades...")
                 for i in range(min(prefetch_buffer_size, len(ungraded_rows))):
-                    start_prefetch(i, ungraded_rows, prefetch_tasks, model_id, question)
+                    start_prefetch(i, ungraded_rows, prefetch_tasks, question)
 
                 # Use while loop to allow going back
                 ai_grading_idx = 0
@@ -1688,7 +1634,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     else:
                         # Fallback: fetch on-demand if not pre-fetched
                         ai_suggestion = await get_ai_grade_suggestion(
-                            model_id, question, response_text
+                            question, response_text
                         )
 
                     if ai_suggestion:
@@ -1748,7 +1694,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                             # Start prefetching next item in the rolling window
                             next_prefetch_idx = ai_grading_idx + prefetch_buffer_size
                             start_prefetch(
-                                next_prefetch_idx, ungraded_rows, prefetch_tasks, model_id, question
+                                next_prefetch_idx, ungraded_rows, prefetch_tasks, question
                             )
 
                             break  # Exit validation loop
@@ -1803,17 +1749,16 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         if output_col not in ai_suggestion_cache:
             ai_suggestion_cache[output_col] = {}
 
-        # Pre-compute AI suggestions for rolling window (if model available)
+        # Pre-compute AI suggestions for rolling window (if ICL ready)
         async def precompute_suggestions(
             start_idx: int,
             win_size: int,
-            curr_model_id: Optional[str],
             curr_graded_ids: set,
             curr_output_col: str,
             curr_question: QuestionGrades
         ):
             """Pre-compute AI suggestions for upcoming responses concurrently"""
-            if not curr_model_id:
+            if not _has_enough_icl_examples(curr_question):
                 return
 
             # Collect all responses that need AI suggestions
@@ -1840,7 +1785,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
                 # Create task for getting AI suggestion
                 tasks.append(get_ai_grade_suggestion(
-                    curr_model_id, curr_question, future_response
+                    curr_question, future_response
                 ))
                 row_ids_to_compute.append(future_row_id)
 
@@ -1854,10 +1799,10 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     if ai_grade and isinstance(ai_grade, str):
                         ai_suggestion_cache[curr_output_col][row_id] = ai_grade
 
-        if model_id:
-            print("🤖 AI model available - pre-computing suggestions for smoother grading")
+        if icl_ready:
+            print("🤖 In-context learning available - pre-computing suggestions for smoother grading")
             # Pre-load first window
-            await precompute_suggestions(0, window_size, model_id, graded_ids, output_col, question)
+            await precompute_suggestions(0, window_size, graded_ids, output_col, question)
         print(f"{'='*60}")
 
         # Create prioritized list of rows to grade (representative samples first)
@@ -1888,9 +1833,9 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             row_idx, row = prioritized_rows[manual_grading_idx]
 
             # Pre-compute suggestions for next window of responses
-            if model_id and row_idx % 3 == 0:  # Update window every 3 responses
+            if icl_ready and row_idx % 3 == 0:  # Update window every 3 responses
                 await precompute_suggestions(
-                    row_idx + 1, window_size, model_id, graded_ids, output_col, question
+                    row_idx + 1, window_size, graded_ids, output_col, question
                 )
 
             # Get row ID
@@ -2015,16 +1960,9 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         print(f"Graded {threshold} valid responses for all {num_questions} questions")
         print(f"{'='*60}")
 
-        # Export to JSONL for training
-        print("\n📤 Exporting training data to JSONL...")
-        await export_to_jsonl(session, session_name=session_name)
-
         print("\n💡 Next steps:")
-        print("   1. Train a model using the exported JSONL files")
-        print("   2. Reopen this session - the model will be auto-detected")
-        print("   3. Continue grading remaining responses with AI assistance")
-
-        return session  # Return here to avoid duplicate export prompt
+        print("   1. Reopen this session to continue grading remaining responses")
+        print("   2. AI will use your graded examples as few-shot context (in-context learning)")
 
     return session
 
@@ -2325,20 +2263,6 @@ async def main() -> None:
         # Check if session is complete
         session_complete = is_session_complete(session, csv_data)
 
-        # Check if we only did manual grading (threshold) without AI review
-        # If so, ask about JSONL export for training
-        all_fully_graded = all(
-            len(q.graded_items) >= len(csv_data)  # All rows graded
-            for q in session.questions.values()
-        )
-
-        if not all_fully_graded:
-            # We only graded the manual threshold, ask about JSONL export for training
-            export_now = (await ainput("\nExport to JSONL for fine-tuning? [y/n]: ")).strip().lower()
-            if export_now == 'y':
-                await export_to_jsonl(session, session_name=current_session_name)
-        # If all_fully_graded is True, we already exported CSV and don't need JSONL
-
         # If session is complete and not already archived, offer to archive it
         if session_complete and not is_archived and current_session_name:
             print(f"\n{'='*60}")
@@ -2436,21 +2360,7 @@ async def main() -> None:
     # Check if session is complete
     session_complete = is_session_complete(session, csv_data)
 
-    # Check if we only did manual grading (threshold) without AI review
-    # If so, ask about JSONL export for training
     if session.questions:
-        all_fully_graded = all(
-            len(q.graded_items) >= len(csv_data)  # All rows graded
-            for q in session.questions.values()
-        )
-
-        if not all_fully_graded:
-            # We only graded the manual threshold, ask about JSONL export for training
-            export_now = (await ainput("\nExport to JSONL for fine-tuning? [y/n]: ")).strip().lower()
-            if export_now == 'y':
-                await export_to_jsonl(session, session_name=session_name)
-        # If all_fully_graded is True, we already exported CSV and don't need JSONL
-
         # If session is complete, offer to archive it
         if session_complete:
             print(f"\n{'='*60}")
