@@ -115,6 +115,8 @@ assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, \
 # Global bank directories for question matching
 GLOBAL_BANK_DIR = Path("global_bank")
 EMBEDDINGS_DIR = Path("global_banks_embeddings")
+# Cross-session graded-item pool, keyed by global_question_id.
+GRADED_POOL_DIR = GLOBAL_BANK_DIR / "graded_pool"
 
 # Sampling algorithm configuration
 # Available algorithms:
@@ -179,6 +181,9 @@ class QuestionGrades:
     global_question_id: Optional[str] = None  # Global question bank ID for model reuse
     graded_items: List[GradedItem] = field(default_factory=list)
     sampling_result: Optional[SamplingResult] = None  # Sampling result for this question
+    # Items loaded from the cross-session graded pool (not persisted to the
+    # session JSON — re-hydrated from `global_bank/graded_pool/<id>.jsonl`).
+    external_graded_items: List[GradedItem] = field(default_factory=list)
 
 
 @dataclass
@@ -973,6 +978,14 @@ def save_session(session: GradingSession, session_name: Optional[str] = None,
         print(f"✓ Session saved to archive as '{session_name}'")
     else:
         print(f"✓ Session saved as '{session_name}'")
+
+    # Sync any linked questions' new grades into the shared pool so other
+    # sessions can reuse them as ICL examples.
+    for question in session.questions.values():
+        appended = sync_question_to_pool(question, session_name)
+        if appended:
+            print(f"  ↗ Pooled {appended} new example(s) for gq_id={question.global_question_id}")
+
     return session_name
 
 
@@ -1177,10 +1190,94 @@ def load_session(session_name: str, archived: bool = False) -> Optional[GradingS
             features_cache=features_cache
         )
 
+        # Hydrate cross-session graded examples from the pool for any
+        # question already linked to a global_question_id.
+        for q in session.questions.values():
+            hydrate_external_graded_items(q, session_name)
+
         return session
     except (json.JSONDecodeError, OSError, KeyError) as e:
         print(f"Error loading session: {e}")
         return None
+
+
+def _pool_file(global_question_id: str) -> Path:
+    return GRADED_POOL_DIR / f"{global_question_id}.jsonl"
+
+
+def _read_pool_lines(global_question_id: str) -> List[Dict[str, str]]:
+    path = _pool_file(global_question_id)
+    if not path.exists():
+        return []
+    out: List[Dict[str, str]] = []
+    with path.open(encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                out.append(json.loads(raw))
+            except json.JSONDecodeError:
+                continue
+    return out
+
+
+def hydrate_external_graded_items(question: QuestionGrades,
+                                   current_session_name: Optional[str]) -> None:
+    """Populate `question.external_graded_items` from the shared graded pool.
+
+    Items from `current_session_name` are excluded so the same grade doesn't
+    appear twice (once as own, once as external) when building ICL examples.
+    """
+    if not question.global_question_id:
+        question.external_graded_items = []
+        return
+    items: List[GradedItem] = []
+    for rec in _read_pool_lines(question.global_question_id):
+        if current_session_name and rec.get("source_session") == current_session_name:
+            continue
+        # Namespace the row_id to avoid cross-session collisions with the
+        # current session's own graded_items (which use the unadorned row_id).
+        src = rec.get("source_session", "external")
+        items.append(GradedItem(
+            row_id=f"{src}::{rec.get('row_id','')}",
+            input_text=rec.get("input_text", ""),
+            grade=rec.get("grade", ""),
+            timestamp=rec.get("timestamp", ""),
+        ))
+    question.external_graded_items = items
+
+
+def sync_question_to_pool(question: QuestionGrades, session_name: str) -> int:
+    """Append this session's new graded items to the shared pool file.
+
+    Deduplicates on (source_session, row_id). Returns the number appended.
+    No-op if the question is not linked to a global_question_id.
+    """
+    gq_id = question.global_question_id
+    if not gq_id or not session_name:
+        return 0
+    GRADED_POOL_DIR.mkdir(parents=True, exist_ok=True)
+    existing = {(r.get("source_session", ""), r.get("row_id", ""))
+                for r in _read_pool_lines(gq_id)}
+    appended = 0
+    path = _pool_file(gq_id)
+    with path.open("a", encoding="utf-8") as f:
+        for item in question.graded_items:
+            key = (session_name, item.row_id)
+            if key in existing:
+                continue
+            rec = {
+                "row_id": item.row_id,
+                "input_text": item.input_text,
+                "grade": item.grade,
+                "timestamp": item.timestamp,
+                "source_session": session_name,
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            existing.add(key)
+            appended += 1
+    return appended
 
 
 def list_exam_files(directory: str = "exams") -> List[str]:
@@ -1263,10 +1360,21 @@ def get_row_id(row: Dict[str, str], id_columns: List[str]) -> str:
     return "_".join([row.get(col, "") for col in id_columns])
 
 
+def _all_icl_candidates(question: QuestionGrades) -> List[GradedItem]:
+    """Merge own graded items with pooled cross-session items (own takes precedence)."""
+    own_keys = {item.row_id for item in question.graded_items}
+    merged = list(question.graded_items)
+    for item in question.external_graded_items:
+        if item.row_id in own_keys:
+            continue
+        merged.append(item)
+    return merged
+
+
 def _has_enough_icl_examples(question: QuestionGrades) -> bool:
-    """Check if question has enough graded items for in-context learning."""
+    """Check if question has enough graded items (own + pooled) for ICL."""
     valid_count = sum(
-        1 for item in question.graded_items
+        1 for item in _all_icl_candidates(question)
         if item.input_text.strip() not in ["", "-", "N/A"]
     )
     return valid_count >= MIN_ICL_EXAMPLES
@@ -1283,9 +1391,11 @@ def _build_icl_messages(question: QuestionGrades,
 
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_content}]
 
-    # Collect valid graded items as few-shot examples (skip blank/dash)
+    # Collect valid graded items as few-shot examples (skip blank/dash).
+    # Merge own session grades with any external grades hydrated from the
+    # cross-session pool so ICL is available from the start on a linked question.
     examples = [
-        item for item in question.graded_items
+        item for item in _all_icl_candidates(question)
         if item.input_text.strip() not in ["", "-", "N/A"]
     ]
 
@@ -1622,6 +1732,10 @@ async def perform_sampling_for_all_questions(
                 if global_q_id:
                     question.global_question_id = global_q_id
                     print(f"   ✓ Linked to global question ID: {global_q_id}")
+                    hydrate_external_graded_items(question, session_name)
+                    if question.external_graded_items:
+                        print(f"   ✓ Loaded {len(question.external_graded_items)} "
+                              f"external example(s) from the graded pool")
 
                 # Always save session after auto-match (embeddings may have been generated)
                 if session_name:
@@ -1770,11 +1884,19 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
         # Check if we have enough graded examples for in-context learning
         icl_ready = _has_enough_icl_examples(question)
 
-        # If we have enough examples and ungraded rows, offer AI grading via ICL
-        if icl_ready and valid_graded_count >= threshold and ungraded_rows:
-            print(f"\n✓ Already have {threshold} manual grades for {output_col}")
+        # If we have enough examples and ungraded rows, offer AI grading via ICL.
+        # External pooled examples count toward the ICL threshold so a freshly
+        # linked question can go straight to AI grading.
+        total_icl = len(_all_icl_candidates(question))
+        external_count = len(question.external_graded_items)
+        if icl_ready and total_icl >= threshold and ungraded_rows:
+            if external_count and valid_graded_count < threshold:
+                print(f"\n✓ ICL ready via pool: {external_count} external + "
+                      f"{valid_graded_count} own example(s) for {output_col}")
+            else:
+                print(f"\n✓ Already have {threshold} manual grades for {output_col}")
             print(f"🤖 In-context learning available for {len(ungraded_rows)} ungraded responses")
-            n_examples = min(len(question.graded_items), MAX_ICL_EXAMPLES)
+            n_examples = min(total_icl, MAX_ICL_EXAMPLES)
             print(f"   (using {n_examples} graded examples as few-shot context)")
             prompt_msg = "Use AI to grade all ungraded responses? [y/n]: "
             use_ai = (await ainput(prompt_msg)).strip().lower()
