@@ -9,7 +9,7 @@ A workspace is a self-contained folder that includes:
 - Graded exams (graded_exams/, graded_exams_out/)
 - Global banks (global_bank/, global_banks_embeddings/)
 - Backups (backups/)
-- Input exams (exams/, exams_in/, exams_in_raw/)
+- Input exams (exams/, exams_in_raw/)
 
 Usage:
     python workspace.py list                    # List all workspaces
@@ -45,7 +45,6 @@ WORKSPACE_ITEMS = [
     "global_banks_embeddings",
     "backups",
     "exams",
-    "exams_in",
     "exams_in_raw"
 ]
 
@@ -132,7 +131,6 @@ def create_workspace(name: str) -> bool:
     (workspace_path / "graded_exams_out").mkdir()
     (workspace_path / "backups").mkdir()
     (workspace_path / "exams").mkdir()
-    (workspace_path / "exams_in").mkdir()
     (workspace_path / "exams_in_raw").mkdir()
 
     # Create empty models.json

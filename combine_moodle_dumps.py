@@ -5,7 +5,7 @@ This script merges two Excel exports from Moodle:
 1. Grades file: Contains student info and point scores
 2. Responses file: Contains student responses and question text
 
-Output format matches existing exam CSVs, saved as Excel in exams_in/ directory.
+Output format matches existing exam CSVs, saved as Excel in exams/ directory.
 """
 import sys
 from pathlib import Path
@@ -220,7 +220,7 @@ def main() -> None:
             sys.exit(1)
 
         # Use base name from input files for output
-        output_file = f'exams_in/{base_name}.xlsx'
+        output_file = f'exams/{base_name}.xlsx'
         print("Found files:")
         print(f"  Grades: {grades_file}")
         print(f"  Responses: {responses_file}")

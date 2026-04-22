@@ -28,7 +28,7 @@ echo "CEREBRAS_API_KEY=your-cerebras-key-here" >> .env  # For chat/grading infer
 python tentanator.py
 
 # Lint code
-pylint tentanator.py openai_trainer.py sampling.py embeddings.py make_excel.py
+pylint tentanator.py openai_trainer.py sampling.py embeddings.py combine_moodle_dumps.py workspace.py
 
 # Check syntax
 python -m py_compile tentanator.py
@@ -70,9 +70,12 @@ python -m py_compile tentanator.py
 - Uses `text-embedding-3-large` model
 - Async API calls for performance
 
-**make_excel.py** (legacy utility)
-- Converts between CSV and Excel formats
-- No longer needed in main workflow since tentanator.py reads/writes Excel natively
+**combine_moodle_dumps.py**
+- Merges Moodle grades + responses xlsx dumps into a single exam xlsx
+- Input: files in `exams_in_raw/`; Output: `exams/{base_name}.xlsx`
+
+**workspace.py**
+- Workspace management (load/unload/create/delete) — moves per-workspace directories between root and `workspaces/<name>/`
 
 ### Data Flow
 
@@ -95,10 +98,12 @@ In `tentanator.py`:
 ### Directory Structure
 
 - `exams/`: Input Excel (.xlsx) or CSV files with student responses
+- `exams_in_raw/`: Raw Moodle grade/response dumps (input to `combine_moodle_dumps.py`)
 - `graded_exams/`: Output Excel (.xlsx) files with completed grades
 - `.tentanator_sessions/`: Saved grading sessions (JSON)
 - `global_bank/`: Downloaded question bank CSV files (internal)
 - `backups/`: Archived sessions and models
+- `workspaces/<name>/`: Per-workspace snapshots of the above dirs (managed by `workspace.py`)
 
 ### Session Management
 
