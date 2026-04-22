@@ -211,7 +211,6 @@ exams_in_raw/
 exams_in/
 exams/
 graded_exams/
-graded_exams_out/
 .tentanator*.json
 training_data/
 models.json

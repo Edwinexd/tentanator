@@ -137,33 +137,11 @@ python tentanator.py
    - All grades are recorded with timestamps
    - Export final CSV when complete
 
-### File Format Conversion
+### File Formats
 
-The `make_excel.py` utility handles bidirectional conversion between CSV and Excel formats:
-
-```bash
-python make_excel.py
-```
-
-**What it does**:
-
-**Excel → CSV (Input Processing)**:
-- Converts ungraded Excel files from `exams_in/` directory
-- Creates CSV files in `exams/` directory for grading
-- Supports both `.xlsx` and `.xls` formats
-- Reads first sheet by default
-
-**CSV → Excel (Output Formatting)**:
-- Converts graded CSV files from `graded_exams/` directory
-- Creates Excel files in `graded_exams_out/` directory
-- Auto-adjusts column widths for better readability
-- Preserves all data and formatting from the CSV files
-
-**Workflow**:
-1. Place ungraded Excel files in `exams_in/`
-2. Run `python make_excel.py` to convert to CSV
-3. Grade exams using `tentanator.py`
-4. Run `python make_excel.py` again to convert graded results to Excel
+Both `.xlsx` and `.csv` are read directly by `tentanator.py` (see
+`read_exam_data()`), so no pre-conversion step is required. Graded output is
+written as `.xlsx` to `graded_exams/`.
 
 ### Configuration Options
 
@@ -214,18 +192,15 @@ tentanator/
 ├── openai_trainer.py          # OpenAI fine-tuning module with moderation
 ├── sampling.py                # Sampling algorithms (KMeans, maximin, etc.)
 ├── embeddings.py              # OpenAI embeddings wrapper
-├── make_excel.py              # Bidirectional CSV/Excel converter utility
 ├── global_bank.py             # Global question bank management
 ├── test_moderation.py         # Moderation testing suite
 ├── requirements.txt           # Python dependencies
 ├── .env                       # API keys (not in version control)
-├── exams_in/                  # Input Excel files (converted to CSV)
-│   └── *.xlsx, *.xls
-├── exams/                     # Input CSV files (ready for grading)
-│   └── *.csv
-├── graded_exams/              # Output CSV files with grades
-│   └── *.csv
-├── graded_exams_out/          # Excel exports of graded exams
+├── exams_in/                  # Raw input exams (.xlsx or .csv)
+│   └── *.xlsx, *.csv
+├── exams/                     # Exams ready for grading (.xlsx or .csv)
+│   └── *.xlsx, *.csv
+├── graded_exams/              # Output .xlsx files with grades
 │   └── *.xlsx
 ├── training_data/             # JSONL files for fine-tuning
 │   ├── *.jsonl                # Combined training files
@@ -254,27 +229,6 @@ The main application module containing:
   - `export_to_csv()`: Export graded data to CSV
   - `export_to_jsonl()`: Export training data for fine-tuning
   - `get_ai_grade_suggestion()`: Get grade suggestions from trained models
-
-### make_excel.py
-
-The bidirectional CSV/Excel converter utility containing:
-
-- **Excel → CSV Conversion** (`convert_excel_to_csv()`):
-  - Reads Excel files from `exams_in/` directory
-  - Supports `.xlsx` and `.xls` formats
-  - Converts to CSV in `exams/` directory
-  - Batch processing of multiple Excel files
-
-- **CSV → Excel Conversion** (`convert_csv_to_excel()`):
-  - Reads CSV files from `graded_exams/` directory
-  - Creates Excel files in `graded_exams_out/` directory
-  - Auto-adjusted column widths for optimal readability
-  - Batch processing of multiple CSV files
-
-- **Main Function** (`make_excel()`):
-  - Runs both conversion processes sequentially
-  - Excel→CSV first, then CSV→Excel
-  - Handles missing directories gracefully
 
 ### openai_trainer.py
 
@@ -320,14 +274,9 @@ Wrapper for OpenAI text embeddings:
 ### First Time Setup
 
 ```bash
-# 0. Convert Excel to CSV (if needed)
-# Place Excel files in exams_in/
-python make_excel.py
-# → Converts Excel files to CSV in exams/
-
 # 1. Setup and configure
 python tentanator.py
-# → Choose CSV file from exams/
+# → Choose exam file from exams/ (.xlsx or .csv)
 # → Map ID, input, and output columns
 # → Link to global question bank (optional)
 # → Grade 25 representative samples (default)
@@ -345,22 +294,13 @@ python tentanator.py
 # → Select the same session
 # → AI suggests grades for remaining responses
 # → Review and accept/modify suggestions
-# → Export final CSV when complete
-
-# 4. Convert to Excel
-python make_excel.py
-# → Converts graded CSV to Excel in graded_exams_out/
+# → Final graded .xlsx written to graded_exams/
 ```
 
 ### Detailed Workflow Example
 
-**Day 0: Convert Excel Files (Optional)**
-1. Place `exam1.xlsx` in `exams_in/` directory
-2. Run `python make_excel.py`
-3. Excel file converted to `exams/exam1.csv`
-
 **Day 1: Setup and Initial Grading**
-1. Exam CSV already in `exams/` directory (from conversion or manual placement)
+1. Place the exam (`.xlsx` or `.csv`) in `exams/`
 2. Run `python tentanator.py`
 3. Configure column mappings (ID: "Student ID", Input: "Response Q1", Output: "Grade Q1")
 4. Link to global question "Calculus Derivatives" in global bank
@@ -386,8 +326,7 @@ python make_excel.py
 4. AI pre-computes suggestions for next 5 responses
 5. Review each suggestion, press Enter to accept or type override
 6. Complete all 200 remaining responses (~15-20 minutes)
-7. Export final CSV to `graded_exams/exam1.csv`
-8. Run `python make_excel.py` → creates `graded_exams_out/exam1.xlsx`
+7. Final graded file written to `graded_exams/exam1.xlsx`
 
 **Future Exams: Reuse Model**
 1. Load `exam2.csv` with same question

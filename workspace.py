@@ -6,7 +6,7 @@ A workspace is a self-contained folder that includes:
 - Sessions (.tentanator_sessions/)
 - Models (models.json)
 - Training data (training_data/)
-- Graded exams (graded_exams/, graded_exams_out/)
+- Graded exams (graded_exams/)
 - Global banks (global_bank/, global_banks_embeddings/)
 - Backups (backups/)
 - Input exams (exams/, exams_in_raw/)
@@ -40,7 +40,6 @@ WORKSPACE_ITEMS = [
     "models.json",
     "training_data",
     "graded_exams",
-    "graded_exams_out",
     "global_bank",
     "global_banks_embeddings",
     "backups",
@@ -128,7 +127,6 @@ def create_workspace(name: str) -> bool:
     (workspace_path / ".tentanator_sessions").mkdir()
     (workspace_path / "training_data").mkdir()
     (workspace_path / "graded_exams").mkdir()
-    (workspace_path / "graded_exams_out").mkdir()
     (workspace_path / "backups").mkdir()
     (workspace_path / "exams").mkdir()
     (workspace_path / "exams_in_raw").mkdir()

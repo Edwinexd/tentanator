@@ -543,13 +543,13 @@ class OpenAITrainer:
             print(f"❌ Failed to test model: {e}")
             return None
 
-    def batch_grade_with_model(self, model_name: str, csv_data: List[Dict[str, str]],
+    def batch_grade_with_model(self, model_name: str, exam_rows: List[Dict[str, str]],
                               input_column: str, output_column: str) -> List[Dict[str, str]]:
         """Grade multiple responses using fine-tuned model"""
         print(f"🤖 Batch grading with {model_name}...")
         graded_results = []
 
-        for idx, row in enumerate(csv_data):
+        for idx, row in enumerate(exam_rows):
             response_text = row.get(input_column, "")
 
             # Skip blank responses
@@ -585,7 +585,7 @@ class OpenAITrainer:
 
                 # Progress indicator
                 if (idx + 1) % 10 == 0:
-                    print(f"   Graded {idx + 1}/{len(csv_data)} responses...")
+                    print(f"   Graded {idx + 1}/{len(exam_rows)} responses...")
 
             except (OSError, RuntimeError, ValueError) as e:
                 print(f"   Error grading row {idx}: {e}")

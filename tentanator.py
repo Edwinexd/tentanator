@@ -5,8 +5,13 @@ Tentanator - Excel grading assistant with in-context learning support
 
 import asyncio
 import csv
+import fcntl
 import json
 import os
+import re
+import shutil
+import sys
+import textwrap
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -16,13 +21,72 @@ import dotenv
 import numpy as np
 import pandas as pd
 import requests
-from aioconsole import ainput, aprint
+from aioconsole import ainput as _aioconsole_ainput, aprint
 from openai import AsyncOpenAI
 
 from embeddings import get_embedding
 from sampling import SamplingAlgorithm, get_samples, get_features, optimize_features
 
 dotenv.load_dotenv()
+
+_missing_keys = [k for k in ("CEREBRAS_API_KEY", "OPENAI_API_KEY") if not os.getenv(k)]
+if _missing_keys:
+    sys.exit(
+        f"❌ Missing required environment variable(s): {', '.join(_missing_keys)}\n"
+        f"   Add them to .env (see CLAUDE.md for setup)."
+    )
+
+
+async def ainput(prompt: str = "") -> str:
+    """Wrapper around aioconsole.ainput that restores stdout to blocking mode.
+
+    On a TTY, aioconsole sets O_NONBLOCK on stdin; since stdin/stdout share the
+    TTY file description, plain print() then fails with BlockingIOError when
+    the write buffer fills (e.g. printing long essay text).
+    """
+    result = await _aioconsole_ainput(prompt)
+    try:
+        flags = fcntl.fcntl(sys.stdout, fcntl.F_GETFL)
+        fcntl.fcntl(sys.stdout, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    except OSError:
+        pass
+    return result
+
+
+def display_response(label: str, response_text: str) -> None:
+    """Print a student response block with word count and paragraph formatting."""
+    word_count = len(response_text.split())
+    print(f"\n{label}: ({word_count} words)")
+    print("-" * 40)
+    print(format_response_text(response_text))
+    print("-" * 40)
+
+
+def display_ai_summary(summary: str) -> None:
+    """Print the AI reasoning summary wrapped to the terminal width."""
+    indent = "  "
+    width = max(40, shutil.get_terminal_size((100, 20)).columns - len(indent) - 2)
+    print("\n💭 AI reasoning:")
+    print(textwrap.fill(summary, width=width,
+                        initial_indent=indent, subsequent_indent=indent,
+                        break_long_words=False, break_on_hyphens=False))
+
+
+def format_response_text(text: str, indent: str = "  ") -> str:
+    """Pretty-print an essay response: normalize multi-space runs into paragraph
+    breaks and wrap each paragraph at the terminal width."""
+    width = max(40, shutil.get_terminal_size((100, 20)).columns - len(indent) - 2)
+    # Moodle dumps often collapse paragraph breaks into runs of >=4 spaces.
+    paragraphs = re.split(r" {4,}", text.strip())
+    wrapped = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        wrapped.append(textwrap.fill(para, width=width,
+                                     initial_indent=indent, subsequent_indent=indent,
+                                     break_long_words=False, break_on_hyphens=False))
+    return "\n\n".join(wrapped)
 
 # Initialize Cerebras client for chat completions (OpenAI-compatible API)
 # Note: OpenAI client for embeddings lives in embeddings.py
@@ -31,16 +95,20 @@ cerebras_client = AsyncOpenAI(
     base_url="https://api.cerebras.ai/v1"
 )
 
-# Cerebras model for grading inference
-CEREBRAS_MODEL = "qwen-3-235b-a22b-instruct-2507"
+# Cerebras model for grading inference (reasoning model)
+CEREBRAS_MODEL = "gpt-oss-120b"
+CEREBRAS_REASONING_EFFORT = "high"  # Extensive reasoning for more thorough analysis
+
+# Cerebras model for condensing reasoning chains into short summaries
+CEREBRAS_SUMMARY_MODEL = "llama3.1-8b"
 
 # In-context learning settings
 MIN_ICL_EXAMPLES = 5  # Minimum graded items needed before offering AI suggestions
-MAX_ICL_EXAMPLES = 20  # Maximum few-shot examples to include in prompt
+MAX_ICL_EXAMPLES = 25  # Maximum few-shot examples to include in prompt
 
 # Constants
-NUM_REPRESENTATIVE_SAMPLES = 25  # Number of representative samples (used for kmeans_fixed)
-GRADING_THRESHOLD = 25  # Minimum number of manual grades required
+NUM_REPRESENTATIVE_SAMPLES = 5  # Number of representative samples (used for kmeans_fixed)
+GRADING_THRESHOLD = 5  # Minimum number of manual grades required
 assert NUM_REPRESENTATIVE_SAMPLES <= GRADING_THRESHOLD, \
     "Representative samples cannot exceed grading threshold"
 
@@ -85,6 +153,13 @@ class GradedItem:
 
 
 @dataclass
+class AIGradeSuggestion:
+    """AI grading output: the proposed grade plus a short reasoning summary."""
+    grade: str
+    reasoning_summary: Optional[str] = None
+
+
+@dataclass
 class SamplingResult:
     """Stores results of a sampling operation"""
     algorithm: str  # Algorithm used (e.g., "iforest_gmm", "kmeans_auto", etc.)
@@ -121,25 +196,42 @@ class GradingSession:
     features_cache: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
 
 
-def validate_grade(grade_str: str) -> Tuple[bool, str]:
-    """
-    Validate that a grade string is numeric.
+_GRADE_TERM_RE = re.compile(r'[+-]?(?:\d+\.?\d*|\.\d+)')
 
-    Args:
-        grade_str: The grade string to validate
+
+def evaluate_grade(grade_str: str) -> Optional[float]:
+    """Evaluate a grade expression into its numeric total.
+
+    Accepts a plain number ("5", "7.5", "-0.5") or a signed sum of subpart
+    scores ("2+1.5+2.5" -> 6.0, "2+2.5+2.5-0.5" -> 6.5). Whitespace is
+    ignored. Returns None if the expression is malformed.
+    """
+    if not grade_str:
+        return None
+    s = grade_str.replace(' ', '')
+    if not s:
+        return None
+    terms = _GRADE_TERM_RE.findall(s)
+    if not terms or ''.join(terms) != s:
+        return None
+    try:
+        return sum(float(t) for t in terms)
+    except ValueError:
+        return None
+
+
+def validate_grade(grade_str: str) -> Tuple[bool, str]:
+    """Validate that a grade string is a number or a signed sum of numbers.
 
     Returns:
         Tuple of (is_valid, error_message). If valid, error_message is empty.
     """
     if not grade_str:
         return False, "Grade cannot be empty"
-
-    try:
-        # Try to convert to float (handles both int and float values)
-        float(grade_str)
-        return True, ""
-    except ValueError:
-        return False, f"Invalid grade '{grade_str}' - must be numeric (e.g., 0, 5, 7.5)"
+    if evaluate_grade(grade_str) is None:
+        return False, (f"Invalid grade '{grade_str}' - must be numeric or a "
+                       f"signed sum (e.g. 0, 7.5, 2+1.5+2.5, 2+2.5-0.5)")
+    return True, ""
 
 
 def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
@@ -601,13 +693,13 @@ def get_archive_dir() -> Path:
     return archive_dir
 
 
-def is_session_complete(session: GradingSession, csv_data: List[Dict[str, str]]) -> bool:
+def is_session_complete(session: GradingSession, exam_rows: List[Dict[str, str]]) -> bool:
     """
     Check if a session is complete (all questions have all rows graded).
 
     Args:
         session: The grading session to check
-        csv_data: The CSV data for the session
+        exam_rows: The exam rows for the session
 
     Returns:
         True if all questions have all rows graded, False otherwise
@@ -615,7 +707,7 @@ def is_session_complete(session: GradingSession, csv_data: List[Dict[str, str]])
     if not session.questions:
         return False
 
-    total_rows = len(csv_data)
+    total_rows = len(exam_rows)
 
     for question in session.questions.values():
         if len(question.graded_items) < total_rows:
@@ -884,7 +976,7 @@ def save_session(session: GradingSession, session_name: Optional[str] = None,
     return session_name
 
 
-async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List[Dict[str, str]],
+async def pregenerate_embeddings_for_rows(session: GradingSession, exam_rows: List[Dict[str, str]],
                                           session_name: str) -> None:
     """
     Pre-generate feature vectors for all responses in the CSV data.
@@ -892,7 +984,7 @@ async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List
 
     Args:
         session: The GradingSession to populate with feature vectors
-        csv_data: List of CSV rows as dictionaries
+        exam_rows: List of exam rows as dictionaries
         session_name: Name of the session for saving
     """
     print("\n🔢 Pre-generating feature vectors for all responses (with question context)...")
@@ -917,7 +1009,7 @@ async def pregenerate_embeddings_for_csv(session: GradingSession, csv_data: List
         tasks = []
         row_ids_to_process = []
 
-        for row in csv_data:
+        for row in exam_rows:
             row_id = get_row_id(row, session.id_columns)
 
             # Skip if already cached
@@ -1201,8 +1293,7 @@ def _build_icl_messages(question: QuestionGrades,
     if len(examples) > MAX_ICL_EXAMPLES:
         # Sort by grade value for even sampling across the grade range
         def _grade_sort_key(x: GradedItem) -> float:
-            grade = x.grade.replace('.', '', 1).lstrip('-')
-            return float(x.grade) if grade.isdigit() else 0
+            return evaluate_grade(x.grade) or 0.0
         sorted_examples = sorted(examples, key=_grade_sort_key)
         step = len(sorted_examples) / MAX_ICL_EXAMPLES
         examples = [sorted_examples[int(i * step)] for i in range(MAX_ICL_EXAMPLES)]
@@ -1222,24 +1313,108 @@ def _build_icl_messages(question: QuestionGrades,
     return messages
 
 
+_THINK_BLOCK_RE = re.compile(r'<think>(.*?)</think>', re.DOTALL)
+_GRADE_TAIL_RE = re.compile(
+    r'([+-]?(?:\d+\.?\d*|\.\d+)(?:\s*[+-]\s*(?:\d+\.?\d*|\.\d+))*)\s*$'
+)
+
+
+def _extract_reasoning(message) -> Tuple[str, str]:
+    """Return (reasoning_text, answer_text) from a chat completion message.
+
+    Looks first at provider-level reasoning fields (Cerebras returns gpt-oss
+    reasoning on `reasoning` / `reasoning_content`). Falls back to stripping
+    inline `<think>…</think>` blocks if those fields are absent.
+    """
+    raw_content = (getattr(message, "content", None) or "").strip()
+    reasoning = (getattr(message, "reasoning", None)
+                 or getattr(message, "reasoning_content", None)
+                 or "")
+    if not reasoning:
+        extra = getattr(message, "model_extra", None) or {}
+        reasoning = extra.get("reasoning") or extra.get("reasoning_content") or ""
+
+    if reasoning:
+        return str(reasoning).strip(), raw_content
+
+    thinks = _THINK_BLOCK_RE.findall(raw_content)
+    if thinks:
+        answer = _THINK_BLOCK_RE.sub("", raw_content).strip()
+        return "\n".join(t.strip() for t in thinks).strip(), answer
+    return "", raw_content
+
+
+def _extract_grade_from_answer(answer: str) -> str:
+    """Pull the final grade expression out of the model's answer text."""
+    text = answer.strip()
+    if evaluate_grade(text) is not None:
+        return text
+    last_line = text.splitlines()[-1].strip() if text else ""
+    if evaluate_grade(last_line) is not None:
+        return last_line
+    m = _GRADE_TAIL_RE.search(last_line or text)
+    if m:
+        return m.group(1).replace(" ", "")
+    return last_line or text
+
+
+async def _summarize_reasoning(reasoning: str) -> Optional[str]:
+    """Second pass: condense the reasoning chain into a short paragraph.
+
+    Drops outputs that are just numeric/grade expressions (guards against the
+    summarizer restating the score rather than summarizing the why).
+    """
+    if not reasoning.strip():
+        return None
+    try:
+        response = await cerebras_client.chat.completions.create(
+            model=CEREBRAS_SUMMARY_MODEL,
+            messages=[
+                {"role": "system", "content":
+                 "You condense grading rationales into a compact paragraph "
+                 "(3-5 sentences, 60-120 words). Cover: (1) which criteria or "
+                 "key points the answer addressed well, (2) what was missing, "
+                 "wrong, or weak, and (3) any comparisons made to similar "
+                 "graded examples. Never output a number, grade, score, or "
+                 "arithmetic expression. Do not state the score value."},
+                {"role": "user", "content":
+                 f"Rationale:\n{reasoning.strip()}\n\nSummary (no numbers, "
+                 f"3-5 sentences, 60-120 words):"},
+            ],
+            max_tokens=400,
+            temperature=0.2,
+        )
+        summary = (response.choices[0].message.content or "").strip()
+        if not summary:
+            return None
+        # Drop if the "summary" is actually just a grade expression
+        if evaluate_grade(summary) is not None:
+            return None
+        return summary
+    except (OSError, ValueError, RuntimeError, AttributeError):
+        return None
+
+
 async def get_ai_grade_suggestion(question: QuestionGrades,
-                                   response_text: str) -> Optional[str]:
-    """Get AI-suggested grade using in-context learning with Cerebras."""
+                                   response_text: str) -> Optional[AIGradeSuggestion]:
+    """Two-pass AI grading: reason with gpt-oss-120b, then summarize the rationale."""
     try:
         messages = _build_icl_messages(question, response_text)
-
         response = await cerebras_client.chat.completions.create(
             model=CEREBRAS_MODEL,
             messages=messages,
-            max_tokens=10,
-            temperature=0.0
+            max_tokens=4096,
+            temperature=0.0,
+            reasoning_effort=CEREBRAS_REASONING_EFFORT,
         )
-
-        return (response.choices[0].message.content or "").strip()
-
     except (OSError, ValueError, RuntimeError, AttributeError) as e:
         print(f"⚠️  AI suggestion failed: {e}")
         return None
+
+    reasoning, answer = _extract_reasoning(response.choices[0].message)
+    grade = _extract_grade_from_answer(answer)
+    summary = await _summarize_reasoning(reasoning) if reasoning else None
+    return AIGradeSuggestion(grade=grade, reasoning_summary=summary)
 
 
 async def ask_sampling_algorithm(question: QuestionGrades) -> Optional[SamplingAlgorithm]:
@@ -1364,11 +1539,11 @@ def select_representative_samples(
                     if alt.exists():
                         exam_path = alt
                         break
-            csv_data = read_exam_data(exam_path)
+            exam_rows = read_exam_data(exam_path)
 
             # Build text_data dict mapping row_id to response text
             text_data = {}
-            for row in csv_data:
+            for row in exam_rows:
                 row_id = get_row_id(row, session.id_columns)
                 if row_id in valid_embeddings:  # Only include rows with valid embeddings
                     text_data[row_id] = row.get(input_column, "")
@@ -1398,7 +1573,7 @@ def select_representative_samples(
 
 async def perform_sampling_for_all_questions(
     session: GradingSession,
-    csv_data: List[Dict[str, str]],
+    exam_rows: List[Dict[str, str]],
     threshold: int = GRADING_THRESHOLD,
     session_name: Optional[str] = None
 ) -> None:
@@ -1460,7 +1635,7 @@ async def perform_sampling_for_all_questions(
 
     # Phase 2: Pre-generate feature vectors for all responses (now that we have question texts)
     if session_name:
-        await pregenerate_embeddings_for_csv(session, csv_data, session_name)
+        await pregenerate_embeddings_for_rows(session, exam_rows, session_name)
 
     # Phase 3: Perform sampling for each question
     print("\n" + "-" * 50)
@@ -1544,13 +1719,13 @@ async def perform_sampling_for_all_questions(
         await ainput("\nPress Enter to start grading...")
 
 
-async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]],
+async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str]],
                           threshold: int = GRADING_THRESHOLD,
                           session_name: Optional[str] = None) -> GradingSession:
     """Interactive grading interface - grades one question at a time across all rows"""
     # Perform sampling for all questions upfront
     # (includes feature generation after question text collection)
-    await perform_sampling_for_all_questions(session, csv_data, threshold, session_name)
+    await perform_sampling_for_all_questions(session, exam_rows, threshold, session_name)
 
     print("\n=== Manual Grading Mode ===")
     print(f"Grade at least {threshold} valid responses per question (excluding blank/dash)")
@@ -1559,7 +1734,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
     print("-" * 50)
 
     # Cache for pre-computed AI suggestions (rolling window)
-    ai_suggestion_cache: Dict[str, Dict[str, str]] = {}  # question_name -> {row_id: grade}
+    ai_suggestion_cache: Dict[str, Dict[str, AIGradeSuggestion]] = {}  # question_name -> {row_id: suggestion}
     window_size = 5  # Pre-compute next 5 responses
 
     # Process one output column at a time
@@ -1584,7 +1759,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         # Check if there are ungraded rows
         graded_ids = {item.row_id for item in question.graded_items}
         ungraded_rows = []
-        for row_idx, row in enumerate(csv_data):
+        for row_idx, row in enumerate(exam_rows):
             row_id = get_row_id(row, session.id_columns)
             if row_id not in graded_ids:
                 response_text = row.get(question.input_column, "N/A")
@@ -1667,12 +1842,11 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
                     if ai_suggestion:
                         print(f"\n{'-'*60}")
-                        print(f"Student {row_idx + 1}/{len(csv_data)} ({non_blank_count} non-blank)")
-                        print("\nResponse:")
-                        print("-" * 40)
-                        print(response_text)  # Full response, no truncation
-                        print("-" * 40)
-                        print(f"\n🤖 AI Grade: {ai_suggestion}")
+                        print(f"Student {row_idx + 1}/{len(exam_rows)} ({non_blank_count} non-blank)")
+                        display_response(question.input_column, response_text)
+                        if ai_suggestion.reasoning_summary:
+                            display_ai_summary(ai_suggestion.reasoning_summary)
+                        print(f"\n🤖 AI Grade: {ai_suggestion.grade}")
 
                         # Loop until valid grade or command is provided
                         while True:
@@ -1707,7 +1881,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                                 print(f"✓ Modified to: {final_grade}")
                             else:
                                 # User pressed ENTER - accept AI suggestion
-                                final_grade = ai_suggestion
+                                final_grade = ai_suggestion.grade
                                 print(f"✓ Accepted: {final_grade}")
 
                             graded_item = await create_graded_item_with_embedding(
@@ -1738,7 +1912,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 graded_ids_set = {item.row_id for item in question.graded_items}
                 tasks = []
                 rows_to_grade = []
-                for row in csv_data:
+                for row in exam_rows:
                     row_id = get_row_id(row, session.id_columns)
                     if row_id not in graded_ids_set:
                         response_text = row.get(question.input_column, "-")
@@ -1759,7 +1933,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
                 # Export to Excel after AI review and auto-zeroing
                 print("\n📝 Exporting graded Excel...")
-                export_to_excel(session, csv_data)
+                export_to_excel(session, exam_rows)
 
             continue
 
@@ -1793,12 +1967,12 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             tasks = []
             row_ids_to_compute = []
 
-            end_idx = min(start_idx + win_size, len(csv_data))
+            end_idx = min(start_idx + win_size, len(exam_rows))
             for idx in range(start_idx, end_idx):
-                if idx >= len(csv_data):
+                if idx >= len(exam_rows):
                     break
 
-                future_row = csv_data[idx]
+                future_row = exam_rows[idx]
                 future_row_id = get_row_id(future_row, session.id_columns)
 
                 # Skip if already graded or cached
@@ -1823,8 +1997,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                 for row_id, ai_grade in zip(row_ids_to_compute, results):
                     if isinstance(ai_grade, Exception):
                         continue
-                    # Type check: ai_grade should be str if not an Exception
-                    if ai_grade and isinstance(ai_grade, str):
+                    if isinstance(ai_grade, AIGradeSuggestion) and ai_grade.grade:
                         ai_suggestion_cache[curr_output_col][row_id] = ai_grade
 
         if icl_ready:
@@ -1838,13 +2011,13 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
         prioritized_rows = []
 
         # First add representative samplesƒ‹
-        for row_idx, row in enumerate(csv_data):
+        for row_idx, row in enumerate(exam_rows):
             row_id = get_row_id(row, session.id_columns)
             if row_id in representative_set:
                 prioritized_rows.append((row_idx, row))
 
         # Then add remaining rows
-        for row_idx, row in enumerate(csv_data):
+        for row_idx, row in enumerate(exam_rows):
             row_id = get_row_id(row, session.id_columns)
             if row_id not in representative_set:
                 prioritized_rows.append((row_idx, row))
@@ -1877,7 +2050,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             print(f"\n{'-'*60}")
             is_representative = row_id in representative_set
             representative_marker = " 🎯 REPRESENTATIVE SAMPLE" if is_representative else ""
-            print(f"Student {row_idx + 1}/{len(csv_data)} | {output_col}{representative_marker}")
+            print(f"Student {row_idx + 1}/{len(exam_rows)} | {output_col}{representative_marker}")
 
             # Show ID columns for reference
             id_info = " | ".join([f"{col}: {row.get(col, 'N/A')}" for col in session.id_columns])
@@ -1887,10 +2060,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
             # Display the response
             response_text = row.get(question.input_column, "N/A")
-            print(f"\n{question.input_column}:")
-            print("-" * 40)
-            print(response_text)
-            print("-" * 40)
+            display_response(question.input_column, response_text)
 
             # Auto-grade blank or "-" responses as 0
             if response_text.strip() in ["", "-", "N/A"]:
@@ -1913,15 +2083,17 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
             ai_suggestion = ai_suggestion_cache.get(output_col, {}).get(row_id)
 
             if ai_suggestion:
-                print(f"\n🤖 AI Suggestion: {ai_suggestion}")
+                if ai_suggestion.reasoning_summary:
+                    display_ai_summary(ai_suggestion.reasoning_summary)
+                print(f"\n🤖 AI Suggestion: {ai_suggestion.grade}")
                 print("   Press [ENTER] to accept, or type a different grade")
 
             while True:
                 if ai_suggestion:
-                    grade = (await ainput(f"\nGrade for {output_col} [{ai_suggestion}]: ")).strip()
+                    grade = (await ainput(f"\nGrade for {output_col} [{ai_suggestion.grade}]: ")).strip()
                     # If empty, accept AI suggestion
                     if not grade:
-                        grade = ai_suggestion
+                        grade = ai_suggestion.grade
                         print(f"✓ Accepted AI suggestion: {grade}")
                 else:
                     grade = (await ainput(f"\nEnter grade for {output_col}: ")).strip()
@@ -1965,7 +2137,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     if row_id in ai_suggestion_cache.get(output_col, {}):
                         del ai_suggestion_cache[output_col][row_id]
 
-                    if grade == ai_suggestion:
+                    if ai_suggestion and grade == ai_suggestion.grade:
                         print(f"✓ Accepted AI suggestion: {grade}")
                     else:
                         print(f"✓ Graded as: {grade}")
@@ -1976,18 +2148,19 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
                     break
                 print("  Please enter a grade or command")
 
-    # Check if all questions are complete (based on valid grades only)
-    all_complete = all(
+    # Check if threshold is met (based on valid grades only) — only show the
+    # next-steps banner if threshold is hit but there are still ungraded rows.
+    # When the whole session is done, main() will print SESSION COMPLETE instead.
+    threshold_met = all(
         sum(1 for item in q.graded_items if item.input_text.strip() not in ["", "-", "N/A"]) >= threshold
         for q in session.questions.values()
     )
-    if all_complete:
+    if threshold_met and not is_session_complete(session, exam_rows):
+        num_questions = len(session.output_columns)
         print(f"\n{'='*60}")
         print("✓ THRESHOLD REACHED!")
-        num_questions = len(session.output_columns)
         print(f"Graded {threshold} valid responses for all {num_questions} questions")
         print(f"{'='*60}")
-
         print("\n💡 Next steps:")
         print("   1. Reopen this session to continue grading remaining responses")
         print("   2. AI will use your graded examples as few-shot context (in-context learning)")
@@ -1997,7 +2170,7 @@ async def grade_questions(session: GradingSession, csv_data: List[Dict[str, str]
 
 def export_to_excel(  # pylint: disable=too-many-locals
     session: GradingSession,
-    csv_data: List[Dict[str, str]],
+    exam_rows: List[Dict[str, str]],
     output_dir: str = "graded_exams",
 ) -> str:
     """Export graded data to Excel file with grades filled in."""
@@ -2014,11 +2187,16 @@ def export_to_excel(  # pylint: disable=too-many-locals
         for item in question.graded_items:
             if item.row_id not in grades_by_row:
                 grades_by_row[item.row_id] = {}
-            grades_by_row[item.row_id][output_col] = item.grade
+            # Store the numeric total for export; the raw expression lives in
+            # item.grade for ICL context only.
+            total = evaluate_grade(item.grade)
+            grades_by_row[item.row_id][output_col] = (
+                f"{total:g}" if total is not None else item.grade
+            )
 
     # Update the data with grades
     updated_rows = []
-    for row in csv_data:
+    for row in exam_rows:
         row_id = get_row_id(row, session.id_columns)
         updated_row = row.copy()
 
@@ -2303,19 +2481,19 @@ async def main() -> None:
                 if alt.exists():
                     filepath = alt
                     break
-        csv_data = read_exam_data(filepath)
+        exam_rows = read_exam_data(filepath)
 
-        session = await grade_questions(selected_session, csv_data,
+        session = await grade_questions(selected_session, exam_rows,
                                          session_name=current_session_name)
 
         # Check if session is complete
-        session_complete = is_session_complete(session, csv_data)
+        session_complete = is_session_complete(session, exam_rows)
 
         # If session is complete and not already archived, offer to archive it
         if session_complete and not is_archived and current_session_name:
             print(f"\n{'='*60}")
             print("✅ SESSION COMPLETE!")
-            print(f"All {len(csv_data)} rows have been graded for all questions.")
+            print(f"All {len(exam_rows)} rows have been graded for all questions.")
             print(f"{'='*60}")
 
             archive_choice = (await ainput(
@@ -2339,7 +2517,7 @@ async def main() -> None:
     # Get columns from exam file
     try:
         columns = get_exam_columns(filepath)
-        csv_data = read_exam_data(filepath)
+        exam_rows = read_exam_data(filepath)
     except (OSError, ValueError, UnicodeDecodeError) as e:
         print(f"Error reading exam file: {e}")
         return
@@ -2403,17 +2581,17 @@ async def main() -> None:
     )
 
     # Start grading
-    session = await grade_questions(session, csv_data, session_name=session_name)
+    session = await grade_questions(session, exam_rows, session_name=session_name)
 
     # Check if session is complete
-    session_complete = is_session_complete(session, csv_data)
+    session_complete = is_session_complete(session, exam_rows)
 
     if session.questions:
         # If session is complete, offer to archive it
         if session_complete:
             print(f"\n{'='*60}")
             print("✅ SESSION COMPLETE!")
-            print(f"All {len(csv_data)} rows have been graded for all questions.")
+            print(f"All {len(exam_rows)} rows have been graded for all questions.")
             print(f"{'='*60}")
 
             archive_choice = (await ainput(
