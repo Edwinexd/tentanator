@@ -16,7 +16,7 @@ import dotenv
 import numpy as np
 import pandas as pd
 import requests
-from aioconsole import ainput
+from aioconsole import ainput, aprint
 from openai import AsyncOpenAI
 
 from embeddings import get_embedding
@@ -1136,10 +1136,10 @@ def get_exam_columns(filepath: Path) -> List[str]:
 
 async def select_columns(columns: List[str], prompt: str, allow_multiple: bool = True) -> List[str]:
     """Prompt user to select columns from the list."""
-    print(f"\n{prompt}")
-    print("Available columns:")
+    await aprint(f"\n{prompt}")
+    await aprint("Available columns:")
     for idx, col in enumerate(columns, 1):
-        print(f"{idx}. {col}")
+        await aprint(f"{idx}. {col}")
 
     while True:
         try:
@@ -1152,9 +1152,9 @@ async def select_columns(columns: List[str], prompt: str, allow_multiple: bool =
 
             if all(0 <= idx < len(columns) for idx in indices):
                 return [columns[idx] for idx in indices]
-            print(f"Please enter numbers between 1 and {len(columns)}")
+            await aprint(f"Please enter numbers between 1 and {len(columns)}")
         except ValueError:
-            print("Please enter valid numbers")
+            await aprint("Please enter valid numbers")
 
 
 def read_exam_data(filepath: Path) -> List[Dict[str, str]]:
