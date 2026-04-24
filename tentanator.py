@@ -1904,10 +1904,10 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
             if use_ai == 'y':
                 print("\nGrading with AI (in-context learning)"
                       " - review and modify each suggestion...")
-                print("(AI grades are pre-fetched 10 ahead for smooth review)")
+                print("(AI grade for the next response is pre-fetched in the background)")
 
-                # Rolling window configuration
-                prefetch_buffer_size = 10
+                # Rolling window configuration (Cerebras is fast; 1-ahead is enough)
+                prefetch_buffer_size = 2
                 prefetch_tasks: Dict[int, asyncio.Task] = {}  # index -> task
 
                 def start_prefetch(
@@ -1933,8 +1933,8 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
                     and len(row.get(question.input_column, "").strip()) >= 3
                 )
 
-                # Pre-fetch first 10
-                print(f"🚀 Pre-fetching first {prefetch_buffer_size} grades...")
+                # Pre-fetch the initial window
+                print(f"🚀 Pre-fetching first {prefetch_buffer_size} grade(s)...")
                 for i in range(min(prefetch_buffer_size, len(ungraded_rows))):
                     start_prefetch(i, ungraded_rows, prefetch_tasks, question)
 
@@ -1984,8 +1984,9 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
                                 removed = question.graded_items.pop()
                                 print(f"Removed grade for ID: {removed.row_id}")
                                 save_session(session, session_name)
-                                # Go back to previous item instead of restarting
-                                ai_grading_idx = max(0, ai_grading_idx - 1)
+                                # Go back to previous item (compensate for the
+                                # unconditional += 1 at the end of the outer loop).
+                                ai_grading_idx = max(0, ai_grading_idx - 1) - 1
                                 break
                             if user_input.lower() == 'q':
                                 save_session(session, session_name)
