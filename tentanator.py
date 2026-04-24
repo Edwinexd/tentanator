@@ -1926,12 +1926,13 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
                     )
                     tasks[idx] = task
 
-                # Count non-blank responses for progress tracking
-                non_blank_count = sum(
-                    1 for _, row in ungraded_rows
-                    if row.get(question.input_column, "").strip() not in ["", "-", "N/A"]
-                    and len(row.get(question.input_column, "").strip()) >= 3
-                )
+                def remaining_non_blank(start_idx: int) -> int:
+                    """Live count of non-blank ungraded responses from start_idx onward."""
+                    return sum(
+                        1 for _, row in ungraded_rows[start_idx:]
+                        if row.get(question.input_column, "").strip() not in ["", "-", "N/A"]
+                        and len(row.get(question.input_column, "").strip()) >= 3
+                    )
 
                 # Pre-fetch the initial window
                 print(f"🚀 Pre-fetching first {prefetch_buffer_size} grade(s)...")
@@ -1964,7 +1965,8 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
 
                     if ai_suggestion:
                         print(f"\n{'-'*60}")
-                        print(f"Student {row_idx + 1}/{len(exam_rows)} ({non_blank_count} non-blank)")
+                        print(f"Student {row_idx + 1}/{len(exam_rows)} "
+                              f"({remaining_non_blank(ai_grading_idx)} non-blank left)")
                         display_response(question.input_column, response_text)
                         if ai_suggestion.reasoning_summary:
                             display_ai_summary(ai_suggestion.reasoning_summary)
