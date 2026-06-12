@@ -100,7 +100,7 @@ CEREBRAS_MODEL = "gpt-oss-120b"
 CEREBRAS_REASONING_EFFORT = "high"  # Extensive reasoning for more thorough analysis
 
 # Cerebras model for condensing reasoning chains into short summaries
-CEREBRAS_SUMMARY_MODEL = "llama3.1-8b"
+CEREBRAS_SUMMARY_MODEL = "gpt-oss-120b"
 
 # In-context learning settings
 MIN_ICL_EXAMPLES = 5  # Minimum graded items needed before offering AI suggestions
@@ -1491,8 +1491,9 @@ async def _summarize_reasoning(reasoning: str) -> Optional[str]:
                  f"Rationale:\n{reasoning.strip()}\n\nSummary (no numbers, "
                  f"3-5 sentences, 60-120 words):"},
             ],
-            max_tokens=400,
+            max_tokens=800,
             temperature=0.2,
+            reasoning_effort="low",
         )
         summary = (response.choices[0].message.content or "").strip()
         if not summary:
@@ -2149,11 +2150,23 @@ async def grade_questions(session: GradingSession, exam_rows: List[Dict[str, str
 
         # Grade this column for each row (prioritizing representative samples)
         # Use while loop to allow going back
+        # Pooled cross-session examples count toward the ICL minimum, so a
+        # question with a thin pool needs fewer own grades before AI kicks in.
+        external_valid_count = sum(
+            1 for item in question.external_graded_items
+            if item.input_text.strip() not in ["", "-", "N/A"])
+        icl_target = max(threshold, MIN_ICL_EXAMPLES)
         manual_grading_idx = 0
         while manual_grading_idx < len(prioritized_rows):
             # Check if we've reached the threshold for valid grades
             if valid_graded_count >= threshold:
                 print(f"\n✓ Reached {threshold} valid grades for {output_col}!")
+                break
+            if (external_valid_count and valid_graded_count
+                    and valid_graded_count + external_valid_count >= icl_target):
+                print(f"\n✓ Reached {icl_target} ICL examples for {output_col} "
+                      f"({valid_graded_count} own + {external_valid_count} pooled)!")
+                print("   Reopen the session to grade the rest with AI suggestions.")
                 break
 
             row_idx, row = prioritized_rows[manual_grading_idx]

@@ -91,7 +91,7 @@ In `tentanator.py`:
 - `MIN_ICL_EXAMPLES = 5`: Minimum graded items before in-context learning kicks in
 - `MAX_ICL_EXAMPLES = 25`: Maximum few-shot examples included in prompt
 - `CEREBRAS_MODEL`: Reasoning model used for grading inference (default: `gpt-oss-120b`, `reasoning_effort="high"`)
-- `CEREBRAS_SUMMARY_MODEL`: Lightweight model used to condense the reasoning chain (default: `llama3.1-8b`)
+- `CEREBRAS_SUMMARY_MODEL`: Model used to condense the reasoning chain (default: `gpt-oss-120b`, `reasoning_effort="low"`)
 - `NUM_REPRESENTATIVE_SAMPLES = 5`: Number of samples for selection algorithms
 - `SAMPLING_ALGORITHM`: Choose from `"kmeans_auto"`, `"kmeans_fixed"`, `"random"`, `"maximin"`, `"gptsort"`, `"iforest_gmm"`
 - `BASE_SYSTEM_PROMPT`: Template for AI grading prompts
