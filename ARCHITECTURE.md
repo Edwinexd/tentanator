@@ -136,6 +136,42 @@ Grades accept the legacy signed-sum syntax (`"2+1.5+2.5"`, `"7.5"`, `"2+2.5-0.5"
 the backend validates and stores both the raw expression (for ICL context) and
 the evaluated numeric total (for export).
 
+## Examination engine (v2)
+
+An examination is the central object: a roster + responses (the exam file), per-
+question config, grades from any source, a grade scheme, and computed results.
+Nothing about a specific exam's shape is hardcoded — sections, question counts,
+types and the grade formula are all per-examination config (`scheme.rs`).
+
+- **Question config** (`PUT /api/sessions/{name}/questions-config`): per question
+  `var` (expression identifier), `group` (section tag), `qtype`, `max_points`,
+  `position`, optional `estimate` expression.
+- **Grade scheme** (`PUT /api/sessions/{name}/scheme`): tunable `constants`,
+  named `vars` (expressions over question vars / prior vars / `groupsum("tag")`),
+  and ordered guarded `rules` (`when <bool> -> <grade>`, first match wins).
+  Expressions run via `evalexpr`. Reproduces PVT's gated ECTS rules; collapses to
+  trivial for simple exams (tested against `reference/pvt/data/grades.json`).
+- **Results** (`GET …/results`, `POST …/results` for live preview with an
+  unsaved scheme): `StudentResult[]` (id, grade, total, estimated, complete) +
+  distribution + unresolved-conflict count.
+- **Import & merge** (`POST …/import/preview`, `…/import/apply`): map a graded
+  sheet's columns to questions; non-conflicting cells merge with `source`
+  provenance, disagreements become `grade_conflicts`
+  (`GET …/conflicts`, `POST …/conflicts/resolve`).
+- **Exports**: `…/export` (full graded xlsx), `…/export/daisy` (Daisy `id,grade`
+  xlsx), `…/export/csv` (per-question), `…/export/results-pdf` (proxies the
+  renderer). `GET …/render-data` is the per-student contract the renderer reads.
+
+### Results-PDF renderer (`results-renderer/`)
+
+A separate Python service (LaTeX/poppler/zxing/pikepdf — too heavy to reimplement
+in Rust). `POST /render { exam, scanned_pdf? }` fetches `render-data` from the
+backend, renders a LaTeX answer sheet per student (responses, marks, grade, a
+Code128 id barcode), and — when a scanned exam PDF is provided in `data/scans/` —
+prepends each student's original cover page (matched by PDF417 barcode), then
+concatenates to `graded_exams/<exam>_results.pdf`. The backend reaches it via
+`RENDERER_URL`. Generalized from `reference/pvt/scripts/01-03`.
+
 ## Quick start (Docker)
 
 The whole stack runs from `docker-compose.yml`. You only need Docker.
@@ -148,6 +184,7 @@ cp .env.example .env        # then edit in your OPENAI_API_KEY / CEREBRAS_API_KE
 # 2. Drop exam files (.xlsx / .csv) into the data dir
 mkdir -p data/exams
 cp /path/to/your-exam.xlsx data/exams/
+#    For results PDFs with cover pages, also: cp scanned-exam.pdf data/scans/
 
 # 3. Start the backend + web UI
 docker compose up -d --build

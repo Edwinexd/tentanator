@@ -41,8 +41,18 @@ jobs:
           npm run generate-routes
           npx tsc --noEmit
 
+  py-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: byte-compile tui + renderer
+        run: python -m py_compile tui/*.py results-renderer/*.py
+
   images:
-    needs: [backend-test, web-check]
+    needs: [backend-test, web-check, py-check]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -50,6 +60,7 @@ jobs:
           - { service: backend, context: ./backend }
           - { service: web, context: ./web }
           - { service: tui, context: ./tui }
+          - { service: results-renderer, context: ./results-renderer }
     steps:
       - uses: actions/checkout@v4
 
