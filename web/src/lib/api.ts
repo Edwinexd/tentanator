@@ -239,6 +239,13 @@ export const api = {
     req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/daisy`),
   exportCsv: (name: string) =>
     req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/csv`),
+  listScans: () => req<string[]>('GET', '/api/scans'),
+  exportResultsPdf: (name: string, scanned_pdf?: string) =>
+    req<{ path: string; students: number; covers_missing: string[] }>(
+      'POST',
+      `/api/sessions/${encodeURIComponent(name)}/export/results-pdf`,
+      { scanned_pdf: scanned_pdf || null },
+    ),
 
   putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
     req<Session>('PUT', `/api/sessions/${encodeURIComponent(name)}/questions-config`, updates),

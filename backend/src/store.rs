@@ -69,6 +69,25 @@ pub fn list_exam_files(config: &Config) -> Vec<String> {
     out
 }
 
+/// List scanned exam PDFs available for results rendering (scans/ + exams/).
+pub fn list_pdf_files(config: &Config) -> Vec<String> {
+    let mut out = Vec::new();
+    for dir in [config.data_dir.join("scans"), config.exams_dir()] {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for e in entries.flatten() {
+                if let Some(n) = e.file_name().to_str() {
+                    if n.to_lowercase().ends_with(".pdf") {
+                        out.push(n.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn resolve_exam_path(config: &Config, csv_file: &str) -> Option<PathBuf> {
     let direct = config.exams_dir().join(csv_file);
     if direct.exists() {

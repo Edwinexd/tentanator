@@ -20,8 +20,22 @@ services:
     environment:
       TENTANATOR_DATA_DIR: /data
       TENTANATOR_BIND: 0.0.0.0:8787
+      RENDERER_URL: http://renderer:8000
     volumes:
       - ./data:/data
+    restart: unless-stopped
+
+  # Results-PDF renderer (LaTeX answer sheets + scanned cover pages).
+  renderer:
+    build: ./results-renderer
+    image: tentanator-results-renderer
+    environment:
+      TENTANATOR_API: http://backend:8787
+      TENTANATOR_DATA_DIR: /data
+    volumes:
+      - ./data:/data
+    depends_on:
+      - backend
     restart: unless-stopped
 
   web:

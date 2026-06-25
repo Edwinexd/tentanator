@@ -14,6 +14,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionNameRouteImport } from './routes/session.$name'
 import { Route as SessionNameSchemeRouteImport } from './routes/session.$name.scheme'
 import { Route as SessionNameResultsRouteImport } from './routes/session.$name.results'
+import { Route as SessionNamePdfRouteImport } from './routes/session.$name.pdf'
 import { Route as SessionNameImportRouteImport } from './routes/session.$name.import'
 
 const NewRoute = NewRouteImport.update({
@@ -41,6 +42,11 @@ const SessionNameResultsRoute = SessionNameResultsRouteImport.update({
   path: '/results',
   getParentRoute: () => SessionNameRoute,
 } as any)
+const SessionNamePdfRoute = SessionNamePdfRouteImport.update({
+  id: '/pdf',
+  path: '/pdf',
+  getParentRoute: () => SessionNameRoute,
+} as any)
 const SessionNameImportRoute = SessionNameImportRouteImport.update({
   id: '/import',
   path: '/import',
@@ -52,6 +58,7 @@ export interface FileRoutesByFullPath {
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
   '/session/$name/import': typeof SessionNameImportRoute
+  '/session/$name/pdf': typeof SessionNamePdfRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -60,6 +67,7 @@ export interface FileRoutesByTo {
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
   '/session/$name/import': typeof SessionNameImportRoute
+  '/session/$name/pdf': typeof SessionNamePdfRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -69,6 +77,7 @@ export interface FileRoutesById {
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
   '/session/$name/import': typeof SessionNameImportRoute
+  '/session/$name/pdf': typeof SessionNamePdfRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -79,6 +88,7 @@ export interface FileRouteTypes {
     | '/new'
     | '/session/$name'
     | '/session/$name/import'
+    | '/session/$name/pdf'
     | '/session/$name/results'
     | '/session/$name/scheme'
   fileRoutesByTo: FileRoutesByTo
@@ -87,6 +97,7 @@ export interface FileRouteTypes {
     | '/new'
     | '/session/$name'
     | '/session/$name/import'
+    | '/session/$name/pdf'
     | '/session/$name/results'
     | '/session/$name/scheme'
   id:
@@ -95,6 +106,7 @@ export interface FileRouteTypes {
     | '/new'
     | '/session/$name'
     | '/session/$name/import'
+    | '/session/$name/pdf'
     | '/session/$name/results'
     | '/session/$name/scheme'
   fileRoutesById: FileRoutesById
@@ -142,6 +154,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionNameResultsRouteImport
       parentRoute: typeof SessionNameRoute
     }
+    '/session/$name/pdf': {
+      id: '/session/$name/pdf'
+      path: '/pdf'
+      fullPath: '/session/$name/pdf'
+      preLoaderRoute: typeof SessionNamePdfRouteImport
+      parentRoute: typeof SessionNameRoute
+    }
     '/session/$name/import': {
       id: '/session/$name/import'
       path: '/import'
@@ -154,12 +173,14 @@ declare module '@tanstack/react-router' {
 
 interface SessionNameRouteChildren {
   SessionNameImportRoute: typeof SessionNameImportRoute
+  SessionNamePdfRoute: typeof SessionNamePdfRoute
   SessionNameResultsRoute: typeof SessionNameResultsRoute
   SessionNameSchemeRoute: typeof SessionNameSchemeRoute
 }
 
 const SessionNameRouteChildren: SessionNameRouteChildren = {
   SessionNameImportRoute: SessionNameImportRoute,
+  SessionNamePdfRoute: SessionNamePdfRoute,
   SessionNameResultsRoute: SessionNameResultsRoute,
   SessionNameSchemeRoute: SessionNameSchemeRoute,
 }

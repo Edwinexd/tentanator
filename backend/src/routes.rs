@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/legacy-workspaces", get(list_legacy_workspaces))
         .route("/api/legacy-workspaces/{name}/import", post(import_workspace))
         .route("/api/exams", get(list_exams))
+        .route("/api/scans", get(list_scans))
         .route("/api/exams/{file}/columns", get(exam_columns))
         .route("/api/exams/{file}/rows", get(exam_rows))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -166,6 +167,10 @@ async fn import_workspace(
 
 async fn list_exams(State(s): State<AppState>) -> Json<Vec<String>> {
     Json(store::list_exam_files(&s.config))
+}
+
+async fn list_scans(State(s): State<AppState>) -> Json<Vec<String>> {
+    Json(store::list_pdf_files(&s.config))
 }
 
 async fn exam_columns(

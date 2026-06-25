@@ -1,6 +1,6 @@
 import { Link } from '@tanstack/react-router'
 
-type Tab = 'grade' | 'import' | 'scheme' | 'results'
+type Tab = 'grade' | 'import' | 'scheme' | 'results' | 'pdf'
 
 export function ExamNav({ name, active }: { name: string; active: Tab }) {
   const tabs: { id: Tab; label: string; to: string }[] = [
@@ -8,6 +8,7 @@ export function ExamNav({ name, active }: { name: string; active: Tab }) {
     { id: 'import', label: 'Import', to: '/session/$name/import' },
     { id: 'scheme', label: 'Scheme', to: '/session/$name/scheme' },
     { id: 'results', label: 'Results', to: '/session/$name/results' },
+    { id: 'pdf', label: 'PDF', to: '/session/$name/pdf' },
   ]
   return (
     <div className="flex items-center justify-between border-b pb-2">
