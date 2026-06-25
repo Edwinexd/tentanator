@@ -1,10 +1,11 @@
 import { Link } from '@tanstack/react-router'
 
-type Tab = 'grade' | 'scheme' | 'results'
+type Tab = 'grade' | 'import' | 'scheme' | 'results'
 
 export function ExamNav({ name, active }: { name: string; active: Tab }) {
   const tabs: { id: Tab; label: string; to: string }[] = [
     { id: 'grade', label: 'Grade', to: '/session/$name' },
+    { id: 'import', label: 'Import', to: '/session/$name/import' },
     { id: 'scheme', label: 'Scheme', to: '/session/$name/scheme' },
     { id: 'results', label: 'Results', to: '/session/$name/results' },
   ]

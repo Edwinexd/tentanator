@@ -49,6 +49,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{name}/scheme", put(put_scheme))
         .route("/api/sessions/{name}/questions-config", put(put_questions_config))
         .route("/api/sessions/{name}/results", get(get_results).post(preview_results))
+        .route("/api/sessions/{name}/import/preview", post(import_preview))
+        .route("/api/sessions/{name}/import/apply", post(import_apply))
+        .route("/api/sessions/{name}/conflicts", get(get_conflicts))
+        .route("/api/sessions/{name}/conflicts/resolve", post(resolve_conflict))
         .route("/api/sessions/{name}/export", post(export))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -463,7 +467,7 @@ async fn grade_item(
         timestamp: store::now_iso(),
     };
     let conn = s.db().await;
-    store::put_graded_item(&conn, &name, &col, &item).await?;
+    store::put_graded_item(&conn, &name, &col, &item, "manual").await?;
     store::touch(&conn, &name).await?;
     store::load_question(&conn, &name, &col)
         .await?
@@ -564,6 +568,7 @@ struct ResultsResponse {
     total_students: usize,
     complete: usize,
     has_scheme: bool,
+    unresolved_conflicts: usize,
 }
 
 fn sanitize_ident(s: &str) -> String {
@@ -633,6 +638,7 @@ fn compute_results(
         total_students,
         complete,
         has_scheme: true,
+        unresolved_conflicts: 0,
     }
 }
 
@@ -682,7 +688,7 @@ async fn get_results(
 ) -> AppResult<Json<ResultsResponse>> {
     let session = load_session_or_404(&s, &name).await?;
     let (rows, _) = session_exam(&s.config, &session)?;
-    let resp = match &session.scheme {
+    let mut resp = match &session.scheme {
         Some(scheme) => compute_results(&session, &rows, scheme),
         None => ResultsResponse {
             results: Vec::new(),
@@ -690,8 +696,11 @@ async fn get_results(
             total_students: rows.len(),
             complete: 0,
             has_scheme: false,
+            unresolved_conflicts: 0,
         },
     };
+    let conn = s.db().await;
+    resp.unresolved_conflicts = store::count_conflicts(&conn, &name).await?;
     Ok(Json(resp))
 }
 
@@ -703,4 +712,238 @@ async fn preview_results(
     let session = load_session_or_404(&s, &name).await?;
     let (rows, _) = session_exam(&s.config, &session)?;
     Ok(Json(compute_results(&session, &rows, &scheme)))
+}
+
+// ---------------------------------------------------------------------------
+// Import & merge graded sheets
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ColMapping {
+    column: String,
+    output_col: String,
+}
+
+#[derive(Deserialize)]
+struct ImportReq {
+    file: String,
+    id_column: String,
+    mappings: Vec<ColMapping>,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ResolveReq {
+    output_col: String,
+    row_id: String,
+    choose: String, // "existing" | "incoming"
+}
+
+#[derive(Serialize)]
+struct ConflictSample {
+    output_col: String,
+    row_id: String,
+    existing: String,
+    incoming: String,
+}
+
+#[derive(Default, Serialize)]
+struct ImportSummary {
+    new: usize,
+    same: usize,
+    conflict: usize,
+    skipped: usize,
+    unknown_ids: usize,
+    conflicts: Vec<ConflictSample>,
+}
+
+fn grades_equal(a: &str, b: &str) -> bool {
+    match (crate::grade::evaluate_grade(a), crate::grade::evaluate_grade(b)) {
+        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+        _ => a.trim() == b.trim(),
+    }
+}
+
+/// Read roster + import file, returning (roster id-set, roster by id, import rows).
+fn load_import(
+    s: &AppState,
+    session: &Session,
+    file: &str,
+) -> AppResult<(std::collections::HashSet<String>, Vec<HashMap<String, String>>)> {
+    let (roster, _) = session_exam(&s.config, session)?;
+    let ids: std::collections::HashSet<String> = roster
+        .iter()
+        .map(|r| domain::row_id(r, &session.id_columns))
+        .collect();
+    let ipath = store::resolve_exam_path(&s.config, file)
+        .ok_or_else(|| AppError::NotFound(format!("import file '{file}' not found")))?;
+    let irows = store::read_exam_data(&ipath)?;
+    Ok((ids, irows))
+}
+
+async fn import_preview(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ImportReq>,
+) -> AppResult<Json<ImportSummary>> {
+    let conn = s.db().await;
+    let session = store::load_session(&conn, &name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))?;
+    let (roster_ids, irows) = load_import(&s, &session, &req.file)?;
+
+    let mut summary = ImportSummary::default();
+    for irow in &irows {
+        let id = irow.get(&req.id_column).cloned().unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        if !roster_ids.contains(&id) {
+            summary.unknown_ids += 1;
+            continue;
+        }
+        for m in &req.mappings {
+            let incoming = irow.get(&m.column).cloned().unwrap_or_default();
+            if !domain::is_meaningful(&incoming) {
+                summary.skipped += 1;
+                continue;
+            }
+            match store::get_graded(&conn, &name, &m.output_col, &id).await? {
+                None => summary.new += 1,
+                Some((existing, _)) => {
+                    if grades_equal(&existing, &incoming) {
+                        summary.same += 1;
+                    } else {
+                        summary.conflict += 1;
+                        if summary.conflicts.len() < 100 {
+                            summary.conflicts.push(ConflictSample {
+                                output_col: m.output_col.clone(),
+                                row_id: id.clone(),
+                                existing,
+                                incoming,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(Json(summary))
+}
+
+async fn import_apply(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ImportReq>,
+) -> AppResult<Json<ImportSummary>> {
+    let conn = s.db().await;
+    let session = store::load_session(&conn, &name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))?;
+    let (roster, _) = session_exam(&s.config, &session)?;
+    let roster_by_id: HashMap<String, &HashMap<String, String>> = roster
+        .iter()
+        .map(|r| (domain::row_id(r, &session.id_columns), r))
+        .collect();
+    let (roster_ids, irows) = load_import(&s, &session, &req.file)?;
+    let label = format!(
+        "imported:{}",
+        req.label.clone().unwrap_or_else(|| req.file.clone())
+    );
+
+    let mut summary = ImportSummary::default();
+    for irow in &irows {
+        let id = irow.get(&req.id_column).cloned().unwrap_or_default();
+        if id.is_empty() {
+            continue;
+        }
+        if !roster_ids.contains(&id) {
+            summary.unknown_ids += 1;
+            continue;
+        }
+        for m in &req.mappings {
+            let incoming = irow.get(&m.column).cloned().unwrap_or_default();
+            if !domain::is_meaningful(&incoming) {
+                summary.skipped += 1;
+                continue;
+            }
+            let input_text = session
+                .questions
+                .get(&m.output_col)
+                .and_then(|q| roster_by_id.get(&id).and_then(|r| r.get(&q.input_column)))
+                .cloned()
+                .unwrap_or_default();
+            match store::get_graded(&conn, &name, &m.output_col, &id).await? {
+                Some((existing, existing_source)) if !grades_equal(&existing, &incoming) => {
+                    summary.conflict += 1;
+                    store::add_conflict(
+                        &conn,
+                        &name,
+                        &domain::GradeConflict {
+                            output_col: m.output_col.clone(),
+                            row_id: id.clone(),
+                            existing_grade: existing,
+                            existing_source,
+                            incoming_grade: incoming.clone(),
+                            incoming_source: label.clone(),
+                            input_text,
+                            timestamp: store::now_iso(),
+                        },
+                    )
+                    .await?;
+                }
+                other => {
+                    if other.is_some() {
+                        summary.same += 1;
+                    } else {
+                        summary.new += 1;
+                    }
+                    let item = GradedItem {
+                        row_id: id.clone(),
+                        input_text,
+                        grade: incoming.clone(),
+                        timestamp: store::now_iso(),
+                    };
+                    store::put_graded_item(&conn, &name, &m.output_col, &item, &label).await?;
+                }
+            }
+        }
+    }
+    store::touch(&conn, &name).await?;
+    Ok(Json(summary))
+}
+
+async fn get_conflicts(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Vec<domain::GradeConflict>>> {
+    let conn = s.db().await;
+    Ok(Json(store::list_conflicts(&conn, &name).await?))
+}
+
+async fn resolve_conflict(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ResolveReq>,
+) -> AppResult<StatusCode> {
+    let conn = s.db().await;
+    if req.choose == "incoming" {
+        let conflicts = store::list_conflicts(&conn, &name).await?;
+        if let Some(c) = conflicts
+            .iter()
+            .find(|c| c.output_col == req.output_col && c.row_id == req.row_id)
+        {
+            let item = GradedItem {
+                row_id: c.row_id.clone(),
+                input_text: c.input_text.clone(),
+                grade: c.incoming_grade.clone(),
+                timestamp: store::now_iso(),
+            };
+            store::put_graded_item(&conn, &name, &c.output_col, &item, &c.incoming_source).await?;
+        }
+    }
+    store::clear_conflicts_for(&conn, &name, &req.output_col, &req.row_id).await?;
+    store::touch(&conn, &name).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

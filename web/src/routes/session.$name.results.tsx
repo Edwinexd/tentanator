@@ -41,6 +41,9 @@ function ResultsView() {
           <div className="flex flex-wrap gap-2 text-sm">
             <Stat label="Students" value={data.total_students} />
             <Stat label="Fully graded" value={`${data.complete}/${data.total_students}`} />
+            {data.unresolved_conflicts > 0 && (
+              <Stat label="Unresolved conflicts" value={data.unresolved_conflicts} />
+            )}
             {Object.entries(data.distribution)
               .sort()
               .map(([g, c]) => (

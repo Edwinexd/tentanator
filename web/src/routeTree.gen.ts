@@ -14,6 +14,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionNameRouteImport } from './routes/session.$name'
 import { Route as SessionNameSchemeRouteImport } from './routes/session.$name.scheme'
 import { Route as SessionNameResultsRouteImport } from './routes/session.$name.results'
+import { Route as SessionNameImportRouteImport } from './routes/session.$name.import'
 
 const NewRoute = NewRouteImport.update({
   id: '/new',
@@ -40,11 +41,17 @@ const SessionNameResultsRoute = SessionNameResultsRouteImport.update({
   path: '/results',
   getParentRoute: () => SessionNameRoute,
 } as any)
+const SessionNameImportRoute = SessionNameImportRouteImport.update({
+  id: '/import',
+  path: '/import',
+  getParentRoute: () => SessionNameRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/import': typeof SessionNameImportRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -52,6 +59,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/import': typeof SessionNameImportRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -60,6 +68,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/import': typeof SessionNameImportRoute
   '/session/$name/results': typeof SessionNameResultsRoute
   '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
@@ -69,6 +78,7 @@ export interface FileRouteTypes {
     | '/'
     | '/new'
     | '/session/$name'
+    | '/session/$name/import'
     | '/session/$name/results'
     | '/session/$name/scheme'
   fileRoutesByTo: FileRoutesByTo
@@ -76,6 +86,7 @@ export interface FileRouteTypes {
     | '/'
     | '/new'
     | '/session/$name'
+    | '/session/$name/import'
     | '/session/$name/results'
     | '/session/$name/scheme'
   id:
@@ -83,6 +94,7 @@ export interface FileRouteTypes {
     | '/'
     | '/new'
     | '/session/$name'
+    | '/session/$name/import'
     | '/session/$name/results'
     | '/session/$name/scheme'
   fileRoutesById: FileRoutesById
@@ -130,15 +142,24 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionNameResultsRouteImport
       parentRoute: typeof SessionNameRoute
     }
+    '/session/$name/import': {
+      id: '/session/$name/import'
+      path: '/import'
+      fullPath: '/session/$name/import'
+      preLoaderRoute: typeof SessionNameImportRouteImport
+      parentRoute: typeof SessionNameRoute
+    }
   }
 }
 
 interface SessionNameRouteChildren {
+  SessionNameImportRoute: typeof SessionNameImportRoute
   SessionNameResultsRoute: typeof SessionNameResultsRoute
   SessionNameSchemeRoute: typeof SessionNameSchemeRoute
 }
 
 const SessionNameRouteChildren: SessionNameRouteChildren = {
+  SessionNameImportRoute: SessionNameImportRoute,
   SessionNameResultsRoute: SessionNameResultsRoute,
   SessionNameSchemeRoute: SessionNameSchemeRoute,
 }

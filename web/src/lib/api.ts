@@ -89,6 +89,36 @@ export interface ResultsResponse {
   total_students: number
   complete: number
   has_scheme: boolean
+  unresolved_conflicts: number
+}
+
+export interface ColMapping {
+  column: string
+  output_col: string
+}
+export interface ImportReq {
+  file: string
+  id_column: string
+  mappings: ColMapping[]
+  label?: string
+}
+export interface ImportSummary {
+  new: number
+  same: number
+  conflict: number
+  skipped: number
+  unknown_ids: number
+  conflicts: { output_col: string; row_id: string; existing: string; incoming: string }[]
+}
+export interface GradeConflict {
+  output_col: string
+  row_id: string
+  existing_grade: string
+  existing_source: string
+  incoming_grade: string
+  incoming_source: string
+  input_text: string
+  timestamp: string
 }
 
 export interface QuestionConfigUpdate {
@@ -214,6 +244,15 @@ export const api = {
     req<ResultsResponse>('GET', `/api/sessions/${encodeURIComponent(name)}/results`),
   previewResults: (name: string, scheme: GradeScheme) =>
     req<ResultsResponse>('POST', `/api/sessions/${encodeURIComponent(name)}/results`, scheme),
+
+  importPreview: (name: string, body: ImportReq) =>
+    req<ImportSummary>('POST', `/api/sessions/${encodeURIComponent(name)}/import/preview`, body),
+  importApply: (name: string, body: ImportReq) =>
+    req<ImportSummary>('POST', `/api/sessions/${encodeURIComponent(name)}/import/apply`, body),
+  getConflicts: (name: string) =>
+    req<GradeConflict[]>('GET', `/api/sessions/${encodeURIComponent(name)}/conflicts`),
+  resolveConflict: (name: string, body: { output_col: string; row_id: string; choose: string }) =>
+    req<void>('POST', `/api/sessions/${encodeURIComponent(name)}/conflicts/resolve`, body),
 }
 
 export function rowId(row: ExamRow, idColumns: string[]): string {

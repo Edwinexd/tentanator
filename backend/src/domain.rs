@@ -162,6 +162,19 @@ pub struct SessionSummary {
     pub archived: bool,
 }
 
+/// An imported grade that disagrees with an existing one, pending resolution.
+#[derive(Clone, Debug, Serialize)]
+pub struct GradeConflict {
+    pub output_col: String,
+    pub row_id: String,
+    pub existing_grade: String,
+    pub existing_source: String,
+    pub incoming_grade: String,
+    pub incoming_source: String,
+    pub input_text: String,
+    pub timestamp: String,
+}
+
 /// Blank / dash / N/A responses are auto-zeroed and never count toward ICL.
 pub fn is_meaningful(text: &str) -> bool {
     let t = text.trim();

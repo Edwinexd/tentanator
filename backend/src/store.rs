@@ -11,7 +11,7 @@ use turso::Connection;
 
 use crate::config::Config;
 use crate::db;
-use crate::domain::{GradedItem, QuestionGrades, Session, SessionSummary};
+use crate::domain::{GradeConflict, GradedItem, QuestionGrades, Session, SessionSummary};
 use crate::error::{AppError, AppResult};
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ async fn insert_session_inner(conn: &Connection, s: &Session) -> AppResult<()> {
     for (col, q) in &s.questions {
         upsert_question_row(conn, &s.session_name, col, q).await?;
         for item in &q.graded_items {
-            put_graded_item(conn, &s.session_name, col, item).await?;
+            put_graded_item(conn, &s.session_name, col, item, "").await?;
         }
     }
     Ok(())
@@ -272,6 +272,7 @@ pub async fn put_graded_item(
     name: &str,
     col: &str,
     item: &GradedItem,
+    source: &str,
 ) -> AppResult<()> {
     conn.execute(
         "DELETE FROM graded_items WHERE session_name = ? AND output_col = ? AND row_id = ?",
@@ -279,8 +280,8 @@ pub async fn put_graded_item(
     )
     .await?;
     conn.execute(
-        "INSERT INTO graded_items (session_name, output_col, row_id, input_text, grade, timestamp) \
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO graded_items (session_name, output_col, row_id, input_text, grade, timestamp, source) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
             name,
             col,
@@ -288,6 +289,7 @@ pub async fn put_graded_item(
             item.input_text.as_str(),
             item.grade.as_str(),
             item.timestamp.as_str(),
+            source,
         ),
     )
     .await?;
@@ -295,6 +297,97 @@ pub async fn put_graded_item(
     if let Some(gq) = question_gq_id(conn, name, col).await? {
         sync_item_to_pool(conn, &gq, name, item).await?;
     }
+    Ok(())
+}
+
+/// Current (grade, source) for a cell, if graded.
+pub async fn get_graded(
+    conn: &Connection,
+    name: &str,
+    col: &str,
+    row_id: &str,
+) -> AppResult<Option<(String, String)>> {
+    let mut r = conn
+        .query(
+            "SELECT grade, source FROM graded_items \
+             WHERE session_name = ? AND output_col = ? AND row_id = ?",
+            (name, col, row_id),
+        )
+        .await?;
+    if let Some(row) = r.next().await? {
+        Ok(Some((row.get(0)?, row.get(1)?)))
+    } else {
+        Ok(None)
+    }
+}
+
+pub async fn add_conflict(conn: &Connection, name: &str, c: &GradeConflict) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM grade_conflicts WHERE session_name = ? AND output_col = ? AND row_id = ? AND incoming_source = ?",
+        (name, c.output_col.as_str(), c.row_id.as_str(), c.incoming_source.as_str()),
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO grade_conflicts (session_name, output_col, row_id, existing_grade, existing_source, incoming_grade, incoming_source, input_text, timestamp) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            name,
+            c.output_col.as_str(),
+            c.row_id.as_str(),
+            c.existing_grade.as_str(),
+            c.existing_source.as_str(),
+            c.incoming_grade.as_str(),
+            c.incoming_source.as_str(),
+            c.input_text.as_str(),
+            c.timestamp.as_str(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn list_conflicts(conn: &Connection, name: &str) -> AppResult<Vec<GradeConflict>> {
+    let mut out = Vec::new();
+    let mut r = conn
+        .query(
+            "SELECT output_col, row_id, existing_grade, existing_source, incoming_grade, incoming_source, input_text, timestamp \
+             FROM grade_conflicts WHERE session_name = ? ORDER BY output_col, row_id",
+            (name,),
+        )
+        .await?;
+    while let Some(row) = r.next().await? {
+        out.push(GradeConflict {
+            output_col: row.get(0)?,
+            row_id: row.get(1)?,
+            existing_grade: row.get(2)?,
+            existing_source: row.get(3)?,
+            incoming_grade: row.get(4)?,
+            incoming_source: row.get(5)?,
+            input_text: row.get(6)?,
+            timestamp: row.get(7)?,
+        });
+    }
+    Ok(out)
+}
+
+pub async fn count_conflicts(conn: &Connection, name: &str) -> AppResult<usize> {
+    let mut c = conn
+        .query("SELECT COUNT(*) FROM grade_conflicts WHERE session_name = ?", (name,))
+        .await?;
+    Ok(c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize)
+}
+
+pub async fn clear_conflicts_for(
+    conn: &Connection,
+    name: &str,
+    col: &str,
+    row_id: &str,
+) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM grade_conflicts WHERE session_name = ? AND output_col = ? AND row_id = ?",
+        (name, col, row_id),
+    )
+    .await?;
     Ok(())
 }
 
@@ -361,6 +454,7 @@ pub async fn delete_session(conn: &Connection, name: &str) -> AppResult<bool> {
     for sql in [
         "DELETE FROM graded_items WHERE session_name = ?",
         "DELETE FROM caches WHERE session_name = ?",
+        "DELETE FROM grade_conflicts WHERE session_name = ?",
         "DELETE FROM questions WHERE session_name = ?",
         "DELETE FROM sessions WHERE name = ?",
     ] {
@@ -1011,7 +1105,7 @@ mod tests {
             grade: "2+1.5".into(),
             timestamp: now_iso(),
         };
-        put_graded_item(&conn, "s1", "g", &item).await.unwrap();
+        put_graded_item(&conn, "s1", "g", &item, "manual").await.unwrap();
 
         let loaded = load_session(&conn, "s1").await.unwrap().unwrap();
         assert_eq!(loaded.course.as_deref(), Some("CS101"));
@@ -1051,6 +1145,7 @@ mod tests {
             "sa",
             "g",
             &GradedItem { row_id: "r1".into(), input_text: "x".into(), grade: "5".into(), timestamp: now_iso() },
+            "manual",
         )
         .await
         .unwrap();
