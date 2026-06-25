@@ -41,8 +41,9 @@ def render(req: RenderReq):
 
     scanned = None
     if req.scanned_pdf:
+        fname = os.path.basename(req.scanned_pdf)  # no path traversal
         for sub in ("scans", "exams", ""):
-            cand = os.path.join(DATA, sub, req.scanned_pdf)
+            cand = os.path.join(DATA, sub, fname)
             if os.path.exists(cand):
                 scanned = cand
                 break

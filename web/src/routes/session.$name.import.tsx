@@ -38,10 +38,13 @@ function ImportView() {
   }, [name])
 
   useEffect(() => {
+    // Clear the previous file's columns/id synchronously so a Preview/Apply
+    // before the fetch resolves can't send a stale id_column.
     setSummary(null)
     setMapping({})
+    setColumns([])
+    setIdColumn('')
     if (!file) {
-      setColumns([])
       return
     }
     api

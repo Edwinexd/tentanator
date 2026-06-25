@@ -195,6 +195,38 @@ pub fn compute_student(
     }
 }
 
+/// Validate that every variable referenced by the scheme's expressions resolves
+/// against the known set (constants + question vars + earlier scheme vars), so a
+/// typo'd identifier is rejected at config time rather than silently grading
+/// everyone wrong. `question_vars` are the effective vars of the questions.
+pub fn validate_scheme(scheme: &GradeScheme, question_vars: &[String]) -> Result<(), String> {
+    let mut available: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for c in &scheme.constants {
+        available.insert(c.name.clone());
+    }
+    for v in question_vars {
+        available.insert(v.clone());
+    }
+    let check = |expr: &str, avail: &std::collections::HashSet<String>| -> Result<(), String> {
+        let tree = build_operator_tree::<DefaultNumericTypes>(expr)
+            .map_err(|e| format!("invalid expression `{expr}`: {e}"))?;
+        for id in tree.iter_variable_identifiers() {
+            if !avail.contains(id) {
+                return Err(format!("expression `{expr}` references unknown variable `{id}`"));
+            }
+        }
+        Ok(())
+    };
+    for v in &scheme.vars {
+        check(&v.expr, &available)?;
+        available.insert(v.name.clone());
+    }
+    for r in &scheme.rules {
+        check(&r.when, &available)?;
+    }
+    Ok(())
+}
+
 /// Grade distribution (letter -> count) over a set of results.
 pub fn distribution(results: &[StudentResult]) -> HashMap<String, usize> {
     let mut d = HashMap::new();
@@ -317,5 +349,32 @@ mod tests {
         let r = compute_student("s", &scheme, &qs, &points);
         assert_eq!(r.total, 2.0);
         assert_eq!(r.grade, "PASS");
+    }
+
+    #[test]
+    fn validate_rejects_unknown_identifiers() {
+        let qvars = vec!["q1".to_string(), "q2".to_string()];
+        let bad = GradeScheme {
+            vars: vec![SchemeVar { name: "total".into(), expr: "q1 + q2".into() }],
+            rules: vec![GradeRule { when: "totl >= 5".into(), grade: "A".into() }], // typo
+            ..Default::default()
+        };
+        let err = validate_scheme(&bad, &qvars).unwrap_err();
+        assert!(err.contains("totl"), "{err}");
+
+        let good = GradeScheme {
+            vars: vec![SchemeVar { name: "total".into(), expr: "q1 + q2".into() }],
+            rules: vec![GradeRule { when: "total >= 5".into(), grade: "A".into() }],
+            ..Default::default()
+        };
+        assert!(validate_scheme(&good, &qvars).is_ok());
+
+        // groupsum() is a function, not a variable - must not be flagged.
+        let grp = GradeScheme {
+            vars: vec![SchemeVar { name: "total".into(), expr: "groupsum(\"SE\")".into() }],
+            rules: vec![GradeRule { when: "total >= 1".into(), grade: "P".into() }],
+            ..Default::default()
+        };
+        assert!(validate_scheme(&grp, &qvars).is_ok());
     }
 }

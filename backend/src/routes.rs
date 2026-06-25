@@ -651,15 +651,24 @@ fn compute_results(
     }
 }
 
+/// Effective scheme variables for a session's questions (in column order).
+fn session_question_vars(session: &Session) -> Vec<String> {
+    session
+        .output_columns
+        .iter()
+        .filter_map(|c| session.questions.get(c).map(|q| effective_var(c, q)))
+        .collect()
+}
+
 async fn put_scheme(
     State(s): State<AppState>,
     Path(name): Path<String>,
     Json(scheme): Json<GradeScheme>,
 ) -> AppResult<StatusCode> {
+    let session = load_session_or_404(&s, &name).await?;
+    scheme::validate_scheme(&scheme, &session_question_vars(&session))
+        .map_err(AppError::BadRequest)?;
     let conn = s.db().await;
-    if !store::session_exists(&conn, &name).await? {
-        return Err(AppError::NotFound(format!("session '{name}' not found")));
-    }
     store::set_scheme(&conn, &name, &Some(scheme)).await?;
     store::touch(&conn, &name).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -671,19 +680,36 @@ async fn put_questions_config(
     Json(updates): Json<Vec<QuestionConfigUpdate>>,
 ) -> AppResult<Json<Session>> {
     let mut session = load_session_or_404(&s, &name).await?;
+    for u in &updates {
+        let q = session.ensure_question(&u.col);
+        q.var = u.var.clone();
+        q.group = u.group.clone();
+        q.qtype = u.qtype.clone();
+        q.max_points = u.max_points;
+        q.position = u.position;
+        q.estimate = u.estimate.clone().filter(|e| !e.is_empty());
+    }
+    // Each question must contribute a unique scheme variable, else points from
+    // colliding questions would silently merge during compute.
+    let mut seen = std::collections::HashSet::new();
+    for col in &session.output_columns {
+        if let Some(q) = session.questions.get(col) {
+            let v = effective_var(col, q);
+            if !seen.insert(v.clone()) {
+                return Err(AppError::BadRequest(format!(
+                    "duplicate scheme variable `{v}` - each question needs a unique var"
+                )));
+            }
+        }
+    }
     {
         let conn = s.db().await;
         for u in &updates {
-            {
-                let q = session.ensure_question(&u.col);
-                q.var = u.var.clone();
-                q.group = u.group.clone();
-                q.qtype = u.qtype.clone();
-                q.max_points = u.max_points;
-                q.position = u.position;
-                q.estimate = u.estimate.clone().filter(|e| !e.is_empty());
-            }
-            let qc = session.questions.get(&u.col).cloned().ok_or_else(|| no_question(&u.col))?;
+            let qc = session
+                .questions
+                .get(&u.col)
+                .cloned()
+                .ok_or_else(|| no_question(&u.col))?;
             store::upsert_question_row(&conn, &name, &u.col, &qc).await?;
         }
         store::touch(&conn, &name).await?;
@@ -719,6 +745,8 @@ async fn preview_results(
     Json(scheme): Json<GradeScheme>,
 ) -> AppResult<Json<ResultsResponse>> {
     let session = load_session_or_404(&s, &name).await?;
+    scheme::validate_scheme(&scheme, &session_question_vars(&session))
+        .map_err(AppError::BadRequest)?;
     let (rows, _) = session_exam(&s.config, &session)?;
     Ok(Json(compute_results(&session, &rows, &scheme)))
 }
@@ -770,7 +798,7 @@ struct ImportSummary {
 fn grades_equal(a: &str, b: &str) -> bool {
     match (crate::grade::evaluate_grade(a), crate::grade::evaluate_grade(b)) {
         (Some(x), Some(y)) => (x - y).abs() < 1e-9,
-        _ => a.trim() == b.trim(),
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
     }
 }
 
@@ -904,17 +932,19 @@ async fn import_apply(
                 }
                 other => {
                     if other.is_some() {
+                        // Identical grade already present: leave it (and its
+                        // source provenance) untouched.
                         summary.same += 1;
                     } else {
                         summary.new += 1;
+                        let item = GradedItem {
+                            row_id: id.clone(),
+                            input_text,
+                            grade: incoming.clone(),
+                            timestamp: store::now_iso(),
+                        };
+                        store::put_graded_item(&conn, &name, &m.output_col, &item, &label).await?;
                     }
-                    let item = GradedItem {
-                        row_id: id.clone(),
-                        input_text,
-                        grade: incoming.clone(),
-                        timestamp: store::now_iso(),
-                    };
-                    store::put_graded_item(&conn, &name, &m.output_col, &item, &label).await?;
                 }
             }
         }

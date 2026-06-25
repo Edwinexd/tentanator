@@ -24,15 +24,17 @@ from barcode.writer import ImageWriter
 def latex_escape(s):
     if s is None:
         return ""
-    s = str(s)
+    # Replace backslash with a sentinel first so the braces in its replacement
+    # (\textbackslash{}) are not themselves escaped by the brace rules below.
+    s = str(s).replace("\\", "\x00")
     for a, b in [
-        ("\\", r"\textbackslash{}"), ("&", r"\&"), ("%", r"\%"), ("$", r"\$"),
-        ("#", r"\#"), ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
+        ("&", r"\&"), ("%", r"\%"), ("$", r"\$"), ("#", r"\#"),
+        ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
         ("~", r"\textasciitilde{}"), ("^", r"\textasciicircum{}"),
         ("<", r"\textless{}"), (">", r"\textgreater{}"),
     ]:
         s = s.replace(a, b)
-    return s
+    return s.replace("\x00", r"\textbackslash{}")
 
 
 def make_barcode(value, barcode_dir):
