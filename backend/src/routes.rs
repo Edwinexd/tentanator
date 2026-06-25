@@ -56,6 +56,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{name}/export", post(export))
         .route("/api/sessions/{name}/export/daisy", post(export_daisy_route))
         .route("/api/sessions/{name}/export/csv", post(export_csv_route))
+        .route("/api/sessions/{name}/render-data", get(render_data))
+        .route("/api/sessions/{name}/export/results-pdf", post(export_results_pdf))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -944,6 +946,147 @@ async fn export_csv_route(
         .unwrap_or_default();
     let path = store::export_per_question_csv(&s.config, &session, &rows, &results)?;
     Ok(Json(json!({ "path": path })))
+}
+
+// ---------------------------------------------------------------------------
+// Results-PDF render data + trigger
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct RenderQuestion {
+    label: String,
+    group: String,
+    qtype: String,
+    response: String,
+    points: Option<f64>,
+    max: f64,
+    estimated: bool,
+}
+#[derive(Serialize)]
+struct RenderStudent {
+    id: String,
+    grade: String,
+    total: f64,
+    questions: Vec<RenderQuestion>,
+}
+#[derive(Serialize)]
+struct RenderData {
+    exam: String,
+    students: Vec<RenderStudent>,
+}
+#[derive(Deserialize)]
+struct ResultsPdfReq {
+    #[serde(default)]
+    scanned_pdf: Option<String>,
+}
+
+async fn render_data(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<RenderData>> {
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, _) = session_exam(&s.config, &session)?;
+    let scheme = session.scheme.clone().unwrap_or_default();
+    let questions: Vec<scheme::QuestionConfig> = session
+        .output_columns
+        .iter()
+        .filter_map(|col| session.questions.get(col).map(|q| (col, q)))
+        .map(|(col, q)| scheme::QuestionConfig {
+            var: effective_var(col, q),
+            label: q.question_name.clone(),
+            group: q.group.clone(),
+            qtype: q.qtype.clone(),
+            max_points: q.max_points,
+            position: q.position,
+            estimate: q.estimate.clone(),
+        })
+        .collect();
+
+    let mut students = Vec::new();
+    for row in &rows {
+        let rid = domain::row_id(row, &session.id_columns);
+        let mut points: HashMap<String, Option<f64>> = HashMap::new();
+        for col in &session.output_columns {
+            if let Some(q) = session.questions.get(col) {
+                let var = effective_var(col, q);
+                let g = q
+                    .graded_items
+                    .iter()
+                    .find(|gi| gi.row_id == rid)
+                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
+                points.insert(var, g);
+            }
+        }
+        let sr = scheme::compute_student(&rid, &scheme, &questions, &points);
+        let est: std::collections::HashSet<&str> = sr.estimated.iter().map(|s| s.as_str()).collect();
+
+        let mut rq = Vec::new();
+        for col in &session.output_columns {
+            if let Some(q) = session.questions.get(col) {
+                let var = effective_var(col, q);
+                let response = row.get(&q.input_column).cloned().unwrap_or_default();
+                let pts = q
+                    .graded_items
+                    .iter()
+                    .find(|gi| gi.row_id == rid)
+                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
+                rq.push(RenderQuestion {
+                    label: if q.question_name.is_empty() {
+                        col.clone()
+                    } else {
+                        q.question_name.clone()
+                    },
+                    group: q.group.clone(),
+                    qtype: q.qtype.clone(),
+                    response,
+                    points: pts,
+                    max: q.max_points,
+                    estimated: est.contains(var.as_str()),
+                });
+            }
+        }
+        students.push(RenderStudent {
+            id: rid,
+            grade: sr.grade,
+            total: sr.total,
+            questions: rq,
+        });
+    }
+    Ok(Json(RenderData { exam: name, students }))
+}
+
+async fn export_results_pdf(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ResultsPdfReq>,
+) -> AppResult<Json<Value>> {
+    if s.config.renderer_url.is_empty() {
+        return Err(AppError::BadRequest(
+            "results renderer not configured (set RENDERER_URL)".into(),
+        ));
+    }
+    {
+        let conn = s.db().await;
+        if !store::session_exists(&conn, &name).await? {
+            return Err(AppError::NotFound(format!("session '{name}' not found")));
+        }
+    }
+    let url = format!("{}/render", s.config.renderer_url.trim_end_matches('/'));
+    let body = json!({ "exam": name, "scanned_pdf": req.scanned_pdf });
+    let resp = s
+        .http
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| AppError::Upstream(e.to_string()))?;
+    if !resp.status().is_success() {
+        let st = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(AppError::Upstream(format!("renderer {st}: {t}")));
+    }
+    let v: Value = resp.json().await.map_err(|e| AppError::Upstream(e.to_string()))?;
+    Ok(Json(v))
 }
 
 async fn get_conflicts(

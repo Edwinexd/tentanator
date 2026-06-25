@@ -163,6 +163,7 @@ mod tests {
             cerebras_reasoning_effort: "high".into(),
             cerebras_summary_model: "x".into(),
             bind_addr: "127.0.0.1:0".into(),
+            renderer_url: String::new(),
         }
     }
 

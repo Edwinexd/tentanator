@@ -17,6 +17,8 @@ pub struct Config {
     /// Model used to condense reasoning chains into a short summary.
     pub cerebras_summary_model: String,
     pub bind_addr: String,
+    /// Base URL of the results-PDF renderer service (empty = disabled).
+    pub renderer_url: String,
 }
 
 impl Config {
@@ -49,6 +51,7 @@ impl Config {
                 .unwrap_or_else(|_| "gpt-oss-120b".to_string()),
             bind_addr: std::env::var("TENTANATOR_BIND")
                 .unwrap_or_else(|_| "127.0.0.1:8787".to_string()),
+            renderer_url: std::env::var("RENDERER_URL").unwrap_or_default(),
         })
     }
 
