@@ -330,6 +330,10 @@ pub fn list_sessions(config: &Config, archived: bool) -> Vec<SessionSummary> {
         out.push(SessionSummary {
             session_name,
             csv_file,
+            course: value
+                .get("course")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             last_updated: value
                 .get("last_updated")
                 .and_then(|v| v.as_str())

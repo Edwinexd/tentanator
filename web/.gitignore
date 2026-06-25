@@ -11,3 +11,7 @@ dist-ssr
 .vinxi
 __unconfig*
 todos.json
+
+# The repo-root .gitignore is a Python template whose `lib/` rule otherwise eats
+# our API client at src/lib/. Re-include the source dir.
+!src/lib/

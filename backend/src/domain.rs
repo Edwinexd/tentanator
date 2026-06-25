@@ -88,6 +88,10 @@ pub struct Session {
     pub id_columns: Vec<String>,
     pub input_columns: Vec<String>,
     pub output_columns: Vec<String>,
+    /// Optional grouping label (e.g. a course code). Replaces the old workspace
+    /// directory hack - sessions are filtered/grouped by this, not by location.
+    #[serde(default)]
+    pub course: Option<String>,
     #[serde(default)]
     pub last_updated: String,
     #[serde(default)]
@@ -139,6 +143,7 @@ pub struct AIGradeSuggestion {
 pub struct SessionSummary {
     pub session_name: String,
     pub csv_file: String,
+    pub course: Option<String>,
     pub last_updated: String,
     pub num_questions: usize,
     pub archived: bool,

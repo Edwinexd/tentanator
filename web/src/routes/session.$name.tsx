@@ -17,6 +17,7 @@ function SessionView() {
   const { name } = Route.useParams()
   const [session, setSession] = useState<Session | null>(null)
   const [rows, setRows] = useState<ExamRow[]>([])
+  const [course, setCourse] = useState('')
   const [col, setCol] = useState('')
   const [index, setIndex] = useState(0)
   const [gradeValue, setGradeValue] = useState('')
@@ -31,6 +32,7 @@ function SessionView() {
       .getSession(name)
       .then((s) => {
         setSession(s)
+        setCourse(s.course ?? '')
         setRows([])
         setCol(s.output_columns[0] ?? '')
         return api.examRows(s.csv_file)
@@ -118,6 +120,17 @@ function SessionView() {
     }
   }
 
+  async function saveCourse() {
+    if (!session) return
+    if ((session.course ?? '') === course.trim()) return
+    try {
+      const updated = await api.updateSession(name, { course: course.trim() })
+      setSession((s) => (s ? { ...s, course: updated.course } : s))
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   async function exportSession() {
     setBusy(true)
     try {
@@ -155,6 +168,20 @@ function SessionView() {
           ← sessions
         </Link>
       </div>
+
+      <label className="flex items-center gap-2 text-sm text-gray-600">
+        Course:
+        <input
+          className="rounded border px-2 py-1"
+          placeholder="e.g. CS101"
+          value={course}
+          onChange={(e) => setCourse(e.target.value)}
+          onBlur={saveCourse}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void saveCourse()
+          }}
+        />
+      </label>
 
       <div className="flex flex-wrap items-center gap-2">
         <select

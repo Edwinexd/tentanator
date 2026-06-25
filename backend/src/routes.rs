@@ -1,14 +1,9 @@
 //! HTTP routes. Each handler is a thin orchestration layer over the domain
 //! modules; all business logic lives in `store`, `sampling`, `grade`, `llm`.
-//!
-//! Data handlers resolve their data directory through the `Ctx` extractor, which
-//! honours an optional `?workspace=<name>` query param so old workspaces under
-//! `workspaces/<name>/` can be browsed directly.
 
 use std::collections::HashMap;
 
-use axum::extract::{FromRequestParts, Path, Query, State};
-use axum::http::request::Parts;
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -28,12 +23,16 @@ const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
-        .route("/api/workspaces", get(list_workspaces))
+        .route("/api/legacy-workspaces", get(list_legacy_workspaces))
+        .route("/api/legacy-workspaces/{name}/import", post(import_workspace))
         .route("/api/exams", get(list_exams))
         .route("/api/exams/{file}/columns", get(exam_columns))
         .route("/api/exams/{file}/rows", get(exam_rows))
         .route("/api/sessions", get(list_sessions).post(create_session))
-        .route("/api/sessions/{name}", get(get_session).delete(delete_session))
+        .route(
+            "/api/sessions/{name}",
+            get(get_session).put(update_session).delete(delete_session),
+        )
         .route("/api/sessions/{name}/archive", post(archive_session))
         .route("/api/sessions/{name}/unarchive", post(unarchive_session))
         .route("/api/sessions/{name}/questions/{col}", put(put_question))
@@ -51,41 +50,6 @@ pub fn router(state: AppState) -> Router {
 }
 
 // ---------------------------------------------------------------------------
-// Per-request context (resolves the workspace-scoped data dir)
-// ---------------------------------------------------------------------------
-
-#[derive(Deserialize, Default)]
-struct WorkspaceQuery {
-    #[serde(default)]
-    workspace: Option<String>,
-}
-
-/// Effective config (data dir resolved for the optional `?workspace=`) plus the
-/// shared HTTP client.
-struct Ctx {
-    config: Config,
-    http: reqwest::Client,
-}
-
-impl FromRequestParts<AppState> for Ctx {
-    type Rejection = std::convert::Infallible;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let workspace = Query::<WorkspaceQuery>::from_request_parts(parts, state)
-            .await
-            .ok()
-            .and_then(|Query(q)| q.workspace);
-        Ok(Ctx {
-            config: state.config_for(workspace.as_deref()),
-            http: state.http.clone(),
-        })
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Request DTOs
 // ---------------------------------------------------------------------------
 
@@ -93,6 +57,8 @@ impl FromRequestParts<AppState> for Ctx {
 struct ListQuery {
     #[serde(default)]
     archived: bool,
+    #[serde(default)]
+    course: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -103,6 +69,13 @@ struct CreateSession {
     output_columns: Vec<String>,
     #[serde(default)]
     name: Option<String>,
+    #[serde(default)]
+    course: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SessionMeta {
+    course: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -155,29 +128,44 @@ fn question_clone(session: &Session, col: &str) -> AppResult<QuestionGrades> {
 }
 
 // ---------------------------------------------------------------------------
-// Health, workspaces & exams
+// Health, legacy import & exams
 // ---------------------------------------------------------------------------
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
-async fn list_workspaces(State(s): State<AppState>) -> Json<workspace::WorkspaceListing> {
-    Json(workspace::list_workspaces(&s.config))
+async fn list_legacy_workspaces(
+    State(s): State<AppState>,
+) -> Json<Vec<workspace::WorkspaceInfo>> {
+    Json(workspace::list_importable(&s.config))
 }
 
-async fn list_exams(ctx: Ctx) -> Json<Vec<String>> {
-    Json(store::list_exam_files(&ctx.config))
+async fn import_workspace(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<workspace::ImportResult>> {
+    Ok(Json(workspace::import_workspace(&s.config, &name)?))
 }
 
-async fn exam_columns(ctx: Ctx, Path(file): Path<String>) -> AppResult<Json<Vec<String>>> {
-    let path = store::resolve_exam_path(&ctx.config, &file)
+async fn list_exams(State(s): State<AppState>) -> Json<Vec<String>> {
+    Json(store::list_exam_files(&s.config))
+}
+
+async fn exam_columns(
+    State(s): State<AppState>,
+    Path(file): Path<String>,
+) -> AppResult<Json<Vec<String>>> {
+    let path = store::resolve_exam_path(&s.config, &file)
         .ok_or_else(|| AppError::NotFound(format!("exam file '{file}' not found")))?;
     Ok(Json(store::get_exam_columns(&path)?))
 }
 
-async fn exam_rows(ctx: Ctx, Path(file): Path<String>) -> AppResult<Json<Value>> {
-    let path = store::resolve_exam_path(&ctx.config, &file)
+async fn exam_rows(
+    State(s): State<AppState>,
+    Path(file): Path<String>,
+) -> AppResult<Json<Value>> {
+    let path = store::resolve_exam_path(&s.config, &file)
         .ok_or_else(|| AppError::NotFound(format!("exam file '{file}' not found")))?;
     let rows = store::read_exam_data(&path)?;
     Ok(Json(json!({ "rows": rows })))
@@ -187,12 +175,19 @@ async fn exam_rows(ctx: Ctx, Path(file): Path<String>) -> AppResult<Json<Value>>
 // Sessions
 // ---------------------------------------------------------------------------
 
-async fn list_sessions(ctx: Ctx, Query(q): Query<ListQuery>) -> Json<Vec<SessionSummary>> {
-    Json(store::list_sessions(&ctx.config, q.archived))
+async fn list_sessions(
+    State(s): State<AppState>,
+    Query(q): Query<ListQuery>,
+) -> Json<Vec<SessionSummary>> {
+    let mut sessions = store::list_sessions(&s.config, q.archived);
+    if let Some(course) = q.course.filter(|c| !c.is_empty()) {
+        sessions.retain(|x| x.course.as_deref() == Some(course.as_str()));
+    }
+    Json(sessions)
 }
 
 async fn create_session(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Json(req): Json<CreateSession>,
 ) -> AppResult<Json<Session>> {
     if req.input_columns.is_empty() || req.output_columns.is_empty() {
@@ -218,6 +213,7 @@ async fn create_session(
         },
         input_columns: req.input_columns,
         output_columns: req.output_columns.clone(),
+        course: req.course.filter(|c| !c.is_empty()),
         last_updated: String::new(),
         questions: HashMap::new(),
         embeddings_cache: HashMap::new(),
@@ -226,30 +222,55 @@ async fn create_session(
     for col in &req.output_columns {
         session.ensure_question(col);
     }
-    store::save_session(&ctx.config, &mut session, &name)?;
+    store::save_session(&s.config, &mut session, &name)?;
     Ok(Json(session))
 }
 
-async fn get_session(ctx: Ctx, Path(name): Path<String>) -> AppResult<Json<Session>> {
+async fn get_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Session>> {
     // Try active, then archived.
-    match store::load_session(&ctx.config, &name, false) {
+    match store::load_session(&s.config, &name, false) {
         Ok(sess) => Ok(Json(sess)),
-        Err(_) => Ok(Json(store::load_session(&ctx.config, &name, true)?)),
+        Err(_) => Ok(Json(store::load_session(&s.config, &name, true)?)),
     }
 }
 
-async fn delete_session(ctx: Ctx, Path(name): Path<String>) -> AppResult<StatusCode> {
-    store::delete_session(&ctx.config, &name)?;
+async fn update_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<SessionMeta>,
+) -> AppResult<Json<Session>> {
+    let mut session = store::load_session(&s.config, &name, false)?;
+    if let Some(course) = req.course {
+        session.course = if course.is_empty() { None } else { Some(course) };
+    }
+    store::save_session(&s.config, &mut session, &name)?;
+    Ok(Json(session))
+}
+
+async fn delete_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    store::delete_session(&s.config, &name)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn archive_session(ctx: Ctx, Path(name): Path<String>) -> AppResult<StatusCode> {
-    store::set_archived(&ctx.config, &name, true)?;
+async fn archive_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    store::set_archived(&s.config, &name, true)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn unarchive_session(ctx: Ctx, Path(name): Path<String>) -> AppResult<StatusCode> {
-    store::set_archived(&ctx.config, &name, false)?;
+async fn unarchive_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<StatusCode> {
+    store::set_archived(&s.config, &name, false)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -258,11 +279,11 @@ async fn unarchive_session(ctx: Ctx, Path(name): Path<String>) -> AppResult<Stat
 // ---------------------------------------------------------------------------
 
 async fn put_question(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<QuestionMeta>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut session = store::load_session(&ctx.config, &name, false)?;
+    let mut session = store::load_session(&s.config, &name, false)?;
     {
         let q = session.ensure_question(&col);
         if let Some(x) = req.exam_question {
@@ -276,18 +297,18 @@ async fn put_question(
         }
     }
     if let Some(q) = session.questions.get_mut(&col) {
-        store::hydrate_external_graded_items(&ctx.config, q, Some(&name));
+        store::hydrate_external_graded_items(&s.config, q, Some(&name));
     }
-    store::save_session(&ctx.config, &mut session, &name)?;
+    store::save_session(&s.config, &mut session, &name)?;
     Ok(Json(question_clone(&session, &col)?))
 }
 
 async fn run_sampling(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SamplingReq>,
 ) -> AppResult<Json<crate::domain::SamplingResult>> {
-    let config = &ctx.config;
+    let config = &s.config;
     let mut session = store::load_session(config, &name, false)?;
     session.ensure_question(&col);
 
@@ -326,7 +347,7 @@ async fn run_sampling(
                 .collect();
             if !to_embed.is_empty() {
                 let texts: Vec<String> = to_embed.iter().map(|(_, t)| t.clone()).collect();
-                let embs = llm::embed_many(config, &ctx.http, &texts).await;
+                let embs = llm::embed_many(config, &s.http, &texts).await;
                 let entry = session.features_cache.entry(input_column.clone()).or_default();
                 for ((rid, _), emb) in to_embed.iter().zip(embs) {
                     if let Some(v) = emb {
@@ -361,11 +382,11 @@ async fn run_sampling(
 }
 
 async fn grade_item(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<GradeReq>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let config = &ctx.config;
+    let config = &s.config;
     validate_grade(&req.grade).map_err(AppError::BadRequest)?;
 
     let mut session = store::load_session(config, &name, false)?;
@@ -388,7 +409,7 @@ async fn grade_item(
             .map(|m| m.contains_key(&req.row_id))
             .unwrap_or(false);
         if !cached {
-            if let Ok(v) = llm::embed(config, &ctx.http, &input_text).await {
+            if let Ok(v) = llm::embed(config, &s.http, &input_text).await {
                 session
                     .features_cache
                     .entry(input_column.clone())
@@ -414,23 +435,23 @@ async fn grade_item(
 }
 
 async fn ungrade_item(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col, row_id)): Path<(String, String, String)>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut session = store::load_session(&ctx.config, &name, false)?;
+    let mut session = store::load_session(&s.config, &name, false)?;
     if let Some(q) = session.questions.get_mut(&col) {
         q.graded_items.retain(|i| i.row_id != row_id);
     }
-    store::save_session(&ctx.config, &mut session, &name)?;
+    store::save_session(&s.config, &mut session, &name)?;
     Ok(Json(question_clone(&session, &col)?))
 }
 
 async fn suggest(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SuggestReq>,
 ) -> AppResult<Json<AIGradeSuggestion>> {
-    let config = &ctx.config;
+    let config = &s.config;
     let session = store::load_session(config, &name, false)?;
     let question = session
         .questions
@@ -446,15 +467,15 @@ async fn suggest(
         .and_then(|r| r.get(&input_column).cloned())
         .ok_or_else(|| AppError::NotFound(format!("row '{}' not found", req.row_id)))?;
 
-    let suggestion = llm::suggest_grade(config, &ctx.http, question, &response_text).await?;
+    let suggestion = llm::suggest_grade(config, &s.http, question, &response_text).await?;
     Ok(Json(suggestion))
 }
 
 async fn question_status(
-    ctx: Ctx,
+    State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    let session = store::load_session(&ctx.config, &name, false)?;
+    let session = store::load_session(&s.config, &name, false)?;
     let q = session
         .questions
         .get(&col)
@@ -474,8 +495,11 @@ async fn question_status(
     })))
 }
 
-async fn export(ctx: Ctx, Path(name): Path<String>) -> AppResult<Json<Value>> {
-    let config = &ctx.config;
+async fn export(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Value>> {
+    let config = &s.config;
     let session = store::load_session(config, &name, false)?;
     let (rows, cols) = session_exam(config, &session)?;
     let path = store::export_to_excel(config, &session, &rows, &cols)?;

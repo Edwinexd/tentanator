@@ -70,8 +70,9 @@ class SessionListScreen(Screen):
             await lv.append(ListItem(Label("(no sessions - press 'n' to create one)")))
             return
         for s in sessions:
+            course = f"  [{s['course']}]" if s.get("course") else ""
             label = (
-                f"{s['session_name']}  -  {s['csv_file']}  "
+                f"{s['session_name']}{course}  -  {s['csv_file']}  "
                 f"({s['num_questions']} q, updated {s['last_updated'][:19]})"
             )
             await lv.append(ListItem(Label(label), name=s["session_name"]))
@@ -117,6 +118,8 @@ class NewSessionScreen(Screen):
             yield SelectionList(id="inputcols")
             yield Label("Output columns (one per graded question):")
             yield SelectionList(id="outputcols")
+            yield Label("Course (optional):")
+            yield Input(placeholder="e.g. CS101", id="course")
             yield Label("Session name (optional):")
             yield Input(placeholder="auto-generated if blank", id="sessionname")
             with Horizontal(id="actions"):
@@ -168,6 +171,7 @@ class NewSessionScreen(Screen):
             self.notify("Select at least one input and one output column", severity="warning")
             return
         name = self.query_one("#sessionname", Input).value.strip()
+        course = self.query_one("#course", Input).value.strip()
         payload: Dict[str, Any] = {
             "csv_file": str(examfile),
             "id_columns": id_cols,
@@ -176,6 +180,8 @@ class NewSessionScreen(Screen):
         }
         if name:
             payload["name"] = name
+        if course:
+            payload["course"] = course
         try:
             session = await self.app.api.create_session(payload)  # type: ignore[attr-defined]
         except APIError as exc:

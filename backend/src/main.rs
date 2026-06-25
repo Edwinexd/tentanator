@@ -20,16 +20,6 @@ pub struct AppState {
     pub http: reqwest::Client,
 }
 
-impl AppState {
-    /// Config for an optional `?workspace=<name>` selection. Old workspaces live
-    /// under `workspaces/<name>/`; the root is the active workspace.
-    pub fn config_for(&self, ws: Option<&str>) -> Config {
-        let mut config = (*self.config).clone();
-        config.data_dir = workspace::resolve_data_dir(&self.config, ws);
-        config
-    }
-}
-
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()

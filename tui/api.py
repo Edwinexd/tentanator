@@ -72,6 +72,15 @@ class TentanatorAPI:
     async def get_session(self, name: str) -> Dict[str, Any]:
         return await self._request("GET", f"/api/sessions/{name}")
 
+    async def update_session(self, name: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("PUT", f"/api/sessions/{name}", json=meta)
+
+    async def list_legacy_workspaces(self) -> List[Dict[str, Any]]:
+        return await self._request("GET", "/api/legacy-workspaces")
+
+    async def import_workspace(self, name: str) -> Dict[str, Any]:
+        return await self._request("POST", f"/api/legacy-workspaces/{name}/import")
+
     async def delete_session(self, name: str) -> None:
         await self._request("DELETE", f"/api/sessions/{name}")
 

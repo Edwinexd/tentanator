@@ -56,6 +56,10 @@ Relative to the backend's data directory (default = repo root, override with
 - `.tentanator_sessions/archive/` — archived sessions.
 - `global_bank/graded_pool/<gq_id>.jsonl` — cross-session graded-example pool.
 
+Sessions are the unit of work and carry an optional `course` tag for grouping.
+There is no workspace/project directory concept — the old `workspaces/<name>/`
+folders only exist to be imported (see below).
+
 ## Backwards compatibility
 
 The backend reads the legacy on-disk formats unchanged — existing data imports
@@ -69,39 +73,43 @@ with no conversion step:
 - **Oldest single-file session**: a `.tentanator_session.json` at the data root
   is migrated into `.tentanator_sessions/<name>.json` on startup (and the
   original renamed `.backup`), mirroring the legacy Python migration.
-- **Workspaces**: a workspace is a folder under `workspaces/<name>/` holding the
-  same subdirs. The active (root) workspace is read by default; pass
-  `?workspace=<name>` to any data endpoint to read an inactive one directly,
-  without the legacy move dance. The old `workspace.py` load/unload still works.
+- **Workspaces → import**: the legacy workspace concept (swapping
+  `workspaces/<name>/` folders in and out of the root) was a band-aid for the
+  lack of a session model and is gone. Old workspace folders are instead
+  *imported* one-time: `GET /api/legacy-workspaces` lists them and
+  `POST /api/legacy-workspaces/{name}/import` copies their sessions, caches and
+  exams into the flat store, tagging the imported sessions with the workspace
+  name as their `course` (and merging the graded pool). Existing exams/sessions
+  are never overwritten.
 - **Graded pool**: `global_bank/graded_pool/<gq_id>.jsonl` is read and appended
   in the same format, so cross-session ICL examples carry over.
 
 This is covered by `backend` tests (`cargo test`): a legacy session with
-embedded caches + extra fields, and the single-file migration.
+embedded caches + extra fields, the single-file migration, and a workspace
+import that tags the course.
 
 ## HTTP API contract
 
 JSON in/out. Base path `/api`. Errors return `{ "error": "..." }` with a 4xx/5xx
 status.
 
-### Health, workspaces & exams
+### Health, legacy import & exams
 | Method | Path | Body | Returns |
 |---|---|---|---|
 | GET | `/api/health` | — | `{ "status": "ok" }` |
-| GET | `/api/workspaces` | — | `{ current, workspaces: [{ name, sessions }] }` |
+| GET | `/api/legacy-workspaces` | — | `[{ name, sessions }]` (importable) |
+| POST | `/api/legacy-workspaces/{name}/import` | — | `{ imported_sessions[], imported_exams, skipped_exams }` |
 | GET | `/api/exams` | — | `string[]` filenames in `exams/` |
 | GET | `/api/exams/{file}/columns` | — | `string[]` header names |
 | GET | `/api/exams/{file}/rows` | — | `{ rows: object[] }` (cells as strings) |
 
-Every data endpoint accepts an optional `?workspace=<name>` query param to read
-`workspaces/<name>/` instead of the root (see Backwards compatibility).
-
 ### Sessions
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/sessions?archived=false` | — | `SessionSummary[]` |
+| GET | `/api/sessions?archived=false&course=` | — | `SessionSummary[]` (optional `course` filter) |
 | POST | `/api/sessions` | `CreateSession` | `Session` |
 | GET | `/api/sessions/{name}` | — | `Session` |
+| PUT | `/api/sessions/{name}` | `{ course? }` | `Session` |
 | DELETE | `/api/sessions/{name}` | — | `204` |
 | POST | `/api/sessions/{name}/archive` | — | `204` |
 | POST | `/api/sessions/{name}/unarchive` | — | `204` |
@@ -116,7 +124,7 @@ Every data endpoint accepts an optional `?workspace=<name>` query param to read
 | POST | `/api/sessions/{name}/questions/{col}/suggest` | `{ row_id }` | `AIGradeSuggestion` |
 | POST | `/api/sessions/{name}/export` | — | `{ path }` |
 
-`CreateSession = { csv_file, id_columns[], input_columns[], output_columns[], name? }`
+`CreateSession = { csv_file, id_columns[], input_columns[], output_columns[], name?, course? }`
 `QuestionMeta = { exam_question?, sample_answer?, global_question_id? }`
 `algorithm ∈ { "random", "maximin" }`.
 

@@ -49,6 +49,7 @@ function NewSession() {
   const [inputCols, setInputCols] = useState<Set<string>>(new Set())
   const [outputCols, setOutputCols] = useState<Set<string>>(new Set())
   const [name, setName] = useState('')
+  const [course, setCourse] = useState('')
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
@@ -83,6 +84,7 @@ function NewSession() {
         input_columns: [...inputCols],
         output_columns: [...outputCols],
         name: name.trim() || undefined,
+        course: course.trim() || undefined,
       })
       navigate({ to: '/session/$name', params: { name: session.session_name } })
     } catch (e) {
@@ -137,6 +139,15 @@ function NewSession() {
             selected={outputCols}
             onToggle={toggle(outputCols, setOutputCols)}
           />
+          <div>
+            <h3 className="mb-1 font-medium">Course (optional)</h3>
+            <input
+              className="w-full rounded border p-2"
+              placeholder="e.g. CS101"
+              value={course}
+              onChange={(e) => setCourse(e.target.value)}
+            />
+          </div>
           <div>
             <h3 className="mb-1 font-medium">Session name (optional)</h3>
             <input
