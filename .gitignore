@@ -226,3 +226,17 @@ test_sampling_config.json
 # Workspace management
 workspaces/
 .current_workspace
+
+# Tentanator runtime data (never commit the DB or student data)
+.tentanator.db
+.tentanator.db-wal
+.tentanator.db-shm
+.tentanator_sessions/
+.tentanator_session.json
+.tentanator_session.json.backup
+exams/
+exams_in_raw/
+graded_exams/
+global_bank/
+global_banks_embeddings/
+training_data/

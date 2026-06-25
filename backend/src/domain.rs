@@ -4,9 +4,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// input_column -> { row_id -> vector }.
-pub type Cache = HashMap<String, HashMap<String, Vec<f32>>>;
-
 // All fields default so partial / legacy session JSON never fails to load.
 // Old sessions may carry extra fields (e.g. a per-item `embedding`); serde
 // ignores unknown fields by default, so those import cleanly too.
@@ -96,11 +93,6 @@ pub struct Session {
     pub last_updated: String,
     #[serde(default)]
     pub questions: HashMap<String, QuestionGrades>,
-    /// Persisted separately in `<name>.cache.json`.
-    #[serde(skip)]
-    pub embeddings_cache: Cache,
-    #[serde(skip)]
-    pub features_cache: Cache,
 }
 
 impl Session {

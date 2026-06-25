@@ -1,5 +1,6 @@
-//! HTTP routes. Each handler is a thin orchestration layer over the domain
-//! modules; all business logic lives in `store`, `sampling`, `grade`, `llm`.
+//! HTTP routes. DB work goes through the shared mutexed connection
+//! (`s.db().await`), held only across DB calls and released across LLM/file I/O.
+//! All business logic lives in `store`, `sampling`, `grade`, `llm`.
 
 use std::collections::HashMap;
 
@@ -106,7 +107,6 @@ struct SuggestReq {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Load exam rows + ordered columns for a session's csv_file.
 fn session_exam(
     config: &Config,
     session: &Session,
@@ -119,12 +119,15 @@ fn session_exam(
     Ok((rows, cols))
 }
 
-fn question_clone(session: &Session, col: &str) -> AppResult<QuestionGrades> {
-    session
-        .questions
-        .get(col)
-        .cloned()
-        .ok_or_else(|| AppError::NotFound(format!("question '{col}' not found")))
+async fn load_session_or_404(s: &AppState, name: &str) -> AppResult<Session> {
+    let conn = s.db().await;
+    store::load_session(&conn, name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))
+}
+
+fn no_question(col: &str) -> AppError {
+    AppError::NotFound(format!("question '{col}' not found"))
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +148,8 @@ async fn import_workspace(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<workspace::ImportResult>> {
-    Ok(Json(workspace::import_workspace(&s.config, &name)?))
+    let conn = s.db().await;
+    Ok(Json(workspace::import_workspace(&conn, &s.config, &name).await?))
 }
 
 async fn list_exams(State(s): State<AppState>) -> Json<Vec<String>> {
@@ -178,12 +182,15 @@ async fn exam_rows(
 async fn list_sessions(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> Json<Vec<SessionSummary>> {
-    let mut sessions = store::list_sessions(&s.config, q.archived);
+) -> AppResult<Json<Vec<SessionSummary>>> {
+    let mut sessions = {
+        let conn = s.db().await;
+        store::list_sessions(&conn, q.archived).await?
+    };
     if let Some(course) = q.course.filter(|c| !c.is_empty()) {
         sessions.retain(|x| x.course.as_deref() == Some(course.as_str()));
     }
-    Json(sessions)
+    Ok(Json(sessions))
 }
 
 async fn create_session(
@@ -195,7 +202,7 @@ async fn create_session(
             "input_columns and output_columns are required".into(),
         ));
     }
-    let name = req.name.clone().unwrap_or_else(|| {
+    let raw_name = req.name.clone().unwrap_or_else(|| {
         let stem = std::path::Path::new(&req.csv_file)
             .file_stem()
             .and_then(|x| x.to_str())
@@ -204,7 +211,7 @@ async fn create_session(
     });
 
     let mut session = Session {
-        session_name: String::new(),
+        session_name: store::sanitize_name(&raw_name),
         csv_file: req.csv_file,
         id_columns: if req.id_columns.is_empty() {
             vec!["_row_number".to_string()]
@@ -214,15 +221,16 @@ async fn create_session(
         input_columns: req.input_columns,
         output_columns: req.output_columns.clone(),
         course: req.course.filter(|c| !c.is_empty()),
-        last_updated: String::new(),
+        last_updated: store::now_iso(),
         questions: HashMap::new(),
-        embeddings_cache: HashMap::new(),
-        features_cache: HashMap::new(),
     };
     for col in &req.output_columns {
         session.ensure_question(col);
     }
-    store::save_session(&s.config, &mut session, &name)?;
+    {
+        let conn = s.db().await;
+        store::insert_session(&conn, &session).await?;
+    }
     Ok(Json(session))
 }
 
@@ -230,11 +238,7 @@ async fn get_session(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Session>> {
-    // Try active, then archived.
-    match store::load_session(&s.config, &name, false) {
-        Ok(sess) => Ok(Json(sess)),
-        Err(_) => Ok(Json(store::load_session(&s.config, &name, true)?)),
-    }
+    Ok(Json(load_session_or_404(&s, &name).await?))
 }
 
 async fn update_session(
@@ -242,36 +246,55 @@ async fn update_session(
     Path(name): Path<String>,
     Json(req): Json<SessionMeta>,
 ) -> AppResult<Json<Session>> {
-    let mut session = store::load_session(&s.config, &name, false)?;
-    if let Some(course) = req.course {
-        session.course = if course.is_empty() { None } else { Some(course) };
+    let conn = s.db().await;
+    if !store::session_exists(&conn, &name).await? {
+        return Err(AppError::NotFound(format!("session '{name}' not found")));
     }
-    store::save_session(&s.config, &mut session, &name)?;
-    Ok(Json(session))
+    if let Some(course) = req.course {
+        let course = if course.is_empty() { None } else { Some(course) };
+        store::set_course(&conn, &name, course.as_deref()).await?;
+    }
+    store::touch(&conn, &name).await?;
+    store::load_session(&conn, &name)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))
 }
 
 async fn delete_session(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
-    store::delete_session(&s.config, &name)?;
-    Ok(StatusCode::NO_CONTENT)
+    let conn = s.db().await;
+    if store::delete_session(&conn, &name).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(format!("session '{name}' not found")))
+    }
 }
 
 async fn archive_session(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
-    store::set_archived(&s.config, &name, true)?;
-    Ok(StatusCode::NO_CONTENT)
+    let conn = s.db().await;
+    if store::set_archived(&conn, &name, true).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(format!("session '{name}' not found")))
+    }
 }
 
 async fn unarchive_session(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
-    store::set_archived(&s.config, &name, false)?;
-    Ok(StatusCode::NO_CONTENT)
+    let conn = s.db().await;
+    if store::set_archived(&conn, &name, false).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(format!("session '{name}' not found")))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,7 +306,7 @@ async fn put_question(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<QuestionMeta>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut session = store::load_session(&s.config, &name, false)?;
+    let mut session = load_session_or_404(&s, &name).await?;
     {
         let q = session.ensure_question(&col);
         if let Some(x) = req.exam_question {
@@ -296,11 +319,14 @@ async fn put_question(
             q.global_question_id = if x.is_empty() { None } else { Some(x) };
         }
     }
-    if let Some(q) = session.questions.get_mut(&col) {
-        store::hydrate_external_graded_items(&s.config, q, Some(&name));
-    }
-    store::save_session(&s.config, &mut session, &name)?;
-    Ok(Json(question_clone(&session, &col)?))
+    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    let conn = s.db().await;
+    store::upsert_question_row(&conn, &name, &col, &q).await?;
+    store::touch(&conn, &name).await?;
+    store::load_question(&conn, &name, &col)
+        .await?
+        .map(Json)
+        .ok_or_else(|| no_question(&col))
 }
 
 async fn run_sampling(
@@ -308,15 +334,12 @@ async fn run_sampling(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SamplingReq>,
 ) -> AppResult<Json<crate::domain::SamplingResult>> {
-    let config = &s.config;
-    let mut session = store::load_session(config, &name, false)?;
+    let mut session = load_session_or_404(&s, &name).await?;
     session.ensure_question(&col);
-
     let input_column = session.questions[&col].input_column.clone();
     let id_columns = session.id_columns.clone();
-    let (rows, _) = session_exam(config, &session)?;
+    let (rows, _) = session_exam(&s.config, &session)?;
 
-    // Candidate responses (meaningful, non-blank), in file order.
     let candidates: Vec<(String, String)> = rows
         .iter()
         .filter_map(|row| {
@@ -328,18 +351,17 @@ async fn run_sampling(
     let n = req.n_samples.unwrap_or(NUM_REPRESENTATIVE_SAMPLES);
 
     let selected = match req.algorithm {
-        // Random needs no embeddings - just pick over candidate row ids.
         Algorithm::Random => {
             let ids: Vec<String> = candidates.iter().map(|(rid, _)| rid.clone()).collect();
             sampling::random_sample(&ids, n)
         }
-        // Maximin needs embeddings; generate any that are missing and cache them.
         Algorithm::Maximin => {
-            let existing: std::collections::HashSet<String> = session
-                .features_cache
-                .get(&input_column)
-                .map(|m| m.keys().cloned().collect())
-                .unwrap_or_default();
+            let existing: std::collections::HashSet<String> = {
+                let conn = s.db().await;
+                store::load_feature_cache(&conn, &name, &input_column).await?
+            }
+            .into_keys()
+            .collect();
             let to_embed: Vec<(String, String)> = candidates
                 .iter()
                 .filter(|(rid, _)| !existing.contains(rid))
@@ -347,20 +369,23 @@ async fn run_sampling(
                 .collect();
             if !to_embed.is_empty() {
                 let texts: Vec<String> = to_embed.iter().map(|(_, t)| t.clone()).collect();
-                let embs = llm::embed_many(config, &s.http, &texts).await;
-                let entry = session.features_cache.entry(input_column.clone()).or_default();
+                let embs = llm::embed_many(&s.config, &s.http, &texts).await;
+                let conn = s.db().await;
                 for ((rid, _), emb) in to_embed.iter().zip(embs) {
                     if let Some(v) = emb {
-                        entry.insert(rid.clone(), v);
+                        store::put_feature_vector(&conn, &name, &input_column, rid, &v).await?;
                     }
                 }
             }
-            let cache = session.features_cache.get(&input_column);
+            let cache = {
+                let conn = s.db().await;
+                store::load_feature_cache(&conn, &name, &input_column).await?
+            };
             let valid: Vec<(String, Vec<f32>)> = candidates
                 .iter()
                 .filter_map(|(rid, _)| {
                     cache
-                        .and_then(|m| m.get(rid))
+                        .get(rid)
                         .filter(|v| !v.is_empty())
                         .map(|v| (rid.clone(), v.clone()))
                 })
@@ -376,8 +401,14 @@ async fn run_sampling(
         num_samples: selected.len(),
         timestamp: store::now_iso(),
     };
-    session.ensure_question(&col).sampling_result = Some(result.clone());
-    store::save_session(config, &mut session, &name)?;
+    {
+        let q = session.ensure_question(&col);
+        q.sampling_result = Some(result.clone());
+    }
+    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    let conn = s.db().await;
+    store::upsert_question_row(&conn, &name, &col, &q).await?;
+    store::touch(&conn, &name).await?;
     Ok(Json(result))
 }
 
@@ -386,35 +417,36 @@ async fn grade_item(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<GradeReq>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let config = &s.config;
     validate_grade(&req.grade).map_err(AppError::BadRequest)?;
-
-    let mut session = store::load_session(config, &name, false)?;
+    let mut session = load_session_or_404(&s, &name).await?;
     session.ensure_question(&col);
     let input_column = session.questions[&col].input_column.clone();
     let id_columns = session.id_columns.clone();
 
-    let (rows, _) = session_exam(config, &session)?;
+    let (rows, _) = session_exam(&s.config, &session)?;
     let input_text = rows
         .iter()
         .find(|r| domain::row_id(r, &id_columns) == req.row_id)
         .and_then(|r| r.get(&input_column).cloned())
         .unwrap_or_default();
 
+    // Persist the question row first so the pool sync can read its global id.
+    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    {
+        let conn = s.db().await;
+        store::upsert_question_row(&conn, &name, &col, &q).await?;
+    }
+
     // Cache a feature vector so the row can participate in future sampling.
     if domain::is_meaningful(&input_text) {
-        let cached = session
-            .features_cache
-            .get(&input_column)
-            .map(|m| m.contains_key(&req.row_id))
-            .unwrap_or(false);
+        let cached = {
+            let conn = s.db().await;
+            store::has_feature_vector(&conn, &name, &input_column, &req.row_id).await?
+        };
         if !cached {
-            if let Ok(v) = llm::embed(config, &s.http, &input_text).await {
-                session
-                    .features_cache
-                    .entry(input_column.clone())
-                    .or_default()
-                    .insert(req.row_id.clone(), v);
+            if let Ok(v) = llm::embed(&s.config, &s.http, &input_text).await {
+                let conn = s.db().await;
+                store::put_feature_vector(&conn, &name, &input_column, &req.row_id, &v).await?;
             }
         }
     }
@@ -425,25 +457,26 @@ async fn grade_item(
         grade: req.grade.clone(),
         timestamp: store::now_iso(),
     };
-    {
-        let q = session.ensure_question(&col);
-        q.graded_items.retain(|i| i.row_id != req.row_id);
-        q.graded_items.push(item);
-    }
-    store::save_session(config, &mut session, &name)?;
-    Ok(Json(question_clone(&session, &col)?))
+    let conn = s.db().await;
+    store::put_graded_item(&conn, &name, &col, &item).await?;
+    store::touch(&conn, &name).await?;
+    store::load_question(&conn, &name, &col)
+        .await?
+        .map(Json)
+        .ok_or_else(|| no_question(&col))
 }
 
 async fn ungrade_item(
     State(s): State<AppState>,
     Path((name, col, row_id)): Path<(String, String, String)>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut session = store::load_session(&s.config, &name, false)?;
-    if let Some(q) = session.questions.get_mut(&col) {
-        q.graded_items.retain(|i| i.row_id != row_id);
-    }
-    store::save_session(&s.config, &mut session, &name)?;
-    Ok(Json(question_clone(&session, &col)?))
+    let conn = s.db().await;
+    store::delete_graded_item(&conn, &name, &col, &row_id).await?;
+    store::touch(&conn, &name).await?;
+    store::load_question(&conn, &name, &col)
+        .await?
+        .map(Json)
+        .ok_or_else(|| no_question(&col))
 }
 
 async fn suggest(
@@ -451,23 +484,19 @@ async fn suggest(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SuggestReq>,
 ) -> AppResult<Json<AIGradeSuggestion>> {
-    let config = &s.config;
-    let session = store::load_session(config, &name, false)?;
-    let question = session
-        .questions
-        .get(&col)
-        .ok_or_else(|| AppError::NotFound(format!("question '{col}' not found")))?;
+    let session = load_session_or_404(&s, &name).await?;
+    let question = session.questions.get(&col).ok_or_else(|| no_question(&col))?;
 
     let id_columns = session.id_columns.clone();
     let input_column = question.input_column.clone();
-    let (rows, _) = session_exam(config, &session)?;
+    let (rows, _) = session_exam(&s.config, &session)?;
     let response_text = rows
         .iter()
         .find(|r| domain::row_id(r, &id_columns) == req.row_id)
         .and_then(|r| r.get(&input_column).cloned())
         .ok_or_else(|| AppError::NotFound(format!("row '{}' not found", req.row_id)))?;
 
-    let suggestion = llm::suggest_grade(config, &s.http, question, &response_text).await?;
+    let suggestion = llm::suggest_grade(&s.config, &s.http, question, &response_text).await?;
     Ok(Json(suggestion))
 }
 
@@ -475,11 +504,8 @@ async fn question_status(
     State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    let session = store::load_session(&s.config, &name, false)?;
-    let q = session
-        .questions
-        .get(&col)
-        .ok_or_else(|| AppError::NotFound(format!("question '{col}' not found")))?;
+    let session = load_session_or_404(&s, &name).await?;
+    let q = session.questions.get(&col).ok_or_else(|| no_question(&col))?;
     let external = q
         .external_graded_items
         .iter()
@@ -499,9 +525,8 @@ async fn export(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let config = &s.config;
-    let session = store::load_session(config, &name, false)?;
-    let (rows, cols) = session_exam(config, &session)?;
-    let path = store::export_to_excel(config, &session, &rows, &cols)?;
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, cols) = session_exam(&s.config, &session)?;
+    let path = store::export_to_excel(&s.config, &session, &rows, &cols)?;
     Ok(Json(json!({ "path": path })))
 }

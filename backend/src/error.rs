@@ -20,6 +20,8 @@ pub enum AppError {
     #[error(transparent)]
     Csv(#[from] csv::Error),
     #[error(transparent)]
+    Db(#[from] turso::Error),
+    #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 

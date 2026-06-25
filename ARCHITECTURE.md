@@ -21,8 +21,9 @@ two interchangeable controllers (clients):
 
 - **backend/** — Rust + Axum. Owns all domain logic and is the single source of
   truth: reads exam files, runs sampling, builds in-context-learning prompts,
-  calls the LLM providers, persists sessions, exports graded Excel. No business
-  logic lives in the clients.
+  calls the LLM providers, persists sessions to an embedded [Turso](https://github.com/tursodatabase/turso)
+  database (the Rust SQLite rewrite), exports graded Excel. No business logic
+  lives in the clients.
 - **tui/** — Python [Textual](https://textual.textualize.io/) app. Thin client
   over the HTTP API.
 - **web/** — TanStack Start React app. Thin client over the same HTTP API.
@@ -45,48 +46,51 @@ repo root as the reference implementation while the port proceeds.
   `reasoning_effort=high`), plus a low-effort summary pass to condense the
   reasoning chain. Keys come from `OPENAI_API_KEY` / `CEREBRAS_API_KEY`.
 
-## On-disk state (unchanged formats, owned by backend)
+## State & concurrency
 
-Relative to the backend's data directory (default = repo root, override with
-`TENTANATOR_DATA_DIR`):
-
-- `exams/` — input `.xlsx`/`.csv`.
-- `graded_exams/` — exported `.xlsx`.
-- `.tentanator_sessions/` — `<name>.json` session + `<name>.cache.json` embeddings.
-- `.tentanator_sessions/archive/` — archived sessions.
-- `global_bank/graded_pool/<gq_id>.jsonl` — cross-session graded-example pool.
+All session state — sessions, questions, graded items, embedding caches and the
+cross-session graded pool — lives in a single Turso database at
+`<data_dir>/.tentanator.db` (`db.rs` defines the schema; vectors are stored as
+f32 BLOBs). Only exam inputs (`exams/`) and exported Excel (`graded_exams/`)
+stay as files. Data directory defaults to the repo root; override with
+`TENTANATOR_DATA_DIR`.
 
 Sessions are the unit of work and carry an optional `course` tag for grouping.
 There is no workspace/project directory concept — the old `workspaces/<name>/`
 folders only exist to be imported (see below).
 
+**Concurrency**: the web app and TUI hit the store at the same time, so DB work
+goes through one connection behind an async mutex, held only across DB calls and
+released across LLM/file I/O. (Turso 0.4 still errors on concurrent
+multi-connection writes; serializing the brief DB sections avoids that while
+keeping LLM calls parallel. The lock can be relaxed as Turso's MVCC matures.)
+
 ## Backwards compatibility
 
-The backend reads the legacy on-disk formats unchanged — existing data imports
-with no conversion step:
+On startup the backend imports any legacy on-disk data into the DB, idempotently
+(existing sessions are skipped), so upgrading from the file-based or Python app
+just works:
 
-- **Sessions**: old `.tentanator_sessions/<name>.json` load as-is. Caches in a
-  side-car `<name>.cache.json` are preferred, but caches embedded in the main
-  file (the older layout) are still honoured. Unknown legacy fields (e.g. a
-  per-item `embedding`) are ignored, and every field has a default so partial
-  files never fail to load.
+- **Sessions**: old `.tentanator_sessions/<name>.json` are read as-is — side-car
+  `<name>.cache.json` preferred, caches embedded in the main file honoured,
+  unknown legacy fields (e.g. a per-item `embedding`) ignored, and every field
+  defaulted so partial files never fail. Active and `archive/` are both imported.
 - **Oldest single-file session**: a `.tentanator_session.json` at the data root
-  is migrated into `.tentanator_sessions/<name>.json` on startup (and the
-  original renamed `.backup`), mirroring the legacy Python migration.
+  is imported and the original renamed `.backup`.
 - **Workspaces → import**: the legacy workspace concept (swapping
   `workspaces/<name>/` folders in and out of the root) was a band-aid for the
-  lack of a session model and is gone. Old workspace folders are instead
-  *imported* one-time: `GET /api/legacy-workspaces` lists them and
-  `POST /api/legacy-workspaces/{name}/import` copies their sessions, caches and
-  exams into the flat store, tagging the imported sessions with the workspace
-  name as their `course` (and merging the graded pool). Existing exams/sessions
-  are never overwritten.
-- **Graded pool**: `global_bank/graded_pool/<gq_id>.jsonl` is read and appended
-  in the same format, so cross-session ICL examples carry over.
+  lack of a session model and is gone. Old workspace folders are *imported*
+  one-time instead: `GET /api/legacy-workspaces` lists them and
+  `POST /api/legacy-workspaces/{name}/import` loads their sessions (into the DB)
+  and exams (into `exams/`), tagging the sessions with the workspace name as
+  their `course` and merging the graded pool. Existing exams/sessions are never
+  overwritten.
+- **Graded pool**: `global_bank/graded_pool/<gq_id>.jsonl` is merged into the DB
+  pool, so cross-session ICL examples carry over.
 
-This is covered by `backend` tests (`cargo test`): a legacy session with
-embedded caches + extra fields, the single-file migration, and a workspace
-import that tags the course.
+Covered by `backend` tests (`cargo test`): create/grade/load roundtrip, pool
+hydration across sessions, BLOB vector roundtrip, and a workspace import that
+tags the course.
 
 ## HTTP API contract
 
