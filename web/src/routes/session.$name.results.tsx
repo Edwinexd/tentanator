@@ -18,16 +18,40 @@ function ResultsView() {
   const { name } = Route.useParams()
   const [data, setData] = useState<ResultsResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [info, setInfo] = useState<string | null>(null)
 
   useEffect(() => {
     api.getResults(name).then(setData).catch((e: Error) => setError(e.message))
   }, [name])
+
+  async function doExport(fn: (n: string) => Promise<{ path: string }>, label: string) {
+    setError(null)
+    try {
+      const { path } = await fn(name)
+      setInfo(`${label} → ${path}`)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
 
   return (
     <div className="mx-auto max-w-4xl space-y-4 p-8">
       <ExamNav name={name} active="results" />
       <h1 className="text-2xl font-bold">Results</h1>
 
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => doExport(api.exportDaisy, 'Daisy import')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+          Export Daisy (id,grade)
+        </button>
+        <button onClick={() => doExport(api.exportCsv, 'Per-question CSV')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+          Export per-question CSV
+        </button>
+        <button onClick={() => doExport(api.exportSession, 'Graded xlsx')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+          Export full graded xlsx
+        </button>
+      </div>
+
+      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
       {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
       {!data && !error && <p className="text-gray-500">Loading…</p>}
       {data && !data.has_scheme && (

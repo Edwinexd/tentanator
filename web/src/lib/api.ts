@@ -235,6 +235,10 @@ export const api = {
     ),
   exportSession: (name: string) =>
     req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export`),
+  exportDaisy: (name: string) =>
+    req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/daisy`),
+  exportCsv: (name: string) =>
+    req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/csv`),
 
   putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
     req<Session>('PUT', `/api/sessions/${encodeURIComponent(name)}/questions-config`, updates),

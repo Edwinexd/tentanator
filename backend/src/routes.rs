@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/sessions/{name}/conflicts", get(get_conflicts))
         .route("/api/sessions/{name}/conflicts/resolve", post(resolve_conflict))
         .route("/api/sessions/{name}/export", post(export))
+        .route("/api/sessions/{name}/export/daisy", post(export_daisy_route))
+        .route("/api/sessions/{name}/export/csv", post(export_csv_route))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -912,6 +914,36 @@ async fn import_apply(
     }
     store::touch(&conn, &name).await?;
     Ok(Json(summary))
+}
+
+async fn export_daisy_route(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Value>> {
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, _) = session_exam(&s.config, &session)?;
+    let scheme = session
+        .scheme
+        .as_ref()
+        .ok_or_else(|| AppError::BadRequest("no grade scheme configured".into()))?;
+    let resp = compute_results(&session, &rows, scheme);
+    let path = store::export_daisy(&s.config, &session, &resp.results)?;
+    Ok(Json(json!({ "path": path })))
+}
+
+async fn export_csv_route(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Value>> {
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, _) = session_exam(&s.config, &session)?;
+    let results = session
+        .scheme
+        .as_ref()
+        .map(|sc| compute_results(&session, &rows, sc).results)
+        .unwrap_or_default();
+    let path = store::export_per_question_csv(&s.config, &session, &rows, &results)?;
+    Ok(Json(json!({ "path": path })))
 }
 
 async fn get_conflicts(

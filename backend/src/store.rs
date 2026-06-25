@@ -1063,6 +1063,94 @@ fn format_total(total: f64) -> String {
     }
 }
 
+/// Daisy grade-import sheet: no header, column A = id, column B = final grade,
+/// one row per student sorted by id (matches SU's Daisy import format).
+pub fn export_daisy(
+    config: &Config,
+    session: &Session,
+    results: &[crate::scheme::StudentResult],
+) -> AppResult<String> {
+    use rust_xlsxwriter::Workbook;
+    std::fs::create_dir_all(config.graded_dir())?;
+    let base = Path::new(&session.csv_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("exam")
+        .to_string();
+    let out_path = config.graded_dir().join(format!("{base}_daisy_import.xlsx"));
+
+    let mut sorted: Vec<&crate::scheme::StudentResult> = results.iter().collect();
+    sorted.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    for (r, sr) in sorted.iter().enumerate() {
+        sheet
+            .write_string(r as u32, 0, &sr.id)
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+        sheet
+            .write_string(r as u32, 1, &sr.grade)
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+    }
+    workbook
+        .save(&out_path)
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
+/// Per-question CSV: id columns, each question's points, total and final grade.
+pub fn export_per_question_csv(
+    config: &Config,
+    session: &Session,
+    exam_rows: &[HashMap<String, String>],
+    results: &[crate::scheme::StudentResult],
+) -> AppResult<String> {
+    std::fs::create_dir_all(config.graded_dir())?;
+    let base = Path::new(&session.csv_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("exam")
+        .to_string();
+    let out_path = config.graded_dir().join(format!("{base}_per_question.csv"));
+
+    let by_id: HashMap<&str, &crate::scheme::StudentResult> =
+        results.iter().map(|r| (r.id.as_str(), r)).collect();
+
+    let mut w = csv::Writer::from_path(&out_path)?;
+    let mut header: Vec<String> = session.id_columns.clone();
+    header.extend(session.output_columns.iter().cloned());
+    header.push("total".to_string());
+    header.push("grade".to_string());
+    w.write_record(&header)?;
+
+    for row in exam_rows {
+        let rid = crate::domain::row_id(row, &session.id_columns);
+        let mut rec: Vec<String> = session
+            .id_columns
+            .iter()
+            .map(|c| row.get(c).cloned().unwrap_or_default())
+            .collect();
+        for col in &session.output_columns {
+            let cell = session
+                .questions
+                .get(col)
+                .and_then(|q| q.graded_items.iter().find(|gi| gi.row_id == rid))
+                .map(|gi| match crate::grade::evaluate_grade(&gi.grade) {
+                    Some(t) => format_total(t),
+                    None => gi.grade.clone(),
+                })
+                .unwrap_or_default();
+            rec.push(cell);
+        }
+        let sr = by_id.get(rid.as_str());
+        rec.push(sr.map(|r| format_total(r.total)).unwrap_or_default());
+        rec.push(sr.map(|r| r.grade.clone()).unwrap_or_default());
+        w.write_record(&rec)?;
+    }
+    w.flush()?;
+    Ok(out_path.to_string_lossy().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
