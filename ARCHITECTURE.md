@@ -170,6 +170,13 @@ Everything in `./data/` (exams, graded exports, the Turso DB) persists on the
 host. Files written by the backend container are root-owned; `sudo chown -R
 "$USER" data` if you need to edit them directly.
 
+**CI/CD**: `.github/workflows/ci.yml` runs `cargo test` and the web typecheck on
+every push/PR, then on `master` and `v*` tags builds and publishes the three
+images to GHCR — `ghcr.io/<owner>/tentanator-{backend,web,tui}` (tagged
+`latest`, the commit SHA, and the semver on tags). To run the published images
+instead of building locally, point the `image:` keys in `docker-compose.yml` at
+the GHCR tags and drop the `build:` lines.
+
 ## Running locally (without Docker)
 
 Three processes; keys come from the repo-root `.env` (the backend walks up to
