@@ -8,6 +8,7 @@ mod grade;
 mod llm;
 mod routes;
 mod sampling;
+mod scheme;
 mod store;
 mod workspace;
 

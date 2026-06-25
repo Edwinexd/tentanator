@@ -12,6 +12,8 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as NewRouteImport } from './routes/new'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SessionNameRouteImport } from './routes/session.$name'
+import { Route as SessionNameSchemeRouteImport } from './routes/session.$name.scheme'
+import { Route as SessionNameResultsRouteImport } from './routes/session.$name.results'
 
 const NewRoute = NewRouteImport.update({
   id: '/new',
@@ -28,35 +30,67 @@ const SessionNameRoute = SessionNameRouteImport.update({
   path: '/session/$name',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SessionNameSchemeRoute = SessionNameSchemeRouteImport.update({
+  id: '/scheme',
+  path: '/scheme',
+  getParentRoute: () => SessionNameRoute,
+} as any)
+const SessionNameResultsRoute = SessionNameResultsRouteImport.update({
+  id: '/results',
+  path: '/results',
+  getParentRoute: () => SessionNameRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRoute
+  '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/results': typeof SessionNameResultsRoute
+  '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRoute
+  '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/results': typeof SessionNameResultsRoute
+  '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRoute
+  '/session/$name': typeof SessionNameRouteWithChildren
+  '/session/$name/results': typeof SessionNameResultsRoute
+  '/session/$name/scheme': typeof SessionNameSchemeRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/new' | '/session/$name'
+  fullPaths:
+    | '/'
+    | '/new'
+    | '/session/$name'
+    | '/session/$name/results'
+    | '/session/$name/scheme'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/new' | '/session/$name'
-  id: '__root__' | '/' | '/new' | '/session/$name'
+  to:
+    | '/'
+    | '/new'
+    | '/session/$name'
+    | '/session/$name/results'
+    | '/session/$name/scheme'
+  id:
+    | '__root__'
+    | '/'
+    | '/new'
+    | '/session/$name'
+    | '/session/$name/results'
+    | '/session/$name/scheme'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   NewRoute: typeof NewRoute
-  SessionNameRoute: typeof SessionNameRoute
+  SessionNameRoute: typeof SessionNameRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -82,13 +116,41 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SessionNameRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/session/$name/scheme': {
+      id: '/session/$name/scheme'
+      path: '/scheme'
+      fullPath: '/session/$name/scheme'
+      preLoaderRoute: typeof SessionNameSchemeRouteImport
+      parentRoute: typeof SessionNameRoute
+    }
+    '/session/$name/results': {
+      id: '/session/$name/results'
+      path: '/results'
+      fullPath: '/session/$name/results'
+      preLoaderRoute: typeof SessionNameResultsRouteImport
+      parentRoute: typeof SessionNameRoute
+    }
   }
 }
+
+interface SessionNameRouteChildren {
+  SessionNameResultsRoute: typeof SessionNameResultsRoute
+  SessionNameSchemeRoute: typeof SessionNameSchemeRoute
+}
+
+const SessionNameRouteChildren: SessionNameRouteChildren = {
+  SessionNameResultsRoute: SessionNameResultsRoute,
+  SessionNameSchemeRoute: SessionNameSchemeRoute,
+}
+
+const SessionNameRouteWithChildren = SessionNameRoute._addFileChildren(
+  SessionNameRouteChildren,
+)
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   NewRoute: NewRoute,
-  SessionNameRoute: SessionNameRoute,
+  SessionNameRoute: SessionNameRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -10,6 +10,7 @@ import {
   type QuestionStatus,
   type Session,
 } from '#/lib/api'
+import { ExamNav } from '#/components/ExamNav'
 
 export const Route = createFileRoute('/session/$name')({ component: SessionView })
 
@@ -162,12 +163,8 @@ function SessionView() {
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-8">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">{session.session_name}</h1>
-        <Link to="/" className="text-blue-600 hover:underline">
-          ← sessions
-        </Link>
-      </div>
+      <ExamNav name={name} active="grade" />
+      <h1 className="text-2xl font-bold">{session.session_name}</h1>
 
       <label className="flex items-center gap-2 text-sm text-gray-600">
         Course:

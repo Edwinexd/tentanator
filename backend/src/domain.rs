@@ -49,6 +49,24 @@ pub struct QuestionGrades {
     pub graded_items: Vec<GradedItem>,
     #[serde(default)]
     pub sampling_result: Option<SamplingResult>,
+    // --- examination grade-scheme config (per question) ---
+    /// Identifier used in scheme expressions (e.g. "q1"); defaults derived from
+    /// position when unset.
+    #[serde(default)]
+    pub var: String,
+    /// Optional section/grouping tag (empty = ungrouped).
+    #[serde(default)]
+    pub group: String,
+    /// Free-form type tag (mc / essay / ...).
+    #[serde(default)]
+    pub qtype: String,
+    #[serde(default)]
+    pub max_points: f64,
+    #[serde(default)]
+    pub position: i64,
+    /// Optional expression to estimate points when ungraded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimate: Option<String>,
     /// Cross-session pooled items. Not persisted in the session file; hydrated
     /// from `global_bank/graded_pool/<gq_id>.jsonl` on load.
     #[serde(default, skip_serializing)]
@@ -93,6 +111,9 @@ pub struct Session {
     pub last_updated: String,
     #[serde(default)]
     pub questions: HashMap<String, QuestionGrades>,
+    /// Examination grade scheme (vars + guarded band rules). None = unconfigured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheme: Option<crate::scheme::GradeScheme>,
 }
 
 impl Session {

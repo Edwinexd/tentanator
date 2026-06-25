@@ -199,6 +199,7 @@ class GradingScreen(Screen):
         ("a", "suggest", "AI suggest"),
         ("s", "skip", "Skip"),
         ("e", "export", "Export"),
+        ("r", "results", "Results"),
     ]
 
     def __init__(self, session_name: str) -> None:
@@ -396,6 +397,23 @@ class GradingScreen(Screen):
             self.notify(str(exc), severity="error", timeout=8)
             return
         self.notify(f"Exported to {result.get('path', '?')}", timeout=8)
+
+    async def action_results(self) -> None:
+        try:
+            data = await self.app.api.get_results(self.session_name)  # type: ignore[attr-defined]
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        if not data.get("has_scheme"):
+            self.notify("No grade scheme set (configure it in the web Scheme tab)", timeout=6)
+            return
+        dist = data.get("distribution", {})
+        dist_str = "  ".join(f"{g}:{c}" for g, c in sorted(dist.items()))
+        self.notify(
+            f"Fully graded {data.get('complete', 0)}/{data.get('total_students', 0)}"
+            f"   |   {dist_str}",
+            timeout=10,
+        )
 
     def action_back(self) -> None:
         self.app.pop_screen()

@@ -22,7 +22,8 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
             output_columns TEXT NOT NULL,
             course TEXT NOT NULL DEFAULT '',
             last_updated TEXT NOT NULL DEFAULT '',
-            archived INTEGER NOT NULL DEFAULT 0
+            archived INTEGER NOT NULL DEFAULT 0,
+            scheme TEXT NOT NULL DEFAULT ''
         )",
         (),
     )
@@ -38,6 +39,12 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
             sample_answer TEXT NOT NULL DEFAULT '',
             global_question_id TEXT NOT NULL DEFAULT '',
             sampling_result TEXT NOT NULL DEFAULT '',
+            var TEXT NOT NULL DEFAULT '',
+            qgroup TEXT NOT NULL DEFAULT '',
+            qtype TEXT NOT NULL DEFAULT '',
+            max_points REAL NOT NULL DEFAULT 0,
+            position INTEGER NOT NULL DEFAULT 0,
+            estimate TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (session_name, output_col)
         )",
         (),
@@ -52,6 +59,7 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
             input_text TEXT NOT NULL DEFAULT '',
             grade TEXT NOT NULL DEFAULT '',
             timestamp TEXT NOT NULL DEFAULT '',
+            source TEXT NOT NULL DEFAULT '',
             PRIMARY KEY (session_name, output_col, row_id)
         )",
         (),
@@ -84,6 +92,38 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
         (),
     )
     .await?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS grade_conflicts (
+            session_name TEXT NOT NULL,
+            output_col TEXT NOT NULL,
+            row_id TEXT NOT NULL,
+            existing_grade TEXT NOT NULL DEFAULT '',
+            existing_source TEXT NOT NULL DEFAULT '',
+            incoming_grade TEXT NOT NULL DEFAULT '',
+            incoming_source TEXT NOT NULL DEFAULT '',
+            input_text TEXT NOT NULL DEFAULT '',
+            timestamp TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (session_name, output_col, row_id, incoming_source)
+        )",
+        (),
+    )
+    .await?;
+
+    // Best-effort column migrations for DBs created by an earlier schema.
+    // Duplicate-column errors are expected and ignored.
+    for stmt in [
+        "ALTER TABLE questions ADD COLUMN var TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE questions ADD COLUMN qgroup TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE questions ADD COLUMN qtype TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE questions ADD COLUMN max_points REAL NOT NULL DEFAULT 0",
+        "ALTER TABLE questions ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE questions ADD COLUMN estimate TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE sessions ADD COLUMN scheme TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE graded_items ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+    ] {
+        let _ = conn.execute(stmt, ()).await;
+    }
 
     Ok(())
 }

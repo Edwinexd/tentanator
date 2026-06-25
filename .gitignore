@@ -240,3 +240,6 @@ graded_exams/
 global_bank/
 global_banks_embeddings/
 training_data/
+
+# Reference material (private exam data, design input - never commit)
+reference/

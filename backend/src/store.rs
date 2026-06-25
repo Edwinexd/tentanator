@@ -196,10 +196,15 @@ pub async fn insert_session(conn: &Connection, session: &Session) -> AppResult<(
 
 async fn insert_session_inner(conn: &Connection, s: &Session) -> AppResult<()> {
     conn.execute("DELETE FROM sessions WHERE name = ?", (s.session_name.as_str(),)).await?;
+    let scheme = s
+        .scheme
+        .as_ref()
+        .map(|sc| serde_json::to_string(sc).unwrap_or_default())
+        .unwrap_or_default();
     conn.execute(
         "INSERT INTO sessions \
-         (name, csv_file, id_columns, input_columns, output_columns, course, last_updated, archived) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, 0)",
+         (name, csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme, archived) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
         (
             s.session_name.as_str(),
             s.csv_file.as_str(),
@@ -208,6 +213,7 @@ async fn insert_session_inner(conn: &Connection, s: &Session) -> AppResult<()> {
             json_array(&s.output_columns),
             s.course.clone().unwrap_or_default(),
             s.last_updated.as_str(),
+            scheme,
         ),
     )
     .await?;
@@ -238,8 +244,8 @@ pub async fn upsert_question_row(
         .unwrap_or_default();
     conn.execute(
         "INSERT INTO questions \
-         (session_name, output_col, question_name, input_column, exam_question, sample_answer, global_question_id, sampling_result) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         (session_name, output_col, question_name, input_column, exam_question, sample_answer, global_question_id, sampling_result, var, qgroup, qtype, max_points, position, estimate) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             name,
             col,
@@ -249,6 +255,12 @@ pub async fn upsert_question_row(
             q.sample_answer.as_str(),
             q.global_question_id.clone().unwrap_or_default(),
             sr,
+            q.var.as_str(),
+            q.group.as_str(),
+            q.qtype.as_str(),
+            q.max_points,
+            q.position,
+            q.estimate.clone().unwrap_or_default(),
         ),
     )
     .await?;
@@ -381,6 +393,7 @@ fn question_from_row(row: &turso::Row) -> AppResult<(String, QuestionGrades)> {
     let col: String = row.get(0)?;
     let gq: String = row.get(5)?;
     let sr: String = row.get(6)?;
+    let estimate: String = row.get(12)?;
     let q = QuestionGrades {
         question_name: row.get(1)?,
         input_column: row.get(2)?,
@@ -393,19 +406,26 @@ fn question_from_row(row: &turso::Row) -> AppResult<(String, QuestionGrades)> {
         } else {
             serde_json::from_str(&sr).ok()
         },
+        var: row.get(7)?,
+        group: row.get(8)?,
+        qtype: row.get(9)?,
+        max_points: row.get(10)?,
+        position: row.get(11)?,
+        estimate: opt(estimate),
         external_graded_items: Vec::new(),
     };
     Ok((col, q))
 }
 
-const Q_COLS: &str =
-    "output_col, question_name, input_column, exam_question, sample_answer, global_question_id, sampling_result";
+const Q_COLS: &str = "output_col, question_name, input_column, exam_question, \
+     sample_answer, global_question_id, sampling_result, var, qgroup, qtype, \
+     max_points, position, estimate";
 
 pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Session>> {
     let meta = {
         let mut r = conn
             .query(
-                "SELECT csv_file, id_columns, input_columns, output_columns, course, last_updated \
+                "SELECT csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme \
                  FROM sessions WHERE name = ?",
                 (name,),
             )
@@ -418,7 +438,13 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
                 let output_columns = parse_array(&row.get::<String>(3)?);
                 let course = opt(row.get::<String>(4)?);
                 let last_updated: String = row.get(5)?;
-                (csv_file, id_columns, input_columns, output_columns, course, last_updated)
+                let scheme_s: String = row.get(6)?;
+                let scheme = if scheme_s.is_empty() {
+                    None
+                } else {
+                    serde_json::from_str(&scheme_s).ok()
+                };
+                (csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme)
             }
             None => return Ok(None),
         }
@@ -449,7 +475,22 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
         course: meta.4,
         last_updated: meta.5,
         questions,
+        scheme: meta.6,
     }))
+}
+
+/// Persist (or clear) the examination grade scheme.
+pub async fn set_scheme(
+    conn: &Connection,
+    name: &str,
+    scheme: &Option<crate::scheme::GradeScheme>,
+) -> AppResult<()> {
+    let s = scheme
+        .as_ref()
+        .map(|x| serde_json::to_string(x).unwrap_or_default())
+        .unwrap_or_default();
+    conn.execute("UPDATE sessions SET scheme = ? WHERE name = ?", (s, name)).await?;
+    Ok(())
 }
 
 pub async fn load_question(
@@ -959,6 +1000,7 @@ mod tests {
             course: Some("CS101".into()),
             last_updated: now_iso(),
             questions: HashMap::new(),
+            scheme: None,
         };
         session.ensure_question("g");
         insert_session(&conn, &session).await.unwrap();
@@ -997,6 +1039,7 @@ mod tests {
                 course: None,
                 last_updated: now_iso(),
                 questions: HashMap::new(),
+                scheme: None,
             };
             let q = s.ensure_question("g");
             q.global_question_id = Some("gq7".into());

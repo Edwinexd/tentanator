@@ -118,3 +118,6 @@ class TentanatorAPI:
 
     async def export(self, name: str) -> Dict[str, Any]:
         return await self._request("POST", f"/api/sessions/{name}/export")
+
+    async def get_results(self, name: str) -> Dict[str, Any]:
+        return await self._request("GET", f"/api/sessions/{name}/results")

@@ -47,6 +47,58 @@ export interface Question {
   global_question_id: string | null
   graded_items: GradedItem[]
   sampling_result: SamplingResult | null
+  var: string
+  group: string
+  qtype: string
+  max_points: number
+  position: number
+  estimate?: string | null
+}
+
+export interface SchemeConst {
+  name: string
+  value: number
+}
+export interface SchemeVar {
+  name: string
+  expr: string
+}
+export interface GradeRule {
+  when: string
+  grade: string
+}
+export interface GradeScheme {
+  constants: SchemeConst[]
+  vars: SchemeVar[]
+  rules: GradeRule[]
+  total_var: string
+  default_grade: string
+}
+
+export interface StudentResult {
+  id: string
+  grade: string
+  total: number
+  vars: Record<string, number>
+  estimated: string[]
+  complete: boolean
+}
+export interface ResultsResponse {
+  results: StudentResult[]
+  distribution: Record<string, number>
+  total_students: number
+  complete: number
+  has_scheme: boolean
+}
+
+export interface QuestionConfigUpdate {
+  col: string
+  var: string
+  group: string
+  qtype: string
+  max_points: number
+  position: number
+  estimate?: string
 }
 
 export interface Session {
@@ -58,6 +110,7 @@ export interface Session {
   course: string | null
   last_updated: string
   questions: Record<string, Question>
+  scheme?: GradeScheme | null
 }
 
 export interface AIGradeSuggestion {
@@ -152,6 +205,15 @@ export const api = {
     ),
   exportSession: (name: string) =>
     req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export`),
+
+  putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
+    req<Session>('PUT', `/api/sessions/${encodeURIComponent(name)}/questions-config`, updates),
+  putScheme: (name: string, scheme: GradeScheme) =>
+    req<void>('PUT', `/api/sessions/${encodeURIComponent(name)}/scheme`, scheme),
+  getResults: (name: string) =>
+    req<ResultsResponse>('GET', `/api/sessions/${encodeURIComponent(name)}/results`),
+  previewResults: (name: string, scheme: GradeScheme) =>
+    req<ResultsResponse>('POST', `/api/sessions/${encodeURIComponent(name)}/results`, scheme),
 }
 
 export function rowId(row: ExamRow, idColumns: string[]): string {

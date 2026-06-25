@@ -8,7 +8,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
@@ -17,6 +17,7 @@ use crate::domain::{self, AIGradeSuggestion, GradedItem, QuestionGrades, Session
 use crate::error::{AppError, AppResult};
 use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
+use crate::scheme::{self, GradeScheme, StudentResult};
 use crate::{llm, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
@@ -45,6 +46,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/sessions/{name}/questions/{col}/suggest", post(suggest))
         .route("/api/sessions/{name}/questions/{col}/status", get(question_status))
+        .route("/api/sessions/{name}/scheme", put(put_scheme))
+        .route("/api/sessions/{name}/questions-config", put(put_questions_config))
+        .route("/api/sessions/{name}/results", get(get_results).post(preview_results))
         .route("/api/sessions/{name}/export", post(export))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -223,6 +227,7 @@ async fn create_session(
         course: req.course.filter(|c| !c.is_empty()),
         last_updated: store::now_iso(),
         questions: HashMap::new(),
+        scheme: None,
     };
     for col in &req.output_columns {
         session.ensure_question(col);
@@ -529,4 +534,173 @@ async fn export(
     let (rows, cols) = session_exam(&s.config, &session)?;
     let path = store::export_to_excel(&s.config, &session, &rows, &cols)?;
     Ok(Json(json!({ "path": path })))
+}
+
+// ---------------------------------------------------------------------------
+// Examination scheme, question config & computed results
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct QuestionConfigUpdate {
+    col: String,
+    #[serde(default)]
+    var: String,
+    #[serde(default)]
+    group: String,
+    #[serde(default)]
+    qtype: String,
+    #[serde(default)]
+    max_points: f64,
+    #[serde(default)]
+    position: i64,
+    #[serde(default)]
+    estimate: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ResultsResponse {
+    results: Vec<StudentResult>,
+    distribution: HashMap<String, usize>,
+    total_students: usize,
+    complete: usize,
+    has_scheme: bool,
+}
+
+fn sanitize_ident(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if out.is_empty() || out.chars().next().unwrap().is_ascii_digit() {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Variable name a question contributes to scheme expressions.
+fn effective_var(col: &str, q: &QuestionGrades) -> String {
+    if q.var.is_empty() {
+        sanitize_ident(col)
+    } else {
+        q.var.clone()
+    }
+}
+
+fn compute_results(
+    session: &Session,
+    rows: &[HashMap<String, String>],
+    scheme: &GradeScheme,
+) -> ResultsResponse {
+    let questions: Vec<scheme::QuestionConfig> = session
+        .output_columns
+        .iter()
+        .filter_map(|col| session.questions.get(col).map(|q| (col, q)))
+        .map(|(col, q)| scheme::QuestionConfig {
+            var: effective_var(col, q),
+            label: q.question_name.clone(),
+            group: q.group.clone(),
+            qtype: q.qtype.clone(),
+            max_points: q.max_points,
+            position: q.position,
+            estimate: q.estimate.clone(),
+        })
+        .collect();
+
+    let mut results = Vec::with_capacity(rows.len());
+    for row in rows {
+        let rid = domain::row_id(row, &session.id_columns);
+        let mut points: HashMap<String, Option<f64>> = HashMap::new();
+        for col in &session.output_columns {
+            if let Some(q) = session.questions.get(col) {
+                let var = effective_var(col, q);
+                let graded = q
+                    .graded_items
+                    .iter()
+                    .find(|gi| gi.row_id == rid)
+                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
+                points.insert(var, graded);
+            }
+        }
+        results.push(scheme::compute_student(&rid, scheme, &questions, &points));
+    }
+
+    let distribution = scheme::distribution(&results);
+    let complete = results.iter().filter(|r| r.complete).count();
+    let total_students = results.len();
+    ResultsResponse {
+        results,
+        distribution,
+        total_students,
+        complete,
+        has_scheme: true,
+    }
+}
+
+async fn put_scheme(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(scheme): Json<GradeScheme>,
+) -> AppResult<StatusCode> {
+    let conn = s.db().await;
+    if !store::session_exists(&conn, &name).await? {
+        return Err(AppError::NotFound(format!("session '{name}' not found")));
+    }
+    store::set_scheme(&conn, &name, &Some(scheme)).await?;
+    store::touch(&conn, &name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn put_questions_config(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(updates): Json<Vec<QuestionConfigUpdate>>,
+) -> AppResult<Json<Session>> {
+    let mut session = load_session_or_404(&s, &name).await?;
+    {
+        let conn = s.db().await;
+        for u in &updates {
+            {
+                let q = session.ensure_question(&u.col);
+                q.var = u.var.clone();
+                q.group = u.group.clone();
+                q.qtype = u.qtype.clone();
+                q.max_points = u.max_points;
+                q.position = u.position;
+                q.estimate = u.estimate.clone().filter(|e| !e.is_empty());
+            }
+            let qc = session.questions.get(&u.col).cloned().ok_or_else(|| no_question(&u.col))?;
+            store::upsert_question_row(&conn, &name, &u.col, &qc).await?;
+        }
+        store::touch(&conn, &name).await?;
+    }
+    Ok(Json(load_session_or_404(&s, &name).await?))
+}
+
+async fn get_results(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<ResultsResponse>> {
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, _) = session_exam(&s.config, &session)?;
+    let resp = match &session.scheme {
+        Some(scheme) => compute_results(&session, &rows, scheme),
+        None => ResultsResponse {
+            results: Vec::new(),
+            distribution: HashMap::new(),
+            total_students: rows.len(),
+            complete: 0,
+            has_scheme: false,
+        },
+    };
+    Ok(Json(resp))
+}
+
+async fn preview_results(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(scheme): Json<GradeScheme>,
+) -> AppResult<Json<ResultsResponse>> {
+    let session = load_session_or_404(&s, &name).await?;
+    let (rows, _) = session_exam(&s.config, &session)?;
+    Ok(Json(compute_results(&session, &rows, &scheme)))
 }
