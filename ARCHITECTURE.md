@@ -136,17 +136,48 @@ Grades accept the legacy signed-sum syntax (`"2+1.5+2.5"`, `"7.5"`, `"2+2.5-0.5"
 the backend validates and stores both the raw expression (for ICL context) and
 the evaluated numeric total (for export).
 
-## Running locally
+## Quick start (Docker)
 
-Three processes. Keys (`OPENAI_API_KEY`, `CEREBRAS_API_KEY`) come from the
-repo-root `.env`; the backend walks up to find it.
+The whole stack runs from `docker-compose.yml`. You only need Docker.
 
 ```bash
-# 1. Backend (serves the model on :8787). Point it at the repo root so it sees
-#    exams/, .tentanator_sessions/, etc.
-cd backend
-TENTANATOR_DATA_DIR=.. cargo run            # or: cargo run --release
-#    embeddings/AI need the keys; random sampling + manual grading work without.
+# 1. (optional) API keys — manual grading + random sampling work without them;
+#    embeddings (maximin) and AI suggestions need them.
+cp .env.example .env        # then edit in your OPENAI_API_KEY / CEREBRAS_API_KEY
+
+# 2. Drop exam files (.xlsx / .csv) into the data dir
+mkdir -p data/exams
+cp /path/to/your-exam.xlsx data/exams/
+
+# 3. Start the backend + web UI
+docker compose up -d --build
+
+# 4. Use it
+open http://localhost:3000          # web UI (grade, sample, export)
+docker compose run --rm tui         # interactive terminal UI
+
+# graded exports appear in ./data/graded_exams/ ; the DB is ./data/.tentanator.db
+
+docker compose logs -f backend      # tail logs
+docker compose down                 # stop everything
+```
+
+The interactive **TUI** is its own command (`docker compose run --rm tui`) rather
+than part of `up`, because it needs a terminal. It starts the backend if it
+isn't already running. Quit the TUI with `Ctrl+Q`.
+
+Everything in `./data/` (exams, graded exports, the Turso DB) persists on the
+host. Files written by the backend container are root-owned; `sudo chown -R
+"$USER" data` if you need to edit them directly.
+
+## Running locally (without Docker)
+
+Three processes; keys come from the repo-root `.env` (the backend walks up to
+find it).
+
+```bash
+# 1. Backend (serves the model on :8787). Point it at the repo root.
+cd backend && TENTANATOR_DATA_DIR=.. cargo run        # or cargo run --release
 
 # 2. TUI (separate terminal)
 cd tui && python3 -m venv .venv && source .venv/bin/activate
@@ -155,7 +186,7 @@ TENTANATOR_API=http://127.0.0.1:8787 python app.py
 
 # 3. Web (separate terminal)
 cd web && npm install
-VITE_API_BASE=http://127.0.0.1:8787 npm run dev   # http://localhost:3000
+VITE_API_BASE=http://127.0.0.1:8787 npm run dev       # http://localhost:3000
 ```
 
 Backend tests: `cd backend && cargo test`.
