@@ -8,7 +8,7 @@
 //! `/api/legacy-workspaces/{name}/import`. Existing exams/files are never
 //! overwritten (name collisions are suffixed with the workspace name).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -33,18 +33,25 @@ pub struct ImportResult {
     pub skipped_files: usize,
 }
 
-fn count_sessions(dir: &Path) -> usize {
+/// Collect importable legacy session files in a workspace's
+/// `.tentanator_sessions/`, including its `archive/` subfolder (archived
+/// sessions are still real exams the user may want back). Cache sidecars
+/// (`<stem>.cache.json`) are excluded; they're picked up by their parent dir.
+fn session_files(dir: &Path) -> Vec<PathBuf> {
     let sessions = dir.join(".tentanator_sessions");
-    let Ok(entries) = std::fs::read_dir(&sessions) else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| {
+    let mut out = Vec::new();
+    for base in [sessions.clone(), sessions.join("archive")] {
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            continue;
+        };
+        for e in entries.flatten() {
             let n = e.file_name().to_string_lossy().to_string();
-            n.ends_with(".json") && !n.ends_with(".cache.json")
-        })
-        .count()
+            if n.ends_with(".json") && !n.ends_with(".cache.json") {
+                out.push(e.path());
+            }
+        }
+    }
+    out
 }
 
 /// List the leftover legacy workspaces available to import.
@@ -55,7 +62,7 @@ pub fn list_importable(config: &Config) -> Vec<WorkspaceInfo> {
             if e.path().is_dir() {
                 out.push(WorkspaceInfo {
                     name: e.file_name().to_string_lossy().to_string(),
-                    exams: count_sessions(&e.path()),
+                    exams: session_files(&e.path()).len(),
                 });
             }
         }
@@ -98,32 +105,23 @@ pub async fn import_workspace(
     }
 
     // Sessions (+ caches) into the DB as exams, tagged with the course.
-    let src_sessions = ws.join(".tentanator_sessions");
+    // Includes archived sessions (in `.tentanator_sessions/archive/`).
     let mut imported_exams = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&src_sessions) {
-        for e in entries.flatten() {
-            let fname = e.file_name().to_string_lossy().to_string();
-            if !fname.ends_with(".json") || fname.ends_with(".cache.json") {
-                continue;
-            }
-            let stem = fname.trim_end_matches(".json");
-            let Ok(raw) = std::fs::read_to_string(e.path()) else {
-                continue;
-            };
-            let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-                continue;
-            };
-            let stored = store::import_legacy_session(
-                conn,
-                &value,
-                stem,
-                &src_sessions,
-                Some(name),
-                name,
-            )
-            .await?;
-            imported_exams.push(stored);
-        }
+    for path in session_files(&ws) {
+        let fname = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let stem = fname.trim_end_matches(".json");
+        // Cache sidecars sit next to the session file (archived caches live in
+        // `archive/` alongside the archived session).
+        let caches_dir = path.parent().unwrap_or(&ws);
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let stored =
+            store::import_legacy_session(conn, &value, stem, caches_dir, Some(name), name).await?;
+        imported_exams.push(stored);
     }
 
     // Cross-exam graded pool.
@@ -192,5 +190,37 @@ mod tests {
         let sessions = store::list_sessions(&conn, "s").await.unwrap();
         assert!(sessions.iter().any(|x| x.name == "default"));
         assert!(config.exams_dir().join("e.xlsx").exists());
+    }
+
+    #[tokio::test]
+    async fn import_includes_archived_sessions() {
+        let config = tmp_config();
+        let ws = config.data_dir.join("workspaces").join("PVT15");
+        let archive = ws.join(".tentanator_sessions").join("archive");
+        std::fs::create_dir_all(&archive).unwrap();
+        std::fs::write(
+            ws.join(".tentanator_sessions").join("active.json"),
+            r#"{"session_name":"active","csv_file":"e.xlsx","id_columns":["id"],"input_columns":["a"],"output_columns":["g"],"questions":{}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            archive.join("reexam.json"),
+            r#"{"session_name":"reexam","csv_file":"r.xlsx","id_columns":["id"],"input_columns":["a"],"output_columns":["g"],"questions":{}}"#,
+        )
+        .unwrap();
+
+        // Both the active and archived session are counted as importable.
+        let infos = list_importable(&config);
+        let pvt = infos.iter().find(|w| w.name == "PVT15").unwrap();
+        assert_eq!(pvt.exams, 2);
+
+        let database = db::open(config.data_dir.join("t.db").to_str().unwrap()).await.unwrap();
+        let conn = database.connect().unwrap();
+        db::init_schema(&conn).await.unwrap();
+
+        let result = import_workspace(&conn, &config, "PVT15").await.unwrap();
+        assert_eq!(result.imported_exams.len(), 2);
+        assert!(result.imported_exams.contains(&"reexam".to_string()));
+        assert!(store::load_exam(&conn, "reexam").await.unwrap().is_some());
     }
 }
