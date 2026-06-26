@@ -996,6 +996,23 @@ pub async fn hydrate_external(
     Ok(())
 }
 
+/// Push a linked question's existing grades into the cross-exam pool. Call after
+/// setting its `global_question_id` so prior grades (recorded before the link)
+/// become ICL examples for other exams sharing that id. No-op if unlinked.
+pub async fn sync_question_grades_to_pool(
+    conn: &Connection,
+    exam: &str,
+    col: &str,
+) -> AppResult<()> {
+    let Some(gq) = question_gq_id(conn, exam, col).await? else {
+        return Ok(());
+    };
+    for item in load_graded_items(conn, exam, col).await? {
+        sync_item_to_pool(conn, &gq, exam, &item).await?;
+    }
+    Ok(())
+}
+
 async fn sync_item_to_pool(
     conn: &Connection,
     gq_id: &str,
@@ -1524,6 +1541,38 @@ mod tests {
         assert_eq!(rows[0], vec!["daisy_id", "pts"]);
         assert_eq!(rows[1], vec!["183271", "5.5"]);
         assert_eq!(rows[2], vec!["A & B", "4.5"]);
+    }
+
+    #[tokio::test]
+    async fn linking_backfills_pool() {
+        let conn = mem_conn().await;
+        let mut a = sample_exam("ea");
+        a.course = None;
+        a.ensure_question("g");
+        insert_exam(&conn, &a).await.unwrap();
+        // Grade BEFORE the question is linked to a global id.
+        put_graded_item(
+            &conn,
+            "ea",
+            "g",
+            &GradedItem { row_id: "r1".into(), input_text: "x".into(), grade: "5".into(), timestamp: now_iso() },
+            "manual",
+            "default",
+        )
+        .await
+        .unwrap();
+        // Link it, then backfill the pool.
+        let mut q = load_question(&conn, "ea", "g").await.unwrap().unwrap();
+        q.global_question_id = Some("gq9".into());
+        upsert_question_row(&conn, "ea", "g", &q).await.unwrap();
+        sync_question_grades_to_pool(&conn, "ea", "g").await.unwrap();
+        // A different exam linked to the same id now sees the prior grade.
+        let mut b = sample_exam("eb");
+        b.course = None;
+        b.ensure_question("g").global_question_id = Some("gq9".into());
+        insert_exam(&conn, &b).await.unwrap();
+        let loaded = load_question(&conn, "eb", "g").await.unwrap().unwrap();
+        assert_eq!(loaded.external_graded_items.len(), 1);
     }
 
     #[tokio::test]

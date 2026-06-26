@@ -549,6 +549,8 @@ async fn put_question(
     let q = exam.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
     let conn = s.db().await;
     store::upsert_question_row(&conn, &name, &col, &q).await?;
+    // Linking to a global question id makes prior grades sharable as ICL examples.
+    store::sync_question_grades_to_pool(&conn, &name, &col).await?;
     store::touch(&conn, &name).await?;
     store::load_question(&conn, &name, &col)
         .await?

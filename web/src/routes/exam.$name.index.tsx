@@ -34,6 +34,10 @@ function ExamView() {
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSession, setActiveSession] = useState('default')
   const [autoSuggest, setAutoSuggest] = useState(true)
+  // Per-question settings (synced from the selected column).
+  const [qGlobalId, setQGlobalId] = useState('')
+  const [qExamText, setQExamText] = useState('')
+  const [qSample, setQSample] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -120,6 +124,15 @@ function ExamView() {
 
   useEffect(() => {
     setIndex(0)
+  }, [col])
+
+  // Sync the per-question settings fields when the selected question changes.
+  useEffect(() => {
+    const q = exam?.questions[col]
+    setQGlobalId(q?.global_question_id ?? '')
+    setQExamText(q?.exam_question ?? '')
+    setQSample(q?.sample_answer ?? '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [col])
 
   useEffect(() => {
@@ -246,6 +259,26 @@ function ExamView() {
     try {
       const updated = await api.updateExam(name, { course: course.trim() })
       setExam((s) => (s ? { ...s, course: updated.course } : s))
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function saveQuestion() {
+    if (!col) return
+    setError(null)
+    try {
+      const updated = await api.putQuestion(name, col, {
+        exam_question: qExamText,
+        sample_answer: qSample,
+        global_question_id: qGlobalId.trim(),
+      })
+      setExam((s) => (s ? { ...s, questions: { ...s.questions, [col]: updated } } : s))
+      setInfo(
+        qGlobalId.trim()
+          ? `Linked to "${qGlobalId.trim()}" - prior grades for this id are now shared examples`
+          : 'Question settings saved',
+      )
     } catch (e) {
       setError((e as Error).message)
     }
@@ -414,9 +447,53 @@ function ExamView() {
         </button>
       </div>
 
+      <details className="rounded border bg-gray-50 p-2 text-sm">
+        <summary className="cursor-pointer select-none text-gray-700">
+          Question settings
+          {qGlobalId.trim() ? ` · linked: ${qGlobalId.trim()}` : ''}
+          {status ? ` · ${status.external} pooled example(s)` : ''}
+        </summary>
+        <div className="mt-2 space-y-2">
+          <label className="block">
+            <span className="text-gray-600">
+              Global question id — link the same question across exams/terms to share graded
+              examples (so the AI has context even with few responses here)
+            </span>
+            <input
+              className="mt-1 w-full rounded border px-2 py-1"
+              placeholder="e.g. pvt_q37_version_control"
+              value={qGlobalId}
+              onChange={(e) => setQGlobalId(e.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-gray-600">Exam question text (included in the AI prompt)</span>
+            <textarea
+              className="mt-1 w-full rounded border px-2 py-1"
+              rows={2}
+              value={qExamText}
+              onChange={(e) => setQExamText(e.target.value)}
+            />
+          </label>
+          <label className="block">
+            <span className="text-gray-600">Sample answer (optional)</span>
+            <textarea
+              className="mt-1 w-full rounded border px-2 py-1"
+              rows={2}
+              value={qSample}
+              onChange={(e) => setQSample(e.target.value)}
+            />
+          </label>
+          <button onClick={saveQuestion} className="rounded border px-3 py-1 hover:bg-white">
+            Save question settings
+          </button>
+        </div>
+      </details>
+
       <div className="text-sm text-gray-600">
         graded {gradedCount}/{rows.length} · {ungraded.length} ungraded ·{' '}
-        ICL ready: {status ? (status.icl_ready ? 'yes' : 'no') : '…'}
+        ICL ready: {status ? (status.icl_ready ? 'yes' : 'no') : '…'} ·{' '}
+        {status?.external ?? 0} pooled
       </div>
 
       {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
