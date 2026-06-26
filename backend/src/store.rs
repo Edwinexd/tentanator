@@ -343,7 +343,7 @@ pub async fn upsert_question_row(
             q.group.as_str(),
             q.qtype.as_str(),
             q.max_points,
-            q.position,
+            q.position as i64,
             q.estimate.clone().unwrap_or_default(),
         ),
     )
@@ -657,7 +657,7 @@ fn question_from_row(row: &turso::Row) -> AppResult<(String, QuestionGrades)> {
         group: row.get(8)?,
         qtype: row.get(9)?,
         max_points: row.get(10)?,
-        position: row.get(11)?,
+        position: row.get::<i64>(11)? as i32,
         estimate: opt(estimate),
         external_graded_items: Vec::new(),
     };
@@ -794,12 +794,22 @@ pub async fn list_exams(conn: &Connection, archived: bool) -> AppResult<Vec<Exam
                 .await?;
             c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
         };
+        let graded_count = {
+            let mut c = conn
+                .query(
+                    "SELECT COUNT(*) FROM graded_items WHERE exam = ?",
+                    (t.name.as_str(),),
+                )
+                .await?;
+            c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
+        };
         out.push(ExamSummary {
             name: t.name,
             exam_file: t.file,
             course: opt(t.course),
             last_updated: t.updated,
             num_questions,
+            graded_count,
             archived,
         });
     }

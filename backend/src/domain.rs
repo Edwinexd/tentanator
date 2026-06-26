@@ -7,8 +7,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use ts_rs::TS;
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct GradedItem {
     #[serde(default)]
     pub row_id: String,
@@ -20,7 +22,8 @@ pub struct GradedItem {
     pub timestamp: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct SamplingResult {
     #[serde(default)]
     pub algorithm: String,
@@ -34,7 +37,8 @@ pub struct SamplingResult {
     pub timestamp: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct QuestionGrades {
     #[serde(default)]
     pub question_name: String,
@@ -64,13 +68,14 @@ pub struct QuestionGrades {
     #[serde(default)]
     pub max_points: f64,
     #[serde(default)]
-    pub position: i64,
+    pub position: i32,
     /// Optional expression to estimate points when ungraded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub estimate: Option<String>,
     /// Cross-session pooled items. Not persisted in the session file; hydrated
     /// from `global_bank/graded_pool/<gq_id>.jsonl` on load.
     #[serde(default, skip_serializing)]
+    #[ts(skip)]
     pub external_graded_items: Vec<GradedItem>,
 }
 
@@ -96,7 +101,8 @@ impl QuestionGrades {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct Exam {
     #[serde(default)]
     pub name: String,
@@ -146,7 +152,8 @@ impl Exam {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct AIGradeSuggestion {
     pub grade: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -154,19 +161,22 @@ pub struct AIGradeSuggestion {
 }
 
 /// An exam in list form (no questions/grades loaded).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct ExamSummary {
     pub name: String,
     pub exam_file: String,
     pub course: Option<String>,
     pub last_updated: String,
     pub num_questions: usize,
+    pub graded_count: usize,
     pub archived: bool,
 }
 
 /// A lightweight named grading session belonging to an exam. Grades recorded
 /// during a session write into the exam's single grade set, tagged with `name`.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct Session {
     #[serde(default)]
     pub exam: String,
@@ -178,7 +188,8 @@ pub struct Session {
 }
 
 /// A session in list form, with how many grades were recorded under it.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct SessionSummary {
     pub exam: String,
     pub name: String,
@@ -188,7 +199,8 @@ pub struct SessionSummary {
 }
 
 /// An imported grade that disagrees with an existing one, pending resolution.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct GradeConflict {
     pub output_col: String,
     pub row_id: String,

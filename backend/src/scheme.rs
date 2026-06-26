@@ -14,6 +14,7 @@ use std::collections::HashMap;
 
 use evalexpr::*;
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Per-question grading config (decoupled from grading I/O so the engine is
 /// pure and testable). `var` is the identifier used in scheme expressions.
@@ -29,32 +30,36 @@ pub struct QuestionConfig {
     #[serde(default)]
     pub max_points: f64,
     #[serde(default)]
-    pub position: i64,
+    pub position: i32,
     /// Optional expression to estimate points when the question is ungraded
     /// (e.g. `hci_mc / 18 * 7`). Flagged in the result when used.
     #[serde(default)]
     pub estimate: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct SchemeConst {
     pub name: String,
     pub value: f64,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct SchemeVar {
     pub name: String,
     pub expr: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct GradeRule {
     pub when: String,
     pub grade: String,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct GradeScheme {
     #[serde(default)]
     pub constants: Vec<SchemeConst>,
@@ -70,7 +75,8 @@ pub struct GradeScheme {
     pub default_grade: String,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct StudentResult {
     pub id: String,
     pub grade: String,
@@ -276,7 +282,7 @@ mod tests {
             .enumerate()
             .map(|(i, v)| QuestionConfig {
                 var: v.to_string(),
-                position: i as i64,
+                position: i as i32,
                 ..Default::default()
             })
             .collect()

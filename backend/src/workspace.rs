@@ -12,20 +12,23 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 use serde_json::Value;
+use ts_rs::TS;
 use turso::Connection;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::store;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct WorkspaceInfo {
     pub name: String,
     /// Number of importable legacy session files in the workspace.
     pub exams: usize,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct ImportResult {
     /// Names of the exams created in the new store.
     pub imported_exams: Vec<String>,

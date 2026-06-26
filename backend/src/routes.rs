@@ -790,7 +790,7 @@ struct QuestionConfigUpdate {
     #[serde(default)]
     max_points: f64,
     #[serde(default)]
-    position: i64,
+    position: i32,
     #[serde(default)]
     estimate: Option<String>,
 }
