@@ -5,8 +5,10 @@
 #   docker compose run --rm tui       # interactive TUI
 #   docker compose down               # stop
 #
-# Put exam files in ./data/exams/ ; graded exports land in ./data/graded_exams/.
-# API keys (optional) go in .env — see .env.example.
+# The repo root is the data dir (mounted at /workspace): exam files go in
+# ./exams/, graded exports land in ./graded_exams/, the DB is ./.tentanator.db,
+# and legacy data (.tentanator_sessions/, workspaces/, global_bank/) is imported
+# from there on startup. API keys (optional) go in .env — see .env.example.
 
 services:
   backend:
@@ -18,11 +20,11 @@ services:
       - path: .env
         required: false
     environment:
-      TENTANATOR_DATA_DIR: /data
+      TENTANATOR_DATA_DIR: /workspace
       TENTANATOR_BIND: 0.0.0.0:8787
       RENDERER_URL: http://renderer:8000
     volumes:
-      - ./data:/data
+      - .:/workspace
     restart: unless-stopped
 
   # Results-PDF renderer (LaTeX answer sheets + scanned cover pages).
@@ -31,9 +33,9 @@ services:
     image: tentanator-results-renderer
     environment:
       TENTANATOR_API: http://backend:8787
-      TENTANATOR_DATA_DIR: /data
+      TENTANATOR_DATA_DIR: /workspace
     volumes:
-      - ./data:/data
+      - .:/workspace
     depends_on:
       - backend
     restart: unless-stopped

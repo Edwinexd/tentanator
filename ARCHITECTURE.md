@@ -181,10 +181,10 @@ The whole stack runs from `docker-compose.yml`. You only need Docker.
 #    embeddings (maximin) and AI suggestions need them.
 cp .env.example .env        # then edit in your OPENAI_API_KEY / CEREBRAS_API_KEY
 
-# 2. Drop exam files (.xlsx / .csv) into the data dir
-mkdir -p data/exams
-cp /path/to/your-exam.xlsx data/exams/
-#    For results PDFs with cover pages, also: cp scanned-exam.pdf data/scans/
+# 2. Drop exam files (.xlsx / .csv) into the data dir (the repo root)
+mkdir -p exams
+cp /path/to/your-exam.xlsx exams/
+#    For results PDFs with cover pages, also: cp scanned-exam.pdf scans/
 
 # 3. Start the backend + web UI
 docker compose up -d --build
@@ -193,7 +193,10 @@ docker compose up -d --build
 open http://localhost:3000          # web UI (grade, sample, export)
 docker compose run --rm tui         # interactive terminal UI
 
-# graded exports appear in ./data/graded_exams/ ; the DB is ./data/.tentanator.db
+# graded exports appear in ./graded_exams/ ; the DB is ./.tentanator.db
+# (the repo root is mounted into the backend at /workspace and used as the data
+#  dir, so legacy .tentanator_sessions/, workspaces/ and global_bank/ at the root
+#  are imported on first startup)
 
 docker compose logs -f backend      # tail logs
 docker compose down                 # stop everything
@@ -203,9 +206,9 @@ The interactive **TUI** is its own command (`docker compose run --rm tui`) rathe
 than part of `up`, because it needs a terminal. It starts the backend if it
 isn't already running. Quit the TUI with `Ctrl+Q`.
 
-Everything in `./data/` (exams, graded exports, the Turso DB) persists on the
+Everything at the repo root (exams, graded exports, the Turso DB) persists on the
 host. Files written by the backend container are root-owned; `sudo chown -R
-"$USER" data` if you need to edit them directly.
+"$USER" .` if you need to edit them directly.
 
 **CI/CD**: `.github/workflows/ci.yml` runs `cargo test` and the web typecheck on
 every push/PR, then on `master` and `v*` tags builds and publishes the three
