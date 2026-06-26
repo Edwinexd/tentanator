@@ -26,7 +26,7 @@ use crate::error::{AppError, AppResult};
 use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
 use crate::scheme::{self, GradeScheme, StudentResult};
-use crate::{llm, store, workspace, AppState};
+use crate::{detect, llm, scheme_text, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
 const DEFAULT_SESSION: &str = "default";
@@ -62,6 +62,9 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/exam-files/{file}/columns", get(exam_columns))
         .route("/api/exam-files/{file}/rows", get(exam_rows))
+        .route("/api/exam-files/{file}/detect", get(detect_columns))
+        .route("/api/scheme/parse", post(scheme_parse))
+        .route("/api/scheme/emit", post(scheme_emit))
         .route("/api/exams", get(list_exams).post(create_exam))
         .route(
             "/api/exams/{name}",
@@ -281,6 +284,42 @@ async fn exam_rows(
         .ok_or_else(|| AppError::NotFound(format!("exam file '{file}' not found")))?;
     let rows = store::read_exam_data(&path)?;
     Ok(Json(json!({ "rows": rows })))
+}
+
+/// Heuristically pair `Response N` / `Points N` columns and guess the id column
+/// (shared by both clients' new-exam / add-questions flows).
+async fn detect_columns(
+    State(s): State<AppState>,
+    Path(file): Path<String>,
+) -> AppResult<Json<detect::DetectedColumns>> {
+    let path = store::resolve_exam_path(&s.config, &file)
+        .ok_or_else(|| AppError::NotFound(format!("exam file '{file}' not found")))?;
+    let cols = store::get_exam_columns(&path)?;
+    Ok(Json(detect::detect_question_pairs(&cols)))
+}
+
+#[derive(Deserialize)]
+struct SchemeTextReq {
+    #[serde(default)]
+    text: String,
+}
+
+#[derive(Serialize)]
+struct SchemeTextResp {
+    text: String,
+}
+
+/// Parse the readable scheme DSL into a `GradeScheme` (grammar owned by the
+/// backend so the clients stay thin).
+async fn scheme_parse(Json(req): Json<SchemeTextReq>) -> AppResult<Json<GradeScheme>> {
+    scheme_text::parse_scheme(&req.text)
+        .map(Json)
+        .map_err(AppError::BadRequest)
+}
+
+/// Emit a `GradeScheme` back to the readable DSL (exact inverse of parse).
+async fn scheme_emit(Json(scheme): Json<GradeScheme>) -> Json<SchemeTextResp> {
+    Json(SchemeTextResp { text: scheme_text::emit_scheme(&scheme) })
 }
 
 // ---------------------------------------------------------------------------

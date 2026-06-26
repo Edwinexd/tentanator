@@ -119,6 +119,7 @@ status.
 | PUT | `/api/files/{kind}/{filename}` | raw bytes | `{ filename }` (`kind` ∈ `exams`/`scans`) |
 | GET | `/api/exam-files/{file}/columns` | — | `string[]` header names |
 | GET | `/api/exam-files/{file}/rows` | — | `{ rows: object[] }` (cells as strings) |
+| GET | `/api/exam-files/{file}/detect` | — | `DetectedColumns` (`Response N`/`Points N` pairing + id guess) |
 
 ### Exams
 | Method | Path | Body | Returns |
@@ -163,6 +164,8 @@ the evaluated numeric total (for export).
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
+| POST | `/api/scheme/parse` | `{ text }` | `GradeScheme` (parse the readable DSL) |
+| POST | `/api/scheme/emit` | `GradeScheme` | `{ text }` (emit the readable DSL) |
 | PUT | `/api/exams/{name}/scheme` | `GradeScheme` | `204` |
 | PUT | `/api/exams/{name}/questions-config` | `QuestionConfigUpdate[]` | `Exam` |
 | GET | `/api/exams/{name}/results` | — | `ResultsResponse` |

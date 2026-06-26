@@ -2,6 +2,7 @@
 
 mod config;
 mod db;
+mod detect;
 mod domain;
 mod error;
 mod grade;
@@ -9,6 +10,7 @@ mod llm;
 mod routes;
 mod sampling;
 mod scheme;
+mod scheme_text;
 mod store;
 mod workspace;
 

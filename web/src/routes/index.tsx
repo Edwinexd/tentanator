@@ -1,8 +1,9 @@
-import { Plus, Archive, FileText } from 'lucide-react'
+import { Plus, Archive, ArchiveRestore, FileText } from 'lucide-react'
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useState, type MouseEvent } from 'react'
 import { api, type ExamSummary, type WorkspaceInfo } from '#/lib/api'
 import { Button } from '#/components/ui/button'
+import { Checkbox } from '#/components/ui/checkbox'
 import {
   Card,
   CardHeader,
@@ -53,8 +54,58 @@ function LegacyList({ legacy, legacyCount, onImportWorkspace, onImportLegacySess
   )
 }
 
+interface ExamCardProps {
+  exam: ExamSummary
+  onArchive?: () => void
+  onUnarchive?: () => void
+}
+
+function ExamCard({ exam: e, onArchive, onUnarchive }: ExamCardProps) {
+  const handle = (fn?: () => void) => (ev: MouseEvent) => {
+    ev.preventDefault()
+    ev.stopPropagation()
+    fn?.()
+  }
+  return (
+    <Link to="/exam/$name" params={{ name: e.name }}>
+      <Card className="transition-colors hover:bg-accent/50">
+        <CardContent className="flex items-center justify-between p-4">
+          <div>
+            <div className="font-medium">{e.name}</div>
+            <div className="text-sm text-muted-foreground">
+              {e.exam_file}
+              {e.course ? ` · ${e.course}` : ''}
+              {e.archived ? ' · archived' : ''}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 text-sm text-muted-foreground">
+            <span className="flex items-center gap-1">
+              <FileText className="h-4 w-4" />
+              {e.graded_count} graded
+            </span>
+            {onArchive && (
+              <Button variant="ghost" size="sm" onClick={handle(onArchive)}>
+                <Archive className="mr-1 h-3 w-3" />
+                Archive
+              </Button>
+            )}
+            {onUnarchive && (
+              <Button variant="ghost" size="sm" onClick={handle(onUnarchive)}>
+                <ArchiveRestore className="mr-1 h-3 w-3" />
+                Unarchive
+              </Button>
+            )}
+          </div>
+        </CardContent>
+      </Card>
+    </Link>
+  )
+}
+
 function Home() {
   const [exams, setExams] = useState<ExamSummary[]>([])
+  const [archived, setArchived] = useState<ExamSummary[]>([])
+  const [showArchived, setShowArchived] = useState(false)
   const [legacy, setLegacy] = useState<WorkspaceInfo[]>([])
   const [legacyCount, setLegacyCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
@@ -76,7 +127,40 @@ function Home() {
       .finally(() => setLoading(false))
   }, [])
 
+  const refreshArchived = useCallback(() => {
+    api
+      .listExams({ archived: true })
+      .then(setArchived)
+      .catch((e: Error) => setError(e.message))
+  }, [])
+
   useEffect(() => refresh(), [refresh])
+
+  useEffect(() => {
+    if (showArchived) refreshArchived()
+  }, [showArchived, refreshArchived])
+
+  async function archiveExam(name: string) {
+    setError(null)
+    try {
+      await api.archiveExam(name)
+      refresh()
+      if (showArchived) refreshArchived()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function unarchiveExam(name: string) {
+    setError(null)
+    try {
+      await api.unarchiveExam(name)
+      refresh()
+      refreshArchived()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
 
   async function importWorkspace(name: string) {
     setError(null)
@@ -114,7 +198,16 @@ function Home() {
         </Link>
       </div>
 
-      <h2 className="mt-8 mb-3 text-xl font-semibold">Exams</h2>
+      <div className="mt-8 mb-3 flex items-center justify-between">
+        <h2 className="text-xl font-semibold">Exams</h2>
+        <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Checkbox
+            checked={showArchived}
+            onCheckedChange={(c) => setShowArchived(c === true)}
+          />
+          <span>Show archived</span>
+        </label>
+      </div>
 
       {loading && (
         <div className="space-y-3">
@@ -145,25 +238,31 @@ function Home() {
       {exams.length > 0 && (
         <div className="space-y-2">
           {exams.map((e) => (
-            <Link key={e.name} to="/exam/$name" params={{ name: e.name }}>
-              <Card className="transition-colors hover:bg-accent/50">
-                <CardContent className="flex items-center justify-between p-4">
-                  <div>
-                    <div className="font-medium">{e.name}</div>
-                    <div className="text-sm text-muted-foreground">
-                      {e.exam_file}
-                      {e.course ? ` · ${e.course}` : ''}
-                      {e.archived ? ' · archived' : ''}
-                    </div>
-                  </div>
-                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <FileText className="h-4 w-4" />
-                    {e.graded_count} graded
-                  </div>
-                </CardContent>
-              </Card>
-            </Link>
+            <ExamCard
+              key={e.name}
+              exam={e}
+              onArchive={() => archiveExam(e.name)}
+            />
           ))}
+        </div>
+      )}
+
+      {showArchived && (
+        <div className="mt-8">
+          <h2 className="mb-3 text-xl font-semibold text-muted-foreground">Archived</h2>
+          {archived.length === 0 ? (
+            <p className="text-sm text-muted-foreground">No archived exams.</p>
+          ) : (
+            <div className="space-y-2">
+              {archived.map((e) => (
+                <ExamCard
+                  key={e.name}
+                  exam={e}
+                  onUnarchive={() => unarchiveExam(e.name)}
+                />
+              ))}
+            </div>
+          )}
         </div>
       )}
 

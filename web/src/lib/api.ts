@@ -125,6 +125,16 @@ export interface ScanMatch {
   matches: boolean
 }
 
+export interface DetectedColumns {
+  id_columns: string[]
+  input_columns: string[]
+  output_columns: string[]
+}
+
+export interface SchemeText {
+  text: string
+}
+
 // ---------------------------------------------------------------------------
 // Request structs
 // ---------------------------------------------------------------------------
@@ -277,6 +287,8 @@ export const api = {
   examColumns: (file: string) => req<string[]>('GET', `/api/exam-files/${enc(file)}/columns`),
   examRows: (file: string) =>
     req<{ rows: ExamRow[] }>('GET', `/api/exam-files/${enc(file)}/rows`).then((r) => r.rows),
+  detectColumns: (file: string) =>
+    req<DetectedColumns>('GET', `/api/exam-files/${enc(file)}/detect`),
   uploadExamFile: (file: File) => uploadBinary('exams', file),
   uploadScan: (file: File) => uploadBinary('scans', file),
 
@@ -343,6 +355,11 @@ export const api = {
     req<QuestionStatus>('GET', `/api/exams/${enc(name)}/questions/${enc(col)}/status`),
 
   // --- scheme, config & results ---
+  // The readable scheme DSL grammar lives in the backend; clients round-trip
+  // through these instead of parsing/emitting it themselves.
+  schemeParse: (text: string) => req<GradeScheme>('POST', '/api/scheme/parse', { text }),
+  schemeEmit: (scheme: GradeScheme) =>
+    req<SchemeText>('POST', '/api/scheme/emit', scheme).then((r) => r.text),
   putScheme: (name: string, scheme: GradeScheme) =>
     req<void>('PUT', `/api/exams/${enc(name)}/scheme`, scheme),
   putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
@@ -383,33 +400,4 @@ export function rowId(row: ExamRow, idColumns: string[]): string {
 export function isMeaningful(text: string): boolean {
   const t = (text ?? '').trim()
   return t !== '' && t !== '-' && t !== 'N/A'
-}
-
-export function detectQuestionPairs(columns: string[]): {
-  id_columns: string[]
-  input_columns: string[]
-  output_columns: string[]
-} {
-  const inputs = new Map<number, string>()
-  const outputs = new Map<number, string>()
-  for (const c of columns) {
-    const t = c.trim()
-    let m = /^response\s*(\d+)$/i.exec(t)
-    if (m) {
-      inputs.set(Number(m[1]), c)
-      continue
-    }
-    m = /^points?\s*(\d+)$/i.exec(t)
-    if (m) outputs.set(Number(m[1]), c)
-  }
-  const ns = [...inputs.keys()].filter((n) => outputs.has(n)).sort((a, b) => a - b)
-  const id =
-    columns.find((c) => /daisy\s*id/i.test(c)) ??
-    columns.find((c) => /^id$/i.test(c)) ??
-    columns[0]
-  return {
-    id_columns: id ? [id] : [],
-    input_columns: ns.map((n) => inputs.get(n)!),
-    output_columns: ns.map((n) => outputs.get(n)!),
-  }
 }

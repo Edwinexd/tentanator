@@ -2,11 +2,11 @@ import { createFileRoute, Link } from '@tanstack/react-router'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
-  detectQuestionPairs,
   isMeaningful,
   rowId,
   type AIGradeSuggestion,
   type Algorithm,
+  type DetectedColumns,
   type Exam,
   type ExamRow,
   type QuestionStatus,
@@ -45,6 +45,7 @@ import {
   SkipForward,
   Save,
   Brain,
+  X,
 } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/')({ component: ExamView })
@@ -53,7 +54,7 @@ function ExamView() {
   const { name } = Route.useParams()
   const [exam, setExam] = useState<Exam | null>(null)
   const [rows, setRows] = useState<ExamRow[]>([])
-  const [fileColumns, setFileColumns] = useState<string[]>([])
+  const [detected, setDetected] = useState<DetectedColumns | null>(null)
   const [course, setCourse] = useState('')
   const [col, setCol] = useState('')
   const didInitCol = useRef(false)
@@ -96,11 +97,11 @@ function ExamView() {
         setExam(s)
         setCourse(s.course ?? '')
         setRows([])
-        setFileColumns([])
+        setDetected(null)
         api
-          .examColumns(s.exam_file)
-          .then(setFileColumns)
-          .catch(() => setFileColumns([]))
+          .detectColumns(s.exam_file)
+          .then(setDetected)
+          .catch(() => setDetected(null))
         return api.examRows(s.exam_file)
       })
       .then(setRows)
@@ -243,6 +244,20 @@ function ExamView() {
     if (s) setGradeValue(s.grade)
   }
 
+  async function ungrade(rowIdToRemove: string) {
+    if (!col) return
+    setError(null)
+    setBusy(true)
+    try {
+      const updated = await api.ungrade(name, col, rowIdToRemove)
+      setExam((s) => (s ? { ...s, questions: { ...s.questions, [col]: updated } } : s))
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   async function sample(algorithm: Algorithm) {
     if (!col) return
     setBusy(true)
@@ -316,12 +331,12 @@ function ExamView() {
   }
 
   async function addQuestions() {
-    if (!exam) return
+    if (!exam || !detected) return
     setBusy(true)
     setInfo(null)
     setError(null)
     try {
-      const det = detectQuestionPairs(fileColumns)
+      const det = detected
       const extraOut = exam.output_columns.filter((c) => !det.output_columns.includes(c))
       const output_columns = [...det.output_columns, ...extraOut]
       const input_columns = [
@@ -364,8 +379,8 @@ function ExamView() {
   const gradedCount = question?.graded_items.length ?? 0
   const iclHave = (status?.valid_graded ?? 0) + (status?.external ?? 0)
   const iclNeed = Math.max(0, (status?.min_icl_examples ?? 5) - iclHave)
-  const det = detectQuestionPairs(fileColumns)
-  const missing = det.output_columns.filter((c) => !exam.output_columns.includes(c))
+  const detOutputs = detected?.output_columns ?? []
+  const missing = detOutputs.filter((c) => !exam.output_columns.includes(c))
 
   return (
     <div className="mx-auto max-w-4xl space-y-4 p-8">
@@ -420,7 +435,7 @@ function ExamView() {
         <Alert>
           <AlertDescription className="flex flex-wrap items-center gap-3">
             <span>
-              This file has {det.output_columns.length} question(s); this exam covers{' '}
+              This file has {detOutputs.length} question(s); this exam covers{' '}
               {exam.output_columns.length}.
             </span>
             <Button
@@ -507,6 +522,40 @@ function ExamView() {
           </AccordionContent>
         </AccordionItem>
       </Accordion>
+
+      {question && question.graded_items.length > 0 && (
+        <Accordion type="single" collapsible>
+          <AccordionItem value="graded-items">
+            <AccordionTrigger className="text-sm text-muted-foreground">
+              Graded ({question.graded_items.length})
+            </AccordionTrigger>
+            <AccordionContent>
+              <div className="max-h-64 space-y-1 overflow-y-auto">
+                {question.graded_items.map((g) => (
+                  <div
+                    key={g.row_id}
+                    className="flex items-center justify-between gap-2 rounded-md border px-2 py-1 text-sm"
+                  >
+                    <span className="font-mono text-xs text-muted-foreground">{g.row_id}</span>
+                    <span className="ml-auto">{g.grade}</span>
+                    <Button
+                      disabled={busy}
+                      onClick={() => ungrade(g.row_id)}
+                      variant="ghost"
+                      size="sm"
+                      className="h-7 px-2"
+                      title="Remove grade"
+                    >
+                      <X className="h-3 w-3" />
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
+      )}
 
       <div className="text-sm text-muted-foreground">
         graded {gradedCount}/{rows.length} · {ungraded.length} ungraded ·{' '}

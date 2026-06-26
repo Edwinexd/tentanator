@@ -2,7 +2,6 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import {
   api,
-  type GradeScheme,
   type QuestionConfigUpdate,
   type ResultsResponse,
 } from '#/lib/api'
@@ -53,68 +52,6 @@ function normQtype(v: string): string {
   return QTYPES.some((t) => t.v === lo) ? lo : ''
 }
 
-// Readable round-trip for the scheme editor. One statement per line:
-//   const <name> = <number>          a tunable constant
-//   <name> = <expr>                  a named aggregate variable
-//   when <cond> -> <grade>           a guarded rule (first match wins)
-//   total_var: <name>                headline total var (optional)
-//   default_grade: <grade>           grade when no rule matches (optional)
-// Blank lines and `#` comments are ignored. schemeToText is the exact inverse
-// of textToScheme, so loading then saving a scheme is a no-op.
-function schemeToText(s: GradeScheme): string {
-  const sections: string[] = []
-  const meta: string[] = []
-  if (s.total_var) meta.push(`total_var: ${s.total_var}`)
-  if (s.default_grade) meta.push(`default_grade: ${s.default_grade}`)
-  if (meta.length) sections.push(meta.join('\n'))
-  if (s.constants?.length) sections.push(s.constants.map((c) => `const ${c.name} = ${c.value}`).join('\n'))
-  if (s.vars?.length) sections.push(s.vars.map((v) => `${v.name} = ${v.expr}`).join('\n'))
-  if (s.rules?.length) sections.push(s.rules.map((r) => `when ${r.when} -> ${r.grade}`).join('\n'))
-  return sections.join('\n\n')
-}
-
-function textToScheme(text: string): GradeScheme {
-  const s: GradeScheme = { constants: [], vars: [], rules: [], total_var: '', default_grade: '' }
-  const lines = text.split('\n')
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim()
-    if (!line || line.startsWith('#')) continue
-    const at = `line ${i + 1}`
-    if (line.startsWith('total_var:')) {
-      s.total_var = line.slice('total_var:'.length).trim()
-    } else if (line.startsWith('default_grade:')) {
-      s.default_grade = line.slice('default_grade:'.length).trim()
-    } else if (line.startsWith('const ')) {
-      const body = line.slice('const '.length)
-      const eq = body.indexOf('=')
-      const name = eq < 0 ? '' : body.slice(0, eq).trim()
-      const value = Number(body.slice(eq + 1).trim())
-      if (eq < 0 || !name || Number.isNaN(value))
-        throw new Error(`${at}: expected 'const <name> = <number>', got '${line}'`)
-      s.constants.push({ name, value })
-    } else if (line.startsWith('when ')) {
-      const body = line.slice('when '.length)
-      const arrow = body.indexOf('->')
-      const when = arrow < 0 ? '' : body.slice(0, arrow).trim()
-      const grade = body.slice(arrow + 2).trim()
-      if (arrow < 0 || !when || !grade)
-        throw new Error(`${at}: expected 'when <cond> -> <grade>', got '${line}'`)
-      s.rules.push({ when, grade })
-    } else if (line.includes('->')) {
-      throw new Error(`${at}: a rule must start with 'when', got '${line}'`)
-    } else if (line.includes('=')) {
-      const eq = line.indexOf('=')
-      const name = line.slice(0, eq).trim()
-      const expr = line.slice(eq + 1).trim()
-      if (!name || !expr) throw new Error(`${at}: expected '<name> = <expr>', got '${line}'`)
-      s.vars.push({ name, expr })
-    } else {
-      throw new Error(`${at}: unrecognized statement '${line}'`)
-    }
-  }
-  return s
-}
-
 function SchemeView() {
   const { name } = Route.useParams()
   const [cfg, setCfg] = useState<QuestionConfigUpdate[]>([])
@@ -130,7 +67,7 @@ function SchemeView() {
   useEffect(() => {
     api
       .getExam(name)
-      .then((e) => {
+      .then(async (e) => {
         const cols = e.output_columns
         const questions = e.questions
         const cfgList: QuestionConfigUpdate[] = cols.map((col) => {
@@ -146,7 +83,7 @@ function SchemeView() {
           }
         })
         setCfg(cfgList)
-        setSchemeText(e.scheme ? schemeToText(e.scheme) : '')
+        setSchemeText(e.scheme ? await api.schemeEmit(e.scheme) : '')
         return api.examRows(e.exam_file)
       })
       .then((rows) => {
@@ -202,7 +139,7 @@ function SchemeView() {
     setError(null)
     setPreview(null)
     try {
-      const s = textToScheme(schemeText)
+      const s = await api.schemeParse(schemeText)
       await api.putQuestionsConfig(name, cfg)
       const r = await api.previewResults(name, s)
       setPreview(r)
@@ -214,7 +151,7 @@ function SchemeView() {
   async function saveScheme() {
     setError(null)
     try {
-      const s = textToScheme(schemeText)
+      const s = await api.schemeParse(schemeText)
       await api.putQuestionsConfig(name, cfg)
       await api.putScheme(name, s)
       setInfo('Scheme saved')

@@ -94,6 +94,9 @@ class TentanatorAPI:
         data = await self._request("GET", f"/api/exam-files/{file}/rows")
         return data.get("rows", [])
 
+    async def detect_columns(self, file: str) -> Dict[str, List[str]]:
+        return await self._request("GET", f"/api/exam-files/{file}/detect")
+
     async def list_scans(self) -> List[str]:
         return await self._request("GET", "/api/scans")
 
@@ -207,6 +210,15 @@ class TentanatorAPI:
         return await self._request("GET", f"/api/exams/{name}/scans")
 
     # -- scheme & question config -----------------------------------------
+    # The readable scheme DSL grammar lives in the backend; the TUI round-trips
+    # through these rather than parsing/emitting it locally.
+    async def scheme_parse(self, text: str) -> Dict[str, Any]:
+        return await self._request("POST", "/api/scheme/parse", json={"text": text})
+
+    async def scheme_emit(self, scheme: Dict[str, Any]) -> str:
+        data = await self._request("POST", "/api/scheme/emit", json=scheme)
+        return data.get("text", "")
+
     async def put_scheme(self, name: str, scheme: Dict[str, Any]) -> None:
         await self._request("PUT", f"/api/exams/{name}/scheme", json=scheme)
 

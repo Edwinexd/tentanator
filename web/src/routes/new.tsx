@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { api, detectQuestionPairs } from '#/lib/api'
+import { api } from '#/lib/api'
 import {
   Card,
   CardHeader,
@@ -70,12 +70,17 @@ function NewSession() {
     api.listExamFiles().then(setExams).catch((e: Error) => setError(e.message))
   }, [])
 
-  function applyDetection(cols: string[]) {
-    const d = detectQuestionPairs(cols)
-    setIdCols(new Set(d.id_columns))
-    setInputCols(new Set(d.input_columns))
-    setOutputCols(new Set(d.output_columns))
-    setDetected(d.output_columns.length)
+  function applyDetection() {
+    if (!examFile) return
+    api
+      .detectColumns(examFile)
+      .then((d) => {
+        setIdCols(new Set(d.id_columns))
+        setInputCols(new Set(d.input_columns))
+        setOutputCols(new Set(d.output_columns))
+        setDetected(d.output_columns.length)
+      })
+      .catch((e: Error) => setError(e.message))
   }
 
   useEffect(() => {
@@ -89,11 +94,10 @@ function NewSession() {
     }
     api
       .examColumns(examFile)
-      .then((cols) => {
-        setColumns(cols)
-        applyDetection(cols)
-      })
+      .then(setColumns)
       .catch((e: Error) => setError(e.message))
+    applyDetection()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examFile])
 
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void) => (col: string) => {
@@ -166,7 +170,7 @@ function NewSession() {
                   variant="link"
                   size="sm"
                   className="ml-2 h-auto p-0"
-                  onClick={() => { if (columns.length) applyDetection(columns) }}
+                  onClick={() => applyDetection()}
                 >
                   <Wand2 className="mr-1 h-3 w-3" />
                   Re-detect
