@@ -95,6 +95,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/exams/{name}/export/daisy", post(export_daisy_route))
         .route("/api/exams/{name}/export/csv", post(export_csv_route))
         .route("/api/exams/{name}/render-data", get(render_data))
+        .route("/api/exams/{name}/scans", get(list_exam_scans))
         .route("/api/exams/{name}/export/results-pdf", post(export_results_pdf))
         .route("/api/graded/{filename}", get(download_graded))
         .layer(CorsLayer::permissive())
@@ -1379,6 +1380,69 @@ async fn export_results_pdf(
     }
     let v: Value = resp.json().await.map_err(|e| AppError::Upstream(e.to_string()))?;
     Ok(Json(v))
+}
+
+/// A scanned PDF reported alongside whether it is eligible to supply cover
+/// pages for this exam: its decodable front-page count must equal the number
+/// of students. `covers` is None when the count could not be determined
+/// (renderer disabled or decode failure).
+#[derive(Serialize)]
+struct ScanMatch {
+    filename: String,
+    covers: Option<usize>,
+    needed: usize,
+    matches: bool,
+}
+
+/// Ask the renderer how many cover pages (barcodes) it can decode from a scan.
+async fn scan_cover_count(http: &reqwest::Client, url: &str, filename: &str) -> Option<usize> {
+    let resp = http
+        .post(url)
+        .json(&json!({ "scanned_pdf": filename }))
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let v: Value = resp.json().await.ok()?;
+    v.get("count").and_then(Value::as_u64).map(|c| c as usize)
+}
+
+/// List scanned PDFs with their decodable front-page count, flagging only the
+/// ones that match this exam's student count as eligible for cover pages.
+async fn list_exam_scans(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Vec<ScanMatch>>> {
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let needed = rows.len();
+    let scans = store::list_pdf_files(&s.config);
+
+    // Counting covers needs the renderer (barcode decode). Without it we can't
+    // verify a match, so report unknown counts and flag nothing as eligible.
+    if s.config.renderer_url.is_empty() {
+        return Ok(Json(
+            scans
+                .into_iter()
+                .map(|filename| ScanMatch { filename, covers: None, needed, matches: false })
+                .collect(),
+        ));
+    }
+
+    let url = format!("{}/covers", s.config.renderer_url.trim_end_matches('/'));
+    let results = futures::future::join_all(scans.into_iter().map(|filename| {
+        let http = s.http.clone();
+        let url = url.clone();
+        async move {
+            let covers = scan_cover_count(&http, &url, &filename).await;
+            let matches = needed > 0 && covers == Some(needed);
+            ScanMatch { filename, covers, needed, matches }
+        }
+    }))
+    .await;
+    Ok(Json(results))
 }
 
 async fn get_conflicts(

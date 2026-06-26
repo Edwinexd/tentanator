@@ -346,7 +346,7 @@ function ExamView() {
 
   if (!exam) {
     return (
-      <div className="mx-auto max-w-3xl p-8">
+      <div className="mx-auto max-w-4xl p-8">
         {error ? (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -368,7 +368,7 @@ function ExamView() {
   const missing = det.output_columns.filter((c) => !exam.output_columns.includes(c))
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-8">
+    <div className="mx-auto max-w-4xl space-y-4 p-8">
       <ExamNav name={name} active="grade" />
       <h1 className="text-2xl font-bold">{exam.name}</h1>
 

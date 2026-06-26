@@ -188,6 +188,27 @@ def detect_covers(pdf_path, id_regex=r"^(\d+)-(\d+)$"):
     return covers
 
 
+_COVER_IDS_CACHE = {}
+
+
+def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
+    """Distinct student ids whose cover page can be decoded from the scan.
+
+    Rasterising + barcode decoding is expensive, so results are cached by
+    (path, mtime, size): repeated calls for an untouched file are free.
+    """
+    try:
+        stat = os.stat(scan_path)
+    except OSError:
+        return []
+    key = (os.path.abspath(scan_path), stat.st_mtime, stat.st_size, id_regex)
+    cached = _COVER_IDS_CACHE.get(key)
+    if cached is None:
+        cached = sorted(detect_covers(scan_path, id_regex).keys())
+        _COVER_IDS_CACHE[key] = cached
+    return cached
+
+
 def render_results(render_data, scanned_pdf_path, out_path, id_regex=r"^(\d+)-(\d+)$"):
     students = render_data.get("students", [])
     covers, original = {}, None

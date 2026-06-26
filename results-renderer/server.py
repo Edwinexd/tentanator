@@ -11,7 +11,7 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from renderer import render_results
+from renderer import cover_ids, render_results
 
 API = os.getenv("TENTANATOR_API", "http://backend:8787")
 DATA = os.getenv("TENTANATOR_DATA_DIR", "/data")
@@ -24,9 +24,34 @@ class RenderReq(BaseModel):
     scanned_pdf: Optional[str] = None
 
 
+class CoversReq(BaseModel):
+    scanned_pdf: str
+
+
+def _resolve_scan(scanned_pdf: str) -> str:
+    fname = os.path.basename(scanned_pdf)  # no path traversal
+    for sub in ("scans", "exams", ""):
+        cand = os.path.join(DATA, sub, fname)
+        if os.path.exists(cand):
+            return cand
+    raise HTTPException(404, f"scanned PDF not found: {scanned_pdf}")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/covers")
+def covers(req: CoversReq):
+    """Count the distinct cover pages (barcodes) decodable from a scanned PDF.
+
+    Used by the backend to offer only scans whose front-page count matches the
+    examination's student count.
+    """
+    scan = _resolve_scan(req.scanned_pdf)
+    ids = cover_ids(scan)
+    return {"filename": os.path.basename(scan), "count": len(ids), "ids": ids}
 
 
 @app.post("/render")
@@ -39,16 +64,7 @@ def render(req: RenderReq):
         raise HTTPException(502, f"render-data fetch failed: {r.text}")
     data = r.json()
 
-    scanned = None
-    if req.scanned_pdf:
-        fname = os.path.basename(req.scanned_pdf)  # no path traversal
-        for sub in ("scans", "exams", ""):
-            cand = os.path.join(DATA, sub, fname)
-            if os.path.exists(cand):
-                scanned = cand
-                break
-        if scanned is None:
-            raise HTTPException(400, f"scanned PDF not found: {req.scanned_pdf}")
+    scanned = _resolve_scan(req.scanned_pdf) if req.scanned_pdf else None
 
     out_path = os.path.join(DATA, "graded_exams", f"{req.exam}_results.pdf")
     try:

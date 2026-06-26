@@ -13,7 +13,15 @@ const tabs: { id: Tab; label: string; to: string }[] = [
 
 export function ExamNav({ name, active }: { name: string; active: Tab }) {
   return (
-    <div className="flex items-center justify-between border-b pb-2">
+    <div className="space-y-2 border-b pb-2">
+      <div className="flex items-center justify-between gap-2">
+        <div className="truncate text-sm text-muted-foreground">
+          Exam: <span className="font-semibold text-foreground">{name}</span>
+        </div>
+        <Link to="/">
+          <Button variant="link" size="sm">← exams</Button>
+        </Link>
+      </div>
       <div className="flex gap-1">
         {tabs.map((t) => (
           <Link key={t.id} to={t.to} params={{ name }}>
@@ -26,9 +34,6 @@ export function ExamNav({ name, active }: { name: string; active: Tab }) {
           </Link>
         ))}
       </div>
-      <Link to="/">
-        <Button variant="link" size="sm">← exams</Button>
-      </Link>
     </div>
   )
 }

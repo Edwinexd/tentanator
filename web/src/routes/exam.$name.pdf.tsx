@@ -1,7 +1,7 @@
 import { FileText, Upload, Download, Printer, Scan } from 'lucide-react'
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useState, type ChangeEvent } from 'react'
-import { api } from '#/lib/api'
+import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
+import { api, type ScanMatch } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 import { Button } from '#/components/ui/button'
 import { Label } from '#/components/ui/label'
@@ -26,25 +26,45 @@ export const Route = createFileRoute('/exam/$name/pdf')({ component: PdfView })
 
 function PdfView() {
   const { name } = Route.useParams()
-  const [scans, setScans] = useState<string[]>([])
+  const [scans, setScans] = useState<ScanMatch[]>([])
   const [scan, setScan] = useState('')
   const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [pdfPath, setPdfPath] = useState<string | null>(null)
 
+  const loadScans = useCallback(
+    () => api.listExamScans(name).then((s) => { setScans(s); return s }).catch(() => [] as ScanMatch[]),
+    [name],
+  )
+
   useEffect(() => {
-    api.listScans().then(setScans).catch(() => {})
-  }, [])
+    void loadScans()
+  }, [loadScans])
+
+  // Only scans whose decodable front-page count equals the student count may
+  // supply cover pages; the rest are reported but not selectable.
+  const eligible = scans.filter((s) => s.matches)
+  const needed = scans[0]?.needed
+  const hidden = scans.length - eligible.length
 
   async function onUpload(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]
     if (!f) return
     setError(null)
+    setInfo(null)
     try {
       const { filename } = await api.uploadScan(f)
-      setScan(filename)
-      setScans((prev) => (prev.includes(filename) ? prev : [...prev, filename]))
+      const refreshed = await loadScans()
+      if (refreshed.find((s) => s.filename === filename)?.matches) {
+        setScan(filename)
+      } else {
+        const got = refreshed.find((s) => s.filename === filename)?.covers
+        setInfo(
+          `Uploaded ${filename}, but its front-page count (${got ?? 'unknown'}) does not match ` +
+            `the ${needed ?? '?'} students, so it can't be used for cover pages.`,
+        )
+      }
     } catch (err) {
       setError((err as Error).message)
     }
@@ -86,7 +106,7 @@ function PdfView() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-8">
+    <div className="mx-auto max-w-4xl space-y-4 p-8">
       <ExamNav name={name} active="pdf" />
       <h1 className="text-2xl font-bold">Results PDF</h1>
 
@@ -103,16 +123,34 @@ function PdfView() {
         <CardContent className="space-y-4">
           <div className="space-y-2">
             <Label>Scanned exam PDF (optional — prepends cover pages matched by barcode)</Label>
-            <Select value={scan} onValueChange={setScan}>
+            <Select value={scan} onValueChange={setScan} disabled={eligible.length === 0}>
               <SelectTrigger>
                 <SelectValue placeholder="No scan selected" />
               </SelectTrigger>
               <SelectContent>
-                {scans.map((f) => (
-                  <SelectItem key={f} value={f}>{f}</SelectItem>
+                {eligible.map((f) => (
+                  <SelectItem key={f.filename} value={f.filename}>
+                    {f.filename} ({f.covers} front pages)
+                  </SelectItem>
                 ))}
               </SelectContent>
             </Select>
+            {eligible.length === 0 ? (
+              <p className="text-sm text-muted-foreground">
+                No scan matches this exam
+                {needed !== undefined
+                  ? ` (need ${needed} front page${needed === 1 ? '' : 's'}, one per student)`
+                  : ''}
+                . Only scans whose front-page count matches exactly are offered for cover pages.
+              </p>
+            ) : (
+              hidden > 0 && (
+                <p className="text-xs text-muted-foreground">
+                  {hidden} scan{hidden === 1 ? '' : 's'} hidden (front-page count ≠ {needed}{' '}
+                  student{needed === 1 ? '' : 's'}).
+                </p>
+              )
+            )}
           </div>
 
           <div className="flex items-center gap-2 text-sm text-muted-foreground">

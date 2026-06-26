@@ -118,6 +118,13 @@ export interface RenderData {
   students: RenderStudent[]
 }
 
+export interface ScanMatch {
+  filename: string
+  covers: number | null
+  needed: number
+  matches: boolean
+}
+
 // ---------------------------------------------------------------------------
 // Request structs
 // ---------------------------------------------------------------------------
@@ -266,6 +273,7 @@ export const api = {
   // --- exam files on disk ---
   listExamFiles: () => req<string[]>('GET', '/api/exam-files'),
   listScans: () => req<string[]>('GET', '/api/scans'),
+  listExamScans: (name: string) => req<ScanMatch[]>('GET', `/api/exams/${enc(name)}/scans`),
   examColumns: (file: string) => req<string[]>('GET', `/api/exam-files/${enc(file)}/columns`),
   examRows: (file: string) =>
     req<{ rows: ExamRow[] }>('GET', `/api/exam-files/${enc(file)}/rows`).then((r) => r.rows),
