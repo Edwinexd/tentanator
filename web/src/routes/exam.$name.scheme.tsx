@@ -85,11 +85,7 @@ function SchemeView() {
         })
         setCfg(cfgList)
         if (e.scheme) {
-          const s = e.scheme
-          const parts = [`constants: ${JSON.stringify(s.constants)}`]
-          if (s.vars?.length) parts.push(s.vars.map((v) => `${v.name} = ${v.expr}`).join('\n'))
-          if (s.rules?.length) parts.push(s.rules.map((r) => `when ${r.when} -> ${r.grade}`).join('\n'))
-          setSchemeText(parts.join('\n\n'))
+          setSchemeText(JSON.stringify(e.scheme, null, 2))
         } else {
           setSchemeText('')
         }
