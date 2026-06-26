@@ -1,496 +1,141 @@
-# Tentanator - AI-Powered CSV Exam Grading Assistant
+# Tentanator
 
-Tentanator is a Python-based intelligent grading system that combines manual grading with OpenAI fine-tuning to streamline exam grading workflows. It enables educators to grade a sample of responses manually, train custom AI models on that data, and automatically grade the remaining responses with AI assistance.
+AI-assisted exam grading. Grade a representative sample of responses by hand,
+then let the graded examples drive in-context-learning (few-shot) suggestions for
+the rest. Reads and writes Excel (`.xlsx`) and CSV natively, and can render a
+results PDF per student.
 
-## Features
+The grading loop:
 
-- **Interactive CSV Grading Interface**: Grade exam responses directly from CSV files with a user-friendly CLI
-- **AI-Assisted Grading**: After grading sample responses, use fine-tuned GPT models to suggest grades for remaining responses
-- **Content Moderation**: Automatic filtering of harmful content before training with OpenAI's moderation API
-- **OpenAI Fine-Tuning Integration**: Automatically export graded data to JSONL format and train custom grading models
-- **Session Persistence**: Resume grading sessions at any time with automatic session saving
-- **Smart Sampling**: Choose from multiple sampling algorithms (KMeans, maximin, random, GPTSort) to select representative responses
-- **Smart Auto-Grading**: Automatically assigns grade "0" to blank or dash responses
-- **Batch Export**: Export fully graded CSV files with all grades filled in
-- **Excel Export**: Convert graded CSV files to Excel format with auto-adjusted column widths
-- **Model Registry**: Track and manage all fine-tuned models for different questions
-- **Global Question Bank**: Link questions across multiple exams to build comprehensive training datasets
+1. Import an exam file (student responses) and map its ID / input / output
+   columns.
+2. Sample a representative subset per question (`random` or embedding-based
+   `maximin`).
+3. Grade the sample by hand.
+4. Once enough examples exist, the backend builds a few-shot prompt and asks the
+   LLM to suggest grades for the remaining responses; you review and accept or
+   override.
+5. Define a grade scheme, compute results, and export Excel / Daisy / CSV / a
+   results PDF.
 
-## Installation
+## Architecture
 
-### Prerequisites
+Tentanator is a shared model with two interchangeable thin clients. Read
+[ARCHITECTURE.md](ARCHITECTURE.md) for the full contract and design.
 
-- Python 3.8 or higher
-- OpenAI API key (for AI-assisted grading features)
-
-### Setup
-
-1. Clone the repository:
-```bash
-git clone https://github.com/Edwinexd/tentanator.git
-cd tentanator
+```
+                 ┌─────────────────────────────┐
+                 │      backend/  (Rust)        │
+                 │  Axum HTTP API = the model   │
+                 │  domain · sampling · ICL ·   │
+                 │  persistence · LLM clients   │
+                 └──────────────┬──────────────┘
+                                │ HTTP/JSON
+                 ┌──────────────┴──────────────┐
+        ┌────────┴────────┐          ┌──────────┴──────────┐
+        │  tui/  (Python) │          │  web/  (TanStack)   │
+        │  Textual client │          │  React client       │
+        └─────────────────┘          └─────────────────────┘
 ```
 
-2. Create a virtual environment:
+- **`backend/`** (Rust + Axum) is the single source of truth: column mapping,
+  sampling, ICL prompts, LLM calls, the examination/scheme engine, persistence
+  (an embedded Turso database), and all exports. No business logic lives in a
+  client.
+- **`tui/`** (Python + Textual) and **`web/`** (TanStack Start + React) are thin
+  clients over the same HTTP API. They have parity: anything one can do, the
+  other can too.
+- **`results-renderer/`** (Python) renders the per-student results PDF (LaTeX /
+  poppler / barcodes), too heavy to reimplement in Rust.
+
+DTO types shared with the web client are generated from the Rust structs via
+ts-rs; do not hand-edit `web/src/lib/generated/`. The TUI, web client and docs
+are kept in lockstep with the backend contract, checked by
+`scripts/check_api_parity.py` in CI.
+
+## Quick start (Docker)
+
+The whole stack runs from `docker-compose.yml`; you only need Docker.
+
 ```bash
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+# 1. (optional) API keys. Manual grading + random sampling work without them;
+#    embeddings (maximin) and AI suggestions need them.
+cp .env.example .env        # then set OPENAI_API_KEY / CEREBRAS_API_KEY
+
+# 2. Drop exam files (.xlsx / .csv) into the data dir (the repo root)
+mkdir -p exams && cp /path/to/your-exam.xlsx exams/
+#    For results PDFs with cover pages, also: cp scanned-exam.pdf scans/
+
+# 3. Start the backend + web UI
+docker compose up -d --build
+
+# 4. Use it
+open http://localhost:3000          # web UI (grade, sample, export)
+docker compose run --rm tui         # interactive terminal UI (Ctrl+Q to quit)
+
+docker compose logs -f backend      # tail logs
+docker compose down                 # stop everything
 ```
 
-3. Install dependencies:
+Graded exports land in `./graded_exams/`; the database is `./.tentanator.db`.
+Files written by the backend container are root-owned, so `sudo chown -R "$USER" .`
+if you need to edit them directly.
+
+## Running locally (without Docker)
+
+Three processes. Keys come from the repo-root `.env`.
+
 ```bash
+# Backend (serves the model on :8787)
+cd backend && TENTANATOR_DATA_DIR=.. cargo run        # or cargo run --release
+
+# TUI (separate terminal)
+cd tui && python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+TENTANATOR_API=http://127.0.0.1:8787 python app.py
+
+# Web (separate terminal)
+cd web && npm install
+VITE_API_BASE=http://127.0.0.1:8787 npm run dev       # http://localhost:3000
 ```
 
-4. Set up your OpenAI API key:
-Create a `.env` file in the project root:
-```env
-OPENAI_API_KEY=your-api-key-here
-```
+Backend tests: `cd backend && cargo test`.
 
-## Usage
+## LLM providers
 
-### Complete Grading Workflow
+- **Embeddings**: OpenAI `text-embedding-3-large` (for `maximin` sampling).
+- **Grading**: Cerebras `gpt-oss-120b` (OpenAI-compatible chat API), with a
+  low-effort summary pass to condense the reasoning chain.
 
-#### Step 1: Initial Setup and Sampling
+Keys come from `OPENAI_API_KEY` / `CEREBRAS_API_KEY`.
 
-1. **Start the grading application**:
-```bash
-python tentanator.py
-```
+## Data & legacy import
 
-2. **Select your CSV file**:
-   - Place exam CSV files in the `exams/` directory
-   - The program will list available files for selection
+Exam state (exams, sessions, questions, graded items, embedding caches, the
+cross-exam graded pool) lives in the Turso database. Only exam inputs (`exams/`),
+scans (`scans/`) and exported Excel (`graded_exams/`) stay as files. The data
+directory defaults to the repo root; override with `TENTANATOR_DATA_DIR`.
 
-3. **Configure column mappings**:
-   - Select ID columns (e.g., student ID, name)
-   - Select input columns (student responses to grade)
-   - Select output columns (where grades will be stored)
-   - Link to global question bank (optional, for cross-exam model reuse)
+Tentanator started as a single-file Python CLI; that code has been removed and
+replaced by `backend/` (the pre-rearchitecture source is in git history). The
+on-disk data the old app produced (`.tentanator_sessions/`, `workspaces/`) is
+not migrated on startup but can be imported on demand from the home screen. See
+[ARCHITECTURE.md](ARCHITECTURE.md) "Legacy import".
 
-4. **Choose sampling method** (configurable in `tentanator.py`):
-   - `kmeans_auto`: Automatically determines optimal clusters (recommended)
-   - `kmeans_fixed`: Fixed number of clusters
-   - `maximin`: Diversity-based sampling
-   - `random`: Random selection
-   - `gptsort`: GPT-based quality sorting
-   - Default: 25 representative samples per question
+## CI/CD
 
-#### Step 2: Grade Sample Responses
-
-5. **Grade the selected samples**:
-   - Grade the representative samples shown by the system
-   - Minimum 25 valid responses required per question (configurable)
-   - Use commands:
-     - `q` - quit and save session
-     - `s` - skip current response
-     - `b` - go back to previous response
-     - Type grade value directly
-   - Session is auto-saved after each grade
-
-6. **Export training data**:
-   - After reaching the minimum sample threshold (default: 25)
-   - Choose to export to JSONL format for OpenAI fine-tuning
-   - Training data saved in `training_data/` directory
-   - Enter exam question text when prompted (used in training)
-
-#### Step 3: Train the AI Model
-
-7. **Run the training module**:
-```bash
-python openai_trainer.py
-```
-
-8. **Configure and start training**:
-   - Select JSONL file(s) to train (or choose "all" for batch training)
-   - **Content moderation runs automatically**:
-     - Each training example is checked for harmful content
-     - Flagged examples are excluded from training
-     - Statistics displayed: total examples, flagged count, categories
-     - Training aborted if >50% of content is flagged
-   - Upload proceeds with clean examples only
-   - Fine-tuning job is created and monitored
-
-9. **Monitor training progress**:
-   - Training typically takes 10-30 minutes per model
-   - OpenAI allows up to 6 concurrent fine-tuning jobs
-   - Models are automatically registered in `models.json` when complete
-   - Global question IDs link models across exams
-
-#### Step 4: AI-Assisted Grading
-
-10. **Resume grading with trained model**:
-```bash
-python tentanator.py
-```
-
-11. **Select the same session**:
-   - System detects available trained models
-   - AI automatically suggests grades for remaining responses
-   - Pre-computes suggestions for smooth grading experience
-
-12. **Review and finalize**:
-   - Review AI suggestions (shown before each response)
-   - Press `[Enter]` to accept suggestion
-   - Type grade value to override
-   - All grades are recorded with timestamps
-   - Export final CSV when complete
-
-### File Formats
-
-Both `.xlsx` and `.csv` are read directly by `tentanator.py` (see
-`read_exam_data()`), so no pre-conversion step is required. Graded output is
-written as `.xlsx` to `graded_exams/`.
-
-### Configuration Options
-
-Key settings in `tentanator.py`:
-
-```python
-GRADING_THRESHOLD = 25              # Minimum manual grades before training
-NUM_REPRESENTATIVE_SAMPLES = 25     # Number of samples to grade
-SAMPLING_ALGORITHM = "kmeans_auto"  # Sampling method
-```
-
-Available sampling algorithms:
-- `kmeans_auto`: Automatically determines optimal number of clusters
-- `kmeans_fixed`: Uses fixed number of clusters
-- `maximin`: Maximizes diversity in selected samples
-- `random`: Random selection
-- `gptsort`: Uses GPT to sort responses by quality
-
-### Content Moderation
-
-All training data is automatically moderated before upload to OpenAI:
-
-**Moderation Categories Checked**:
-- Harassment and threatening content
-- Hate speech and threatening hate
-- Illicit content and violent instructions
-- Self-harm content, intent, and instructions
-- Sexual content and minors
-- Violence and graphic violence
-
-**Moderation Behavior**:
-- Individual messages (system, user, assistant) are checked
-- Flagged examples are automatically excluded from training
-- Detailed statistics shown: total, flagged count, categories
-- Training prevented if >50% of content is flagged
-- Fails open if moderation API encounters errors
-
-**To disable moderation** (not recommended):
-```python
-trainer.upload_training_file(filepath, question_name, moderate=False)
-```
-
-### Project Structure
-
-```
-tentanator/
-├── tentanator.py              # Main grading application
-├── openai_trainer.py          # OpenAI fine-tuning module with moderation
-├── sampling.py                # Sampling algorithms (KMeans, maximin, etc.)
-├── embeddings.py              # OpenAI embeddings wrapper
-├── global_bank.py             # Global question bank management
-├── test_moderation.py         # Moderation testing suite
-├── requirements.txt           # Python dependencies
-├── .env                       # API keys (not in version control)
-├── exams_in/                  # Raw input exams (.xlsx or .csv)
-│   └── *.xlsx, *.csv
-├── exams/                     # Exams ready for grading (.xlsx or .csv)
-│   └── *.xlsx, *.csv
-├── graded_exams/              # Output .xlsx files with grades
-│   └── *.xlsx
-├── training_data/             # JSONL files for fine-tuning
-│   ├── *.jsonl                # Combined training files
-│   └── partials/              # Per-exam training data
-│       └── *.jsonl
-├── .tentanator_sessions/      # Saved grading sessions
-│   └── *.json
-├── global_bank.json           # Global question bank registry
-├── models.json                # Registry of fine-tuned models
-└── .tentanator_training_session.json  # Saved training session
-```
-
-## Key Components
-
-### tentanator.py
-
-The main application module containing:
-
-- **Data Classes**:
-  - `GradedItem`: Individual graded response
-  - `QuestionGrades`: Grades for a single question
-  - `GradingSession`: Complete grading session data
-
-- **Core Functions**:
-  - `grade_questions()`: Main interactive grading interface
-  - `export_to_csv()`: Export graded data to CSV
-  - `export_to_jsonl()`: Export training data for fine-tuning
-  - `get_ai_grade_suggestion()`: Get grade suggestions from trained models
-
-### openai_trainer.py
-
-The OpenAI fine-tuning module with content moderation:
-
-- **Data Classes**:
-  - `FineTuningConfig`: Configuration for training jobs
-  - `TrainingFile`: Uploaded training file metadata
-  - `FineTuningJob`: Fine-tuning job tracking
-  - `ModelRegistry`: Registry of trained models
-
-- **OpenAITrainer Class**:
-  - `moderate_content()`: Check content using OpenAI moderation API
-  - `validate_and_moderate_jsonl()`: Validate format and filter harmful content
-  - `validate_jsonl_file()`: Validate training data format (no moderation)
-  - `upload_training_file()`: Upload data to OpenAI (with moderation by default)
-  - `create_fine_tuning_job()`: Start fine-tuning
-  - `monitor_job()`: Track job progress
-  - `batch_grade_with_model()`: Grade multiple responses
-
-### sampling.py
-
-Implements various sampling algorithms for selecting representative responses:
-
-- **SamplingAlgorithm**: Type definition for available algorithms
-- **Functions**:
-  - `kmeans_sample()`: K-means clustering with auto/fixed cluster selection
-  - `maximin_sample()`: Maximize diversity using maximin distance
-  - `random_sample()`: Simple random sampling
-  - `gptsort_sample()`: GPT-based quality sorting
-  - `select_representative_samples()`: Main interface for all algorithms
-
-### embeddings.py
-
-Wrapper for OpenAI text embeddings:
-
-- Uses `text-embedding-3-large` model
-- Async API calls for performance
-- Caching for repeated requests
-
-## Quick Start Workflow
-
-### First Time Setup
-
-```bash
-# 1. Setup and configure
-python tentanator.py
-# → Choose exam file from exams/ (.xlsx or .csv)
-# → Map ID, input, and output columns
-# → Link to global question bank (optional)
-# → Grade 25 representative samples (default)
-# → Export to JSONL when prompted
-
-# 2. Train AI models
-python openai_trainer.py
-# → Select "all" to train all untrained files
-# → Content moderation runs automatically
-# → Wait 10-30 minutes per model
-# → Models registered automatically
-
-# 3. Complete grading with AI assistance
-python tentanator.py
-# → Select the same session
-# → AI suggests grades for remaining responses
-# → Review and accept/modify suggestions
-# → Final graded .xlsx written to graded_exams/
-```
-
-### Detailed Workflow Example
-
-**Day 1: Setup and Initial Grading**
-1. Place the exam (`.xlsx` or `.csv`) in `exams/`
-2. Run `python tentanator.py`
-3. Configure column mappings (ID: "Student ID", Input: "Response Q1", Output: "Grade Q1")
-4. Link to global question "Calculus Derivatives" in global bank
-5. System selects 25 representative samples using KMeans clustering
-6. Grade the 25 samples (takes ~10-15 minutes)
-7. Export to JSONL → creates `gq1_exam1_Grade_Q1.jsonl`
-8. Quit and save session
-
-**Day 1: Train Model**
-1. Run `python openai_trainer.py`
-2. Content moderation checks all 25 examples
-   - Example output: "Valid: 24 training examples (excluded 1 flagged)"
-   - Flagged categories: harassment (1 example excluded)
-3. Upload proceeds with 24 clean examples
-4. Fine-tuning job created (Job ID: ftjob-xxx)
-5. Wait 15-20 minutes for completion
-6. Model registered as `ft:gpt-4-mini:...:tentanator_grade_q1:xxx`
-
-**Day 2: Complete Grading**
-1. Run `python tentanator.py`
-2. Select existing session "exam1_..."
-3. System loads trained model for "Grade Q1"
-4. AI pre-computes suggestions for next 5 responses
-5. Review each suggestion, press Enter to accept or type override
-6. Complete all 200 remaining responses (~15-20 minutes)
-7. Final graded file written to `graded_exams/exam1.xlsx`
-
-**Future Exams: Reuse Model**
-1. Load `exam2.csv` with same question
-2. Link to same global question "Calculus Derivatives"
-3. Grade 25 new samples → adds to existing training data
-4. Retrain model with combined data from both exams
-5. Use improved model for grading
-
-## Features in Detail
-
-### Session Persistence
-- All grading progress is automatically saved after each grade
-- Sessions stored in `.tentanator_sessions/` directory
-- Sessions can be resumed at any time
-- Tracks graded items, timestamps, embeddings cache, and configuration
-- Multiple sessions can be active for different exams
-
-### Smart Grading Logic
-- Blank or dash responses auto-graded as "0"
-- Valid response counter excludes auto-graded items
-- Configurable threshold (default: 25 valid responses) required for training
-- Representative sampling reduces manual grading workload
-
-### Sampling Algorithms
-- **KMeans Auto**: Automatically determines optimal clusters using silhouette scoring
-- **KMeans Fixed**: Uses specified number of clusters
-- **Maximin**: Selects diverse samples by maximizing minimum distance
-- **Random**: Simple random selection (baseline)
-- **GPTSort**: Uses GPT to sort responses by quality without embeddings
-
-### Global Question Bank
-- Links identical questions across multiple exams
-- Combines training data from all linked exams
-- Single model trained on data from multiple exam iterations
-- Improves model accuracy with larger, more diverse datasets
-- Tracked in `global_bank.json`
-
-### Content Moderation
-- **Automatic**: Runs by default on all training data before upload
-- **Categories**: 13 moderation categories checked (harassment, hate, violence, etc.)
-- **Statistics**: Detailed reporting of flagged content and categories
-- **Safety**: Training prevented if >50% of content is flagged
-- **Transparent**: Shows which examples were excluded and why
-- **Fail-Safe**: Fails open if moderation API encounters errors
-
-### AI Integration
-- Pre-computes suggestions for smoother grading experience
-- Rolling window of 5 suggestions cached for performance
-- Models matched to questions by global question ID or normalized naming
-- Base system prompt includes exam question for context
-
-### Export and Import Options
-- **CSV Export**: Complete graded exam file with all grades
-- **JSONL Export**: OpenAI fine-tuning format with moderation
-- **Partial Files**: Per-exam training data in `partials/` subdirectory
-- **Combined Files**: Merged training data for global questions
-- **Excel Export**: Formatted .xlsx files with auto-adjusted columns
-- **Excel Import**: Convert Excel files to CSV format for grading
-
-## Tips and Best Practices
-
-1. **Use Representative Sampling**: The default `kmeans_auto` algorithm selects diverse samples, reducing the amount of manual grading needed while maintaining quality
-
-2. **Consistent Grading**: Be consistent in your manual grading as the AI will learn from your patterns
-
-3. **Link Global Questions**: Use the global question bank to combine training data across multiple exam iterations for more accurate models
-
-4. **Monitor Content Moderation**: Check moderation statistics to ensure your training data is appropriate and unbiased
-
-5. **Review AI Suggestions**: Always review AI-suggested grades, especially for edge cases or unusual responses
-
-6. **Gradual Improvement**: Models improve with more training data - consider retraining after grading multiple exams
-
-7. **Backup Sessions**: Session files are automatically created in `.tentanator_sessions/` but consider backing up important grading data
-
-8. **Model Management**: Use `models.json` to track which models are trained for which questions and when they were created
-
-9. **Batch Training**: Use "all" option in `openai_trainer.py` to train multiple models simultaneously (up to 6 concurrent jobs)
-
-10. **Quality Over Quantity**: 25 well-chosen representative samples often perform better than 50+ random samples
-
-## Troubleshooting
-
-### Common Issues
-
-**Missing API Key**
-- Ensure `.env` file exists in project root with valid `OPENAI_API_KEY`
-- Test with: `python -c "import dotenv; dotenv.load_dotenv(); import os; print('OK' if os.getenv('OPENAI_API_KEY') else 'MISSING')"`
-
-**Session Recovery**
-- Sessions stored in `.tentanator_sessions/` directory
-- If corrupted, backup and delete the specific session JSON file
-- Start fresh by selecting "New session" in tentanator.py
-
-**Training Failures**
-- Check OpenAI dashboard for quota or billing issues
-- Verify moderation didn't exclude too many examples (>50%)
-- Ensure minimum 10 examples remain after moderation
-- OpenAI limits: 6 concurrent fine-tuning jobs
-
-**Content Moderation Blocking Training**
-- Review which categories are being flagged
-- Check if student responses contain inappropriate content
-- Consider if content is genuinely problematic or false positive
-- If false positive, contact OpenAI support or manually review
-
-**CSV Format Issues**
-- Ensure CSV files have proper headers in first row
-- Use UTF-8 encoding (not ASCII or Latin-1)
-- Avoid special characters in column names
-- Check for consistent delimiter (comma vs semicolon)
-
-**Model Not Found**
-- Verify model is registered in `models.json`
-- Check global question ID matches between session and model
-- Ensure fine-tuning job completed successfully
-- Run `python openai_trainer.py` to check job status
-
-**Slow Performance**
-- Embeddings are cached after first use
-- First-time sampling may take 1-2 minutes for large datasets
-- AI suggestions are pre-computed in batches of 5
-- Consider using `random` sampling for faster initial selection
-
-## Requirements
-
-### Python Dependencies
-
-- Python 3.8+
-- openai>=1.0.0 (for fine-tuning and moderation APIs)
-- python-dotenv>=1.0.0 (for environment variable management)
-- pandas>=2.0.0 (for CSV processing)
-- openpyxl>=3.1.0 (for Excel export)
-- scikit-learn (for KMeans clustering and embeddings)
-- numpy (for numerical operations)
-
-### OpenAI API Access
-
-- Valid OpenAI API key with access to:
-  - Fine-tuning API (GPT-4 Mini recommended)
-  - Moderation API (free)
-  - Embeddings API (for sampling algorithms)
-  - Chat completions (for GPTSort sampling)
-
-### Costs Estimate
-
-- **Embeddings**: ~$0.13 per 1M tokens (text-embedding-3-large)
-- **Fine-tuning**: ~$3.00 per 1M tokens training (gpt-4.1-mini)
-- **Inference**: ~$0.30 per 1M tokens (fine-tuned model)
-- **Moderation**: Free
-- **Example**: 200 responses × 100 words each = ~26,700 tokens
-  - Embeddings: <$0.01
-  - Fine-tuning (25 samples): <$0.10
-  - Inference (175 graded): ~$0.01
-  - **Total per exam: ~$0.12**
+`.github/workflows/ci.yml` runs `cargo test`, the contract-parity check and the
+web typecheck on every push/PR, then on `master` and `v*` tags builds and
+publishes `ghcr.io/<owner>/tentanator-{backend,web,tui}`.
 
 ## License
 
-GNU Affero General Public License - See LICENSE file for details
+GNU Affero General Public License. See [LICENSE](LICENSE).
 
 ## Contributing
 
-Contributions are welcome! Please ensure all code follows the existing patterns:
-- Type hints for all functions
-- Dataclasses for data structures
-- Comprehensive error handling
-- Session persistence for long-running operations
+Contributions are welcome. The backend owns all domain logic; keep the TUI and
+web client at parity and the contract tables in ARCHITECTURE.md in sync (run
+`python scripts/check_api_parity.py`). DTOs are generated from the Rust structs,
+so change the struct and run `cd backend && cargo test export_bindings` rather
+than editing generated files.

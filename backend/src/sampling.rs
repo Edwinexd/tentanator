@@ -1,6 +1,6 @@
 //! Embedding-based sample selection. Only two strategies are supported:
 //! `random` and `maximin` (max-spread / farthest-first), ported from
-//! `maximin_sampling` in the legacy `sampling.py`.
+//! `maximin_sampling` in the original Python `sampling.py`.
 
 use rand::seq::SliceRandom;
 use serde::Deserialize;

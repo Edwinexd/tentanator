@@ -28,13 +28,15 @@ two interchangeable controllers (clients):
   over the HTTP API.
 - **web/** — TanStack Start React app. Thin client over the same HTTP API.
 
-The legacy Python files (`tentanator.py`, `sampling.py`, etc.) remain at the
-repo root as the reference implementation while the port proceeds.
+The original single-file Python app (`tentanator.py`, `sampling.py`, etc.) has
+been removed; its behaviour now lives in `backend/`. The pre-rearchitecture code
+is in git history, and the data it produced is still importable (see "Legacy
+import" below).
 
 ## Scope changes from the legacy app
 
 - **Fine-tuning is dropped.** ICL (few-shot prompting) is the only grading path.
-  `openai_trainer.py` and the JSONL training export are not ported.
+  The old OpenAI fine-tuning flow and the JSONL training export are not ported.
 - **Sampling is reduced to two embedding-based strategies**: `random` and
   `maximin` (max-spread / farthest-first). KMeans, IsolationForest+GMM, PCA and
   GPTSort are not ported.

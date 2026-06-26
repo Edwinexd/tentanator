@@ -1,6 +1,6 @@
 //! Grade parsing: a grade is a plain number or a signed sum of subpart scores,
 //! e.g. "5", "7.5", "-0.5", "2+1.5+2.5", "2+2.5-0.5". Whitespace is ignored.
-//! Ported from `evaluate_grade` / `validate_grade` in the legacy `tentanator.py`.
+//! Ported from `evaluate_grade` / `validate_grade` in the original Python `tentanator.py`.
 
 /// Evaluate a grade expression into its numeric total, or `None` if malformed.
 pub fn evaluate_grade(grade_str: &str) -> Option<f64> {
