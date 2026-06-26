@@ -947,6 +947,14 @@ async fn get_results(
 ) -> AppResult<Json<ResultsResponse>> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
+    // Seed any grades from prefilled spreadsheet values not yet in the DB.
+    // `put_graded_item` is an upsert, so this is safe to run every time.
+    {
+        let conn = s.db().await;
+        store::seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await?;
+    }
+    // Reload to pick up newly seeded grades.
+    let exam = load_exam_or_404(&s, &name).await?;
     let mut resp = match &exam.scheme {
         Some(scheme) => compute_results(&exam, &rows, scheme),
         None => ResultsResponse {
