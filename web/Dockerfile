@@ -11,12 +11,11 @@ RUN npm run build
 FROM node:22-bookworm-slim
 WORKDIR /app
 
-COPY --from=builder /app/package.json /app/package-lock.json ./
-COPY --from=builder /app/node_modules ./node_modules
-COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/public ./public
-COPY --from=builder /app/.env.example ./
+# Nitro emits a self-contained server bundle under .output (server + client
+# assets), so no node_modules or source are needed at runtime.
+COPY --from=builder /app/.output ./.output
 
 EXPOSE 3000
 ENV NODE_ENV=production
-CMD ["node", "dist/server/server.js"]
+ENV PORT=3000
+CMD ["node", ".output/server/index.mjs"]
