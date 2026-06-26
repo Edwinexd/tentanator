@@ -11,6 +11,22 @@ import { ExamNav } from '#/components/ExamNav'
 
 export const Route = createFileRoute('/exam/$name/scheme')({ component: SchemeView })
 
+// Built-in question types. `comment` is ungraded (points cells are "-", read as
+// 0); the results PDF renders it as student notes rather than a graded answer.
+const QTYPES: { v: string; l: string }[] = [
+  { v: '', l: '—' },
+  { v: 'mc', l: 'Multiple choice' },
+  { v: 'sc', l: 'Single choice' },
+  { v: 'essay', l: 'Essay' },
+  { v: 'comment', l: 'Comment (ungraded)' },
+]
+
+/** Resolve a stored qtype (possibly uppercase) to the canonical lowercase, or "". */
+function normQtype(v: string): string {
+  const lo = v.toLowerCase()
+  return QTYPES.some((t) => t.v === lo) ? lo : ''
+}
+
 function defaultScheme(cfg: QuestionConfigUpdate[]): GradeScheme {
   const sum = cfg.map((c) => c.var).filter(Boolean).join(' + ') || '0'
   return {
@@ -65,7 +81,7 @@ function SchemeView() {
             col,
             var: q?.var || `q${i + 1}`,
             group: q?.group || '',
-            qtype: q?.qtype || '',
+            qtype: normQtype(q?.qtype || ''),
             // Auto-imply the max from the sheet when not already configured.
             max_points: q?.max_points || mx[col] || 0,
             position: q?.position ?? i,
@@ -169,12 +185,17 @@ function SchemeView() {
           >
             set group
           </button>
-          <input
-            className="w-28 rounded border px-1"
-            placeholder="type"
+          <select
+            className="w-40 rounded border px-1"
             value={bulkType}
             onChange={(e) => setBulkType(e.target.value)}
-          />
+          >
+            {QTYPES.map((t) => (
+              <option key={t.v} value={t.v}>
+                {t.v ? t.l : 'type…'}
+              </option>
+            ))}
+          </select>
           <button
             onClick={() => applyToSelected(() => ({ qtype: bulkType }))}
             className="rounded border px-2 py-0.5 hover:bg-white"
@@ -216,7 +237,13 @@ function SchemeView() {
                 <td className="py-1 pr-2">{r.col}</td>
                 <td><input className="w-20 rounded border px-1" value={r.var} onChange={(e) => setRow(i, { var: e.target.value })} /></td>
                 <td><input className="w-24 rounded border px-1" value={r.group} onChange={(e) => setRow(i, { group: e.target.value })} /></td>
-                <td><input className="w-20 rounded border px-1" value={r.qtype} onChange={(e) => setRow(i, { qtype: e.target.value })} /></td>
+                <td>
+                  <select className="w-32 rounded border px-1" value={normQtype(r.qtype)} onChange={(e) => setRow(i, { qtype: e.target.value })}>
+                    {QTYPES.map((t) => (
+                      <option key={t.v} value={t.v}>{t.l}</option>
+                    ))}
+                  </select>
+                </td>
                 <td>
                   <input className="w-16 rounded border px-1" type="number" value={r.max_points} onChange={(e) => setRow(i, { max_points: Number(e.target.value) })} />
                   {colMax[r.col] ? <span className="ml-1 text-xs text-gray-400">/{colMax[r.col]}</span> : null}
