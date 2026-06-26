@@ -22,9 +22,31 @@ function defaultScheme(cfg: QuestionConfigUpdate[]): GradeScheme {
   }
 }
 
+/// Highest numeric value seen in each output column - a sensible default max.
+function maxPerColumn(cols: string[], rows: Record<string, string>[]): Record<string, number> {
+  const out: Record<string, number> = {}
+  for (const col of cols) {
+    let mx = 0
+    let seen = false
+    for (const r of rows) {
+      const v = parseFloat((r[col] ?? '').trim())
+      if (Number.isFinite(v)) {
+        seen = true
+        if (v > mx) mx = v
+      }
+    }
+    out[col] = seen ? mx : 0
+  }
+  return out
+}
+
 function SchemeView() {
   const { name } = Route.useParams()
   const [cfg, setCfg] = useState<QuestionConfigUpdate[]>([])
+  const [colMax, setColMax] = useState<Record<string, number>>({})
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkGroup, setBulkGroup] = useState('')
+  const [bulkType, setBulkType] = useState('')
   const [schemeText, setSchemeText] = useState('')
   const [preview, setPreview] = useState<ResultsResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -33,7 +55,10 @@ function SchemeView() {
   useEffect(() => {
     api
       .getExam(name)
-      .then((s: Exam) => {
+      .then(async (s: Exam) => {
+        const rows = await api.examRows(s.exam_file).catch(() => [])
+        const mx = maxPerColumn(s.output_columns, rows)
+        setColMax(mx)
         const initial = s.output_columns.map((col, i) => {
           const q = s.questions[col]
           return {
@@ -41,7 +66,8 @@ function SchemeView() {
             var: q?.var || `q${i + 1}`,
             group: q?.group || '',
             qtype: q?.qtype || '',
-            max_points: q?.max_points || 0,
+            // Auto-imply the max from the sheet when not already configured.
+            max_points: q?.max_points || mx[col] || 0,
             position: q?.position ?? i,
             estimate: q?.estimate || '',
           }
@@ -55,6 +81,24 @@ function SchemeView() {
   function setRow(i: number, patch: Partial<QuestionConfigUpdate>) {
     setCfg((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   }
+  // Apply a patch to selected rows (or all rows when nothing is selected).
+  function applyToSelected(patch: (r: QuestionConfigUpdate) => Partial<QuestionConfigUpdate>) {
+    setCfg((rows) =>
+      rows.map((r) => (selected.size === 0 || selected.has(r.col) ? { ...r, ...patch(r) } : r)),
+    )
+  }
+  function toggleSel(col: string) {
+    setSelected((s) => {
+      const n = new Set(s)
+      if (n.has(col)) n.delete(col)
+      else n.add(col)
+      return n
+    })
+  }
+  function toggleAll() {
+    setSelected((s) => (s.size === cfg.length ? new Set() : new Set(cfg.map((r) => r.col))))
+  }
+
   function parseScheme(): GradeScheme | null {
     try {
       return JSON.parse(schemeText) as GradeScheme
@@ -94,6 +138,8 @@ function SchemeView() {
     }
   }
 
+  const scope = selected.size === 0 ? 'all' : `${selected.size} selected`
+
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-8">
       <ExamNav name={name} active="scheme" />
@@ -105,11 +151,54 @@ function SchemeView() {
         <h2 className="mb-2 font-semibold">Question config</h2>
         <p className="mb-2 text-sm text-gray-500">
           <code>var</code> is the name used in scheme expressions; <code>group</code> is an
-          optional section tag (aggregate with <code>groupsum("tag")</code>).
+          optional section tag (aggregate with <code>groupsum("tag")</code>). Tick rows to bulk-edit
+          them; with none ticked, bulk actions apply to all.
         </p>
+
+        <div className="mb-2 flex flex-wrap items-center gap-2 rounded border bg-gray-50 p-2 text-sm">
+          <span className="text-gray-500">Bulk ({scope}):</span>
+          <input
+            className="w-28 rounded border px-1"
+            placeholder="group"
+            value={bulkGroup}
+            onChange={(e) => setBulkGroup(e.target.value)}
+          />
+          <button
+            onClick={() => applyToSelected(() => ({ group: bulkGroup }))}
+            className="rounded border px-2 py-0.5 hover:bg-white"
+          >
+            set group
+          </button>
+          <input
+            className="w-28 rounded border px-1"
+            placeholder="type"
+            value={bulkType}
+            onChange={(e) => setBulkType(e.target.value)}
+          />
+          <button
+            onClick={() => applyToSelected(() => ({ qtype: bulkType }))}
+            className="rounded border px-2 py-0.5 hover:bg-white"
+          >
+            set type
+          </button>
+          <button
+            onClick={() => applyToSelected((r) => ({ max_points: colMax[r.col] ?? r.max_points }))}
+            className="rounded border px-2 py-0.5 hover:bg-white"
+          >
+            max from sheet
+          </button>
+        </div>
+
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b text-left text-gray-500">
+              <th className="py-1">
+                <input
+                  type="checkbox"
+                  checked={cfg.length > 0 && selected.size === cfg.length}
+                  onChange={toggleAll}
+                />
+              </th>
               <th className="py-1">Question</th>
               <th>var</th>
               <th>group</th>
@@ -121,11 +210,17 @@ function SchemeView() {
           <tbody>
             {cfg.map((r, i) => (
               <tr key={r.col} className="border-b">
+                <td>
+                  <input type="checkbox" checked={selected.has(r.col)} onChange={() => toggleSel(r.col)} />
+                </td>
                 <td className="py-1 pr-2">{r.col}</td>
                 <td><input className="w-20 rounded border px-1" value={r.var} onChange={(e) => setRow(i, { var: e.target.value })} /></td>
-                <td><input className="w-20 rounded border px-1" value={r.group} onChange={(e) => setRow(i, { group: e.target.value })} /></td>
+                <td><input className="w-24 rounded border px-1" value={r.group} onChange={(e) => setRow(i, { group: e.target.value })} /></td>
                 <td><input className="w-20 rounded border px-1" value={r.qtype} onChange={(e) => setRow(i, { qtype: e.target.value })} /></td>
-                <td><input className="w-16 rounded border px-1" type="number" value={r.max_points} onChange={(e) => setRow(i, { max_points: Number(e.target.value) })} /></td>
+                <td>
+                  <input className="w-16 rounded border px-1" type="number" value={r.max_points} onChange={(e) => setRow(i, { max_points: Number(e.target.value) })} />
+                  {colMax[r.col] ? <span className="ml-1 text-xs text-gray-400">/{colMax[r.col]}</span> : null}
+                </td>
                 <td><input className="w-40 rounded border px-1" value={r.estimate ?? ''} onChange={(e) => setRow(i, { estimate: e.target.value })} placeholder="optional expr" /></td>
               </tr>
             ))}

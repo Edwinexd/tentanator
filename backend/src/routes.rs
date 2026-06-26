@@ -721,6 +721,12 @@ async fn suggest(
 ) -> AppResult<Json<AIGradeSuggestion>> {
     let exam = load_exam_or_404(&s, &name).await?;
     let question = exam.questions.get(&col).ok_or_else(|| no_question(&col))?;
+    if !llm::has_enough_icl(question) {
+        return Err(AppError::BadRequest(format!(
+            "AI suggestions need at least {} graded examples for this question",
+            llm::MIN_ICL_EXAMPLES
+        )));
+    }
 
     let id_columns = exam.id_columns.clone();
     let input_column = question.input_column.clone();

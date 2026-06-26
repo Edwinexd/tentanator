@@ -26,12 +26,14 @@ function ExamView() {
   const didInitCol = useRef(false)
   const [index, setIndex] = useState(0)
   const [gradeValue, setGradeValue] = useState('')
-  const [suggestion, setSuggestion] = useState<AIGradeSuggestion | null>(null)
+  // AI suggestions are cached/prefetched per (column,row) so moving to a row is
+  // instant; `pending` tracks in-flight fetches so the box can show progress.
+  const [suggestions, setSuggestions] = useState<Record<string, AIGradeSuggestion>>({})
+  const [pending, setPending] = useState<Record<string, boolean>>({})
   const [status, setStatus] = useState<QuestionStatus | null>(null)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSession, setActiveSession] = useState('default')
   const [autoSuggest, setAutoSuggest] = useState(true)
-  const autoSuggestedKey = useRef<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -118,24 +120,67 @@ function ExamView() {
 
   useEffect(() => {
     setIndex(0)
-    setSuggestion(null)
-    setGradeValue('')
   }, [col])
 
   useEffect(() => {
     if (col) api.questionStatus(name, col).then(setStatus).catch(() => setStatus(null))
   }, [name, col, exam])
 
-  // Auto-fetch an AI suggestion when landing on a new ungraded response, once
-  // there are enough graded examples (ICL ready). Toggle off to grade by hand.
+  const idCols = exam?.id_columns ?? []
+  const suggestKey = (c: string, r: ExamRow) => `${c}::${rowId(r, idCols)}`
+  const iclReady = status?.icl_ready ?? false
+
+  // Fetch (and cache) an AI suggestion for one row. No-op if cached, already
+  // in-flight, or the question isn't ICL-ready yet (N graded examples enforced).
+  async function fetchSuggestion(
+    targetCol: string,
+    row: ExamRow,
+  ): Promise<AIGradeSuggestion | undefined> {
+    if (!iclReady) return undefined
+    const key = suggestKey(targetCol, row)
+    if (suggestions[key]) return suggestions[key]
+    if (pending[key]) return undefined
+    setPending((p) => ({ ...p, [key]: true }))
+    try {
+      const s = await api.suggest(name, targetCol, rowId(row, idCols))
+      setSuggestions((m) => ({ ...m, [key]: s }))
+      return s
+    } catch {
+      return undefined // e.g. backend rejects until enough graded examples
+    } finally {
+      setPending((p) => {
+        const n = { ...p }
+        delete n[key]
+        return n
+      })
+    }
+  }
+
+  // Auto-prefetch the current and next ungraded responses so AI grades are ready
+  // on arrival. Gated on ICL readiness and the auto-suggest toggle.
   useEffect(() => {
-    if (!autoSuggest || busy || !current || !col || !status?.icl_ready) return
-    const key = `${col}::${rowId(current, exam?.id_columns ?? [])}`
-    if (autoSuggestedKey.current === key) return
-    autoSuggestedKey.current = key
-    void suggest()
+    if (!autoSuggest || !current || !col || !iclReady) return
+    void fetchSuggestion(col, current)
+    const next = ungraded[safeIndex + 1]
+    if (next) void fetchSuggestion(col, next)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoSuggest, current, col, status, busy])
+  }, [autoSuggest, current, col, iclReady, ungraded, safeIndex])
+
+  const curKey = current ? suggestKey(col, current) : ''
+  const curSuggestion = curKey ? suggestions[curKey] : undefined
+
+  // On moving to a different response, reset the grade box - prefilled from a
+  // ready suggestion (auto mode) or cleared so the grader starts fresh.
+  useEffect(() => {
+    setGradeValue(autoSuggest && curSuggestion ? curSuggestion.grade : '')
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curKey])
+
+  // Late-arriving suggestion (fetched after landing): fill if still untouched.
+  useEffect(() => {
+    if (autoSuggest && curSuggestion && gradeValue === '') setGradeValue(curSuggestion.grade)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [curSuggestion])
 
   async function save() {
     if (!current || !col) return
@@ -153,7 +198,6 @@ function ExamView() {
       )
       setExam((s) => (s ? { ...s, questions: { ...s.questions, [col]: updated } } : s))
       setGradeValue('')
-      setSuggestion(null)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -161,19 +205,10 @@ function ExamView() {
     }
   }
 
-  async function suggest() {
+  async function suggestNow() {
     if (!current || !col) return
-    setBusy(true)
-    setError(null)
-    try {
-      const s = await api.suggest(name, col, rowId(current, exam?.id_columns ?? []))
-      setSuggestion(s)
-      setGradeValue(s.grade)
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setBusy(false)
-    }
+    const s = await fetchSuggestion(col, current)
+    if (s) setGradeValue(s.grade)
   }
 
   async function sample(algorithm: Algorithm) {
@@ -273,6 +308,8 @@ function ExamView() {
   }
 
   const gradedCount = question?.graded_items.length ?? 0
+  const iclHave = (status?.valid_graded ?? 0) + (status?.external ?? 0)
+  const iclNeed = Math.max(0, (status?.min_icl_examples ?? 5) - iclHave)
   const det = detectQuestionPairs(fileColumns)
   const missing = det.output_columns.filter((c) => !exam.output_columns.includes(c))
 
@@ -395,14 +432,25 @@ function ExamView() {
             {current[inputCol]}
           </div>
 
-          {suggestion && (
-            <div className="rounded border-l-4 border-blue-500 bg-blue-50 p-3">
-              <div className="font-medium">AI grade: {suggestion.grade}</div>
-              {suggestion.reasoning_summary && (
-                <div className="mt-1 text-sm text-gray-600">{suggestion.reasoning_summary}</div>
-              )}
-            </div>
-          )}
+          <div className="min-h-[4.75rem] rounded border-l-4 border-blue-400 bg-blue-50 p-3 text-sm">
+            {curSuggestion ? (
+              <>
+                <div className="font-medium">AI grade: {curSuggestion.grade}</div>
+                {curSuggestion.reasoning_summary && (
+                  <div className="mt-1 text-gray-600">{curSuggestion.reasoning_summary}</div>
+                )}
+              </>
+            ) : pending[curKey] ? (
+              <span className="text-gray-500">Thinking…</span>
+            ) : !iclReady ? (
+              <span className="text-gray-500">
+                AI suggestions unlock after {status?.min_icl_examples ?? 5} graded examples
+                {' '}({iclHave} so far{iclNeed ? `, ${iclNeed} to go` : ''}).
+              </span>
+            ) : (
+              <span className="text-gray-400">No suggestion for this response.</span>
+            )}
+          </div>
 
           <div className="flex items-center gap-2">
             <input
@@ -415,11 +463,12 @@ function ExamView() {
               }}
             />
             <button
-              disabled={busy}
-              onClick={suggest}
+              disabled={busy || !iclReady || !!pending[curKey]}
+              onClick={suggestNow}
+              title={!iclReady ? `Needs ${iclNeed} more graded example(s)` : undefined}
               className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
             >
-              AI suggest
+              {pending[curKey] ? 'Thinking…' : 'AI suggest'}
             </button>
             <button
               disabled={busy}
