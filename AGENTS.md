@@ -18,7 +18,12 @@ The root Python files (`tentanator.py`, `sampling.py`, `openai_trainer.py`, …)
 
 ## Client parity (TUI ⇄ Web) — non-negotiable
 
-The TUI and Web never talk to each other; they are both thin clients over the backend. "Parity" therefore means **both clients fully and correctly cover the backend contract**. The backend is authoritative — no business logic lives in a client.
+**Core principle: the TUI must be able to do everything the Web GUI can — and vice versa.** The web is not the primary client with the TUI as a reduced companion; they are equals. Any user-facing capability shipped in `web/` is incomplete until the same task is doable in `tui/`, exactly as a backend route is incomplete until both clients cover it.
+
+The TUI and Web never talk to each other; they are both thin clients over the backend. Parity has two layers, both required:
+
+- **Contract parity** — both clients fully and correctly cover the backend contract. The backend is authoritative; no business logic lives in a client.
+- **Capability parity** — any task a user can complete in the Web GUI can also be completed in the TUI. Covering a route in `api.py` is necessary but not sufficient: the capability must be reachable through the TUI's own UI, not just its API layer.
 
 Rules when touching the contract:
 
@@ -27,7 +32,9 @@ Rules when touching the contract:
 - A change is "done" only when the backend, both client API layers, and the `ARCHITECTURE.md` contract tables all agree.
 - A consumer may intentionally omit an endpoint (e.g. browser-only blob downloads). Record such exclusions in `ALLOW_MISSING` rather than leaving them as silent gaps.
 
-Enforcement: `scripts/check_api_parity.py` extracts the `(method, path)` surface from `routes.rs`, both clients, and the doc tables, and fails if any drifts. It runs in CI (`py-check`); run it locally after any contract change. It is the cheapest layer — a backend-emitted OpenAPI spec with generated clients, then conformance tests driven from it, are the stronger follow-ons. Do not let the TUI or the docs fall behind the Web client.
+Enforcement: `scripts/check_api_parity.py` extracts the `(method, path)` surface from `routes.rs`, both clients, and the doc tables, and fails if any drifts. It runs in CI (`py-check`); run it locally after any contract change. It is the cheapest layer — a backend-emitted OpenAPI spec with generated clients, then conformance tests driven from it, are the stronger follow-ons. Do not let the TUI or the docs fall behind the Web client. Note the script checks **contract** parity only; **capability** parity (every GUI feature having a TUI equivalent) is not machine-checked, so it is on you when shipping any user-facing feature.
+
+Known capability gaps (to close, not accept): grade-scheme authoring (`web/src/routes/exam.$name.scheme.tsx`) is Web-only — the TUI reaches `put_scheme`/`preview_results` at the API layer but has no scheme editor. Closing it means a TUI scheme-editing UI; to avoid duplicating the scheme grammar in both clients, prefer moving the readable-DSL parse/emit into the backend and exposing it on the contract, consistent with "no business logic in a client".
 
 ## Development Setup (legacy reference app)
 
