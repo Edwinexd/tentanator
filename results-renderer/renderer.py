@@ -14,7 +14,6 @@ import os
 import re
 import subprocess
 import tempfile
-from collections import OrderedDict
 
 import barcode
 import pikepdf
@@ -53,6 +52,16 @@ def _fmt_pts(p):
     return f"{p:.2f}" if isinstance(p, (int, float)) else "-"
 
 
+def _qlabel(q):
+    """Heading for a question: "Q{n}", plus the label when it is meaningful (not
+    just the generic points-column name)."""
+    lab = (q.get("label") or "").strip()
+    n = q["_n"]
+    if lab and not re.match(r"(?i)^points?\s*\d+$", lab):
+        return rf"Q{n}: {latex_escape(lab)}"
+    return rf"Q{n}"
+
+
 def build_tex_for_student(st, barcode_dir):
     bc = make_barcode(st["id"], barcode_dir).replace("\\", "/")
     lines = [
@@ -86,46 +95,60 @@ def build_tex_for_student(st, barcode_dir):
         r"\vspace{4pt}\hrule\vspace{8pt}",
     ]
 
-    groups = OrderedDict()
-    for q in st["questions"]:
-        groups.setdefault(q.get("group") or "", []).append(q)
+    # One continuous layout (no per-section re-grouping): all short answers in a
+    # single table, then essays, then ungraded comment/notes - mirroring the
+    # reference sample. Question type drives the bucket; long responses fall back
+    # to the essay layout.
+    short, essays, comments = [], [], []
+    for i, q in enumerate(st["questions"], 1):
+        q = dict(q)
+        q["_n"] = i
+        qt = (q.get("qtype") or "").lower()
+        resp = str(q.get("response", "") or "")
+        if qt == "comment":
+            comments.append(q)
+        elif qt == "essay" or len(resp) > 120:
+            essays.append(q)
+        else:
+            short.append(q)
 
-    for gname, qs in groups.items():
-        if gname:
-            lines.append(rf"\textbf{{Section: {latex_escape(gname)}}}\par\medskip")
-        short, essays = [], []
-        for q in qs:
+    if short:
+        lines.append(r"\textbf{Responses} \hfill {\normalfont\itshape Q | Response | Pts}\par\medskip")
+        lines.append(r"\renewcommand{\arraystretch}{1.15}")
+        lines.append(r"\begin{longtable}{|c|p{0.66\textwidth}|c|}\hline")
+        for q in short:
             resp = str(q.get("response", "") or "")
-            (essays if (q.get("qtype") == "essay" or len(resp) > 120) else short).append(q)
-
-        if short:
-            lines.append(r"\renewcommand{\arraystretch}{1.15}")
-            lines.append(r"\begin{longtable}{|l|p{0.62\textwidth}|c|}\hline")
-            for q in short:
-                resp = str(q.get("response", "") or "")
-                cell = latex_escape(resp) if resp.strip() not in ("", "-") else r"\textit{(no answer)}"
-                mx = q.get("max") or 0
-                lines.append(
-                    rf"{latex_escape(q.get('label',''))} & {cell} & {_fmt_pts(q.get('points'))} / {mx:.0f} \\ \hline"
-                )
-            lines.append(r"\end{longtable}")
-
-        for q in essays:
+            cell = latex_escape(resp) if resp.strip() not in ("", "-") else r"\textit{(no answer)}"
             mx = q.get("max") or 0
-            est = " (estimated)" if q.get("estimated") else ""
-            lines.append(
-                rf"\par\medskip\textbf{{{latex_escape(q.get('label',''))}}} \hfill "
-                rf"\textbf{{{_fmt_pts(q.get('points'))}{est}}} / {mx:.0f}"
-            )
-            lines.append(r"\par\smallskip")
-            body = str(q.get("response", "") or "")
-            if not body or body.strip() == "-":
-                lines.append(r"\textit{(no answer)}")
-            else:
-                for p in re.split(r"\s{4,}|\n+", body):
-                    p = p.strip()
-                    if p:
-                        lines.append(latex_escape(p) + r"\par")
+            lines.append(rf"{q['_n']} & {cell} & {_fmt_pts(q.get('points'))} / {mx:.0f} \\ \hline")
+        lines.append(r"\end{longtable}")
+
+    for q in essays:
+        mx = q.get("max") or 0
+        est = " (estimated)" if q.get("estimated") else ""
+        lines.append(
+            rf"\par\medskip\textbf{{{_qlabel(q)}}} \hfill "
+            rf"\textbf{{{_fmt_pts(q.get('points'))}{est}}} / {mx:.0f}"
+        )
+        lines.append(r"\par\smallskip")
+        body = str(q.get("response", "") or "")
+        if not body or body.strip() == "-":
+            lines.append(r"\textit{(no answer)}")
+        else:
+            for p in re.split(r"\s{4,}|\n+", body):
+                p = p.strip()
+                if p:
+                    lines.append(latex_escape(p) + r"\par")
+
+    for q in comments:
+        body = str(q.get("response", "") or "")
+        if not body or body.strip() in ("", "-"):
+            continue
+        lines.append(rf"\par\medskip\textbf{{{_qlabel(q)} notes (not graded)}}\par")
+        for p in re.split(r"\s{4,}|\n+", body):
+            p = p.strip()
+            if p:
+                lines.append(rf"\textit{{{latex_escape(p)}}}\par")
 
     lines.append(r"\end{document}")
     return "\n".join(lines)

@@ -386,11 +386,21 @@ pub async fn put_graded_item(
     Ok(())
 }
 
-/// Seed grades from values already present in the sheet's output columns. A cell
-/// counts as already-graded only if it parses as a numeric grade, so placeholder
-/// text like "Requires grading" or "-" stays ungraded. Used on exam create and
-/// column-expand so auto-scored questions are not re-graded by hand. Returns the
-/// number of grades seeded.
+/// Interpret a pre-filled output-cell value as a grade. A numeric value is taken
+/// as-is; a dash (`-`) means no points awarded and is treated as `0` (so
+/// comment/feedback questions count as graded). Anything else - empty,
+/// `Requires grading`, `N/A` - is left ungraded (`None`).
+fn prefilled_grade(cell: &str) -> Option<String> {
+    let t = cell.trim();
+    if t == "-" {
+        return Some("0".to_string());
+    }
+    crate::grade::evaluate_grade(t).map(|_| t.to_string())
+}
+
+/// Seed grades from values already present in the sheet's output columns. Used on
+/// exam create and column-expand so auto-scored questions are not re-graded by
+/// hand. Returns the number of grades seeded.
 pub async fn seed_prefilled_grades(
     conn: &Connection,
     exam: &Exam,
@@ -402,14 +412,13 @@ pub async fn seed_prefilled_grades(
         let Some(q) = exam.questions.get(col) else { continue };
         let input_col = q.input_column.clone();
         for row in rows {
-            let val = row.get(col).cloned().unwrap_or_default();
-            if crate::grade::evaluate_grade(&val).is_none() {
+            let Some(grade) = prefilled_grade(&row.get(col).cloned().unwrap_or_default()) else {
                 continue;
-            }
+            };
             let item = GradedItem {
                 row_id: crate::domain::row_id(row, &exam.id_columns),
                 input_text: row.get(&input_col).cloned().unwrap_or_default(),
-                grade: val,
+                grade,
                 timestamp: now_iso(),
             };
             put_graded_item(conn, &exam.name, col, &item, "prefilled", DEFAULT_SESSION).await?;
