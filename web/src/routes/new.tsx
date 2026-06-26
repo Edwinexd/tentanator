@@ -1,38 +1,44 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { api, detectQuestionPairs } from '#/lib/api'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+} from '#/components/ui/card'
+import { Button } from '#/components/ui/button'
+import { Input } from '#/components/ui/input'
+import { Label } from '#/components/ui/label'
+import { Checkbox } from '#/components/ui/checkbox'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import { Separator } from '#/components/ui/separator'
+import { ArrowLeft, Wand2 } from 'lucide-react'
 
 export const Route = createFileRoute('/new')({ component: NewSession })
 
-function ColumnPicker({
-  title,
-  columns,
-  selected,
-  onToggle,
-}: {
+interface ColumnPickerProps {
   title: string
   columns: string[]
   selected: Set<string>
   onToggle: (col: string) => void
-}) {
+}
+
+function ColumnPicker({ title, columns, selected, onToggle }: ColumnPickerProps) {
+  if (columns.length === 0) return null
   return (
-    <div>
-      <h3 className="mb-1 font-medium">{title}</h3>
-      <div className="flex flex-wrap gap-2 rounded border p-2">
-        {columns.map((c) => (
-          <label
-            key={c}
-            className={`cursor-pointer rounded px-2 py-1 text-sm ${
-              selected.has(c) ? 'bg-blue-600 text-white' : 'bg-gray-100'
-            }`}
-          >
-            <input
-              type="checkbox"
-              className="mr-1"
-              checked={selected.has(c)}
-              onChange={() => onToggle(c)}
+    <div className="space-y-2">
+      <Label className="text-base font-medium">{title}</Label>
+      <div className="max-h-48 space-y-1 overflow-y-auto rounded-md border p-2">
+        {columns.map((col) => (
+          <label key={col} className="flex items-center gap-2 py-0.5">
+            <Checkbox
+              checked={selected.has(col)}
+              onCheckedChange={() => onToggle(col)}
             />
-            {c}
+            <span className="text-sm">{col}</span>
           </label>
         ))}
       </div>
@@ -58,20 +64,22 @@ function NewSession() {
   }, [])
 
   function applyDetection(cols: string[]) {
-    const det = detectQuestionPairs(cols)
-    setIdCols(new Set(det.id_columns))
-    setInputCols(new Set(det.input_columns))
-    setOutputCols(new Set(det.output_columns))
-    setDetected(det.output_columns.length)
+    const d = detectQuestionPairs(cols)
+    setIdCols(new Set(d.id_columns))
+    setInputCols(new Set(d.input_columns))
+    setOutputCols(new Set(d.output_columns))
+    setDetected(d.output_columns.length)
   }
 
   useEffect(() => {
-    if (!examFile) return
-    setColumns([])
-    setIdCols(new Set())
-    setInputCols(new Set())
-    setOutputCols(new Set())
-    setDetected(0)
+    if (!examFile) {
+      setColumns([])
+      setIdCols(new Set())
+      setInputCols(new Set())
+      setOutputCols(new Set())
+      setDetected(0)
+      return
+    }
     api
       .examColumns(examFile)
       .then((cols) => {
@@ -90,17 +98,21 @@ function NewSession() {
 
   async function create() {
     setError(null)
-    if (!examFile) return setError('Pick an exam file')
-    if (inputCols.size === 0 || outputCols.size === 0)
-      return setError('Select at least one input and one output column')
+    const id = [...idCols]
+    const inp = [...inputCols]
+    const out = [...outputCols]
+    if (!examFile) return setError('Select an exam file')
+    if (id.length === 0) return setError('Select at least one ID column')
+    if (inp.length === 0) return setError('Select at least one input (response) column')
+    if (out.length === 0) return setError('Select at least one output (grade) column')
     try {
       const exam = await api.createExam({
         exam_file: examFile,
-        id_columns: [...idCols],
-        input_columns: [...inputCols],
-        output_columns: [...outputCols],
-        name: name.trim() || undefined,
-        course: course.trim() || undefined,
+        id_columns: id,
+        input_columns: inp,
+        output_columns: out,
+        name: name || undefined,
+        course: course || undefined,
       })
       navigate({ to: '/exam/$name', params: { name: exam.name } })
     } catch (e) {
@@ -109,43 +121,55 @@ function NewSession() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4 p-8">
-      <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">New exam</h1>
-        <Link to="/" className="text-blue-600 hover:underline">
-          ← back
+    <div className="mx-auto max-w-2xl space-y-6 p-8">
+      <div className="flex items-center gap-2">
+        <Link to="/">
+          <Button variant="ghost" size="icon" aria-label="Back">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
         </Link>
+        <h1 className="text-2xl font-bold">New exam</h1>
       </div>
 
-      {error && <p className="rounded bg-red-100 p-3 text-red-700">{error}</p>}
-
-      <div>
-        <h3 className="mb-1 font-medium">Exam file</h3>
-        <select
-          className="w-full rounded border p-2"
-          value={examFile}
-          onChange={(e) => setExamFile(e.target.value)}
-        >
-          <option value="">Select an exam file…</option>
-          {exams.map((e) => (
-            <option key={e} value={e}>
-              {e}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      {columns.length > 0 && (
-        <>
-          <div className="flex items-center gap-3 text-sm text-gray-600">
-            <button
-              onClick={() => applyDetection(columns)}
-              className="rounded border px-3 py-1 hover:bg-gray-50"
-            >
-              Auto-detect Response/Points
-            </button>
-            <span>Detected {detected} question pair(s).</span>
+      <Card>
+        <CardHeader>
+          <CardTitle>Exam file</CardTitle>
+          <CardDescription>Choose a .xlsx or .csv file from the exams directory</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="exam-file-select">File</Label>
+            <Select value={examFile} onValueChange={setExamFile}>
+              <SelectTrigger id="exam-file-select">
+                <SelectValue placeholder="— select —" />
+              </SelectTrigger>
+              <SelectContent>
+                {exams.map((f) => (
+                  <SelectItem key={f} value={f}>{f}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
+
+          {detected > 0 && (
+            <Alert>
+              <AlertDescription>
+                Detected {detected} question pair(s). Adjust below if needed.
+                <Button
+                  variant="link"
+                  size="sm"
+                  className="ml-2 h-auto p-0"
+                  onClick={() => { if (columns.length) applyDetection(columns) }}
+                >
+                  <Wand2 className="mr-1 h-3 w-3" />
+                  Re-detect
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
+
+          <Separator />
+
           <ColumnPicker
             title="ID columns (student identifier)"
             columns={columns}
@@ -153,43 +177,55 @@ function NewSession() {
             onToggle={toggle(idCols, setIdCols)}
           />
           <ColumnPicker
-            title="Input columns (student responses)"
+            title="Input columns (student response text)"
             columns={columns}
             selected={inputCols}
             onToggle={toggle(inputCols, setInputCols)}
           />
           <ColumnPicker
-            title="Output columns (one per graded question)"
+            title="Output columns (grade / score)"
             columns={columns}
             selected={outputCols}
             onToggle={toggle(outputCols, setOutputCols)}
           />
-          <div>
-            <h3 className="mb-1 font-medium">Course (optional)</h3>
-            <input
-              className="w-full rounded border p-2"
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Exam details</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="exam-name">Name (optional — auto-generated if empty)</Label>
+            <Input
+              id="exam-name"
+              placeholder="e.g. Midterm 2026"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <div className="space-y-2">
+            <Label htmlFor="exam-course">Course (optional)</Label>
+            <Input
+              id="exam-course"
               placeholder="e.g. CS101"
               value={course}
               onChange={(e) => setCourse(e.target.value)}
             />
           </div>
-          <div>
-            <h3 className="mb-1 font-medium">Exam name (optional)</h3>
-            <input
-              className="w-full rounded border p-2"
-              placeholder="auto-generated if blank"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </div>
-          <button
-            onClick={create}
-            className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
-          >
+        </CardContent>
+        <CardFooter className="justify-end gap-2">
+          {error && (
+            <Alert variant="destructive" className="flex-1">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+          <Button onClick={create}>
             Create exam
-          </button>
-        </>
-      )}
+          </Button>
+        </CardFooter>
+      </Card>
     </div>
   )
 }

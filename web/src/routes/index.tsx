@@ -1,8 +1,57 @@
+import { Plus, Archive, FileText } from 'lucide-react'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
 import { api, type ExamSummary, type WorkspaceInfo } from '#/lib/api'
+import { Button } from '#/components/ui/button'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+} from '#/components/ui/card'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import { Skeleton } from '#/components/ui/skeleton'
 
 export const Route = createFileRoute('/')({ component: Home })
+
+interface LegacyListProps {
+  legacy: WorkspaceInfo[]
+  legacyCount: number
+  onImportWorkspace: (name: string) => void
+  onImportLegacySessions: () => void
+}
+
+function LegacyList({ legacy, legacyCount, onImportWorkspace, onImportLegacySessions }: LegacyListProps) {
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2 text-lg">
+          <Archive className="h-5 w-5" />
+          Legacy data
+        </CardTitle>
+        <CardDescription>
+          Import grading sessions from the old Python app format
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-3">
+        {legacyCount > 0 && (
+          <Button onClick={onImportLegacySessions} variant="secondary" size="sm">
+            Import {legacyCount} loose session(s)
+          </Button>
+        )}
+        {legacy.map((w) => (
+          <div key={w.name} className="flex items-center justify-between">
+            <span className="text-sm">{w.name} ({w.exams} exam(s))</span>
+            <Button onClick={() => onImportWorkspace(w.name)} variant="outline" size="sm">
+              Import
+            </Button>
+          </div>
+        ))}
+      </CardContent>
+    </Card>
+  )
+}
 
 function Home() {
   const [exams, setExams] = useState<ExamSummary[]>([])
@@ -16,12 +65,12 @@ function Home() {
     Promise.all([
       api.listExams(),
       api.listLegacyWorkspaces().catch(() => [] as WorkspaceInfo[]),
-      api.legacySessionsInfo().catch(() => ({ count: 0 })),
+      api.legacySessionsCount().catch(() => 0),
     ])
       .then(([e, w, ls]) => {
         setExams(e)
         setLegacy(w)
-        setLegacyCount(ls.count)
+        setLegacyCount(ls as number)
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
@@ -32,11 +81,8 @@ function Home() {
   async function importWorkspace(name: string) {
     setError(null)
     try {
-      const r = await api.importWorkspace(name)
-      setInfo(
-        `Imported ${r.imported_exams.length} exam(s) and ${r.imported_files} file(s) from ${name}` +
-          (r.skipped_files ? ` (${r.skipped_files} file(s) already present)` : ''),
-      )
+      const r = await api.importLegacyWorkspace(name)
+      setInfo(`Imported ${r.imported_exams.length} exam(s) from workspace "${name}"`)
       refresh()
     } catch (e) {
       setError((e as Error).message)
@@ -47,7 +93,7 @@ function Home() {
     setError(null)
     try {
       const r = await api.importLegacySessions()
-      setInfo(`Imported ${r.imported_exams.length} legacy exam(s) from .tentanator_sessions/`)
+      setInfo(`Imported ${r.imported_exams.length} exam(s) from loose sessions`)
       refresh()
     } catch (e) {
       setError((e as Error).message)
@@ -59,94 +105,76 @@ function Home() {
   return (
     <div className="mx-auto max-w-3xl p-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Tentanator</h1>
-        <Link
-          to="/new"
-          className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
-        >
-          New exam
+        <h1 className="text-3xl font-bold tracking-tight">Tentanator</h1>
+        <Link to="/new">
+          <Button>
+            <Plus className="mr-1 h-4 w-4" />
+            New exam
+          </Button>
         </Link>
       </div>
 
       <h2 className="mt-8 mb-3 text-xl font-semibold">Exams</h2>
 
-      {loading && <p className="text-gray-500">Loading…</p>}
-      {error && (
-        <p className="rounded bg-red-100 p-3 text-red-700">
-          {error}. Is the backend running?
-        </p>
-      )}
-      {info && <p className="rounded bg-green-100 p-3 text-green-800">{info}</p>}
-      {!loading && !error && exams.length === 0 && (
-        <p className="text-gray-500">No exams yet. Create one to start grading.</p>
+      {loading && (
+        <div className="space-y-3">
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-full" />
+          <Skeleton className="h-12 w-3/4" />
+        </div>
       )}
 
-      <ul className="divide-y rounded border">
-        {exams.map((s) => (
-          <li key={s.name}>
-            <Link
-              to="/exam/$name"
-              params={{ name: s.name }}
-              className="flex items-center justify-between px-4 py-3 hover:bg-gray-50"
-            >
-              <div>
-                <div className="font-medium">{s.name}</div>
-                <div className="text-sm text-gray-500">
-                  {s.exam_file} · {s.num_questions} question(s) · updated{' '}
-                  {s.last_updated.slice(0, 19)}
-                </div>
-              </div>
-              {s.course && (
-                <span className="rounded-full bg-indigo-100 px-2 py-0.5 text-xs font-medium text-indigo-700">
-                  {s.course}
-                </span>
-              )}
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>
+            {error}. Is the backend running?
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {info && (
+        <Alert>
+          <AlertDescription>{info}</AlertDescription>
+        </Alert>
+      )}
+
+      {!loading && !error && exams.length === 0 && (
+        <p className="text-muted-foreground">No exams yet. Create one to start grading.</p>
+      )}
+
+      {exams.length > 0 && (
+        <div className="space-y-2">
+          {exams.map((e) => (
+            <Link key={e.name} to="/exam/$name" params={{ name: e.name }}>
+              <Card className="transition-colors hover:bg-accent/50">
+                <CardContent className="flex items-center justify-between p-4">
+                  <div>
+                    <div className="font-medium">{e.name}</div>
+                    <div className="text-sm text-muted-foreground">
+                      {e.exam_file}
+                      {e.course ? ` · ${e.course}` : ''}
+                      {e.archived ? ' · archived' : ''}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <FileText className="h-4 w-4" />
+                    {e.graded_count} graded
+                  </div>
+                </CardContent>
+              </Card>
             </Link>
-          </li>
-        ))}
-      </ul>
+          ))}
+        </div>
+      )}
 
       {hasLegacy && (
         <div className="mt-10">
-          <h2 className="mb-1 text-xl font-semibold">Import legacy data</h2>
-          <p className="mb-3 text-sm text-gray-500">
-            Bring exams from the old layout into the new format. Existing exams and
-            files are never overwritten.
-          </p>
-
-          {legacyCount > 0 && (
-            <div className="mb-3 flex items-center justify-between rounded border px-4 py-3">
-              <span>
-                <code>.tentanator_sessions/</code>{' '}
-                <span className="text-sm text-gray-500">({legacyCount} session(s))</span>
-              </span>
-              <button
-                onClick={importLegacySessions}
-                className="rounded border px-3 py-1 text-sm hover:bg-gray-50"
-              >
-                Import
-              </button>
-            </div>
-          )}
-
-          {legacy.length > 0 && (
-            <ul className="divide-y rounded border">
-              {legacy.map((w) => (
-                <li key={w.name} className="flex items-center justify-between px-4 py-3">
-                  <span>
-                    {w.name}{' '}
-                    <span className="text-sm text-gray-500">({w.exams} exam(s))</span>
-                  </span>
-                  <button
-                    onClick={() => importWorkspace(w.name)}
-                    className="rounded border px-3 py-1 text-sm hover:bg-gray-50"
-                  >
-                    Import
-                  </button>
-                </li>
-              ))}
-            </ul>
-          )}
+          <LegacyList
+            legacy={legacy}
+            legacyCount={legacyCount}
+            onImportWorkspace={importWorkspace}
+            onImportLegacySessions={importLegacySessions}
+          />
         </div>
       )}
     </div>

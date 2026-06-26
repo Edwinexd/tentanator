@@ -2,17 +2,26 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { api, type ResultsResponse } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { Button } from '#/components/ui/button'
+import { Badge } from '#/components/ui/badge'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardContent,
+} from '#/components/ui/card'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '#/components/ui/table'
+import { Download, DownloadCloud, FileText, TableIcon } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/results')({ component: ResultsView })
-
-function Stat({ label, value }: { label: string; value: string | number }) {
-  return (
-    <div className="rounded border px-3 py-1">
-      <span className="text-gray-500">{label}:</span>{' '}
-      <span className="font-medium">{value}</span>
-    </div>
-  )
-}
 
 function ResultsView() {
   const { name } = Route.useParams()
@@ -34,72 +43,87 @@ function ResultsView() {
     }
   }
 
+  const d = data?.distribution
   return (
     <div className="mx-auto max-w-4xl space-y-4 p-8">
       <ExamNav name={name} active="results" />
       <h1 className="text-2xl font-bold">Results</h1>
 
       <div className="flex flex-wrap gap-2">
-        <button onClick={() => doExport(api.exportDaisy)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
-          Export Daisy (id,grade)
-        </button>
-        <button onClick={() => doExport(api.exportCsv)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
-          Export per-question CSV
-        </button>
-        <button onClick={() => doExport(api.exportExam)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
-          Export full graded xlsx
-        </button>
+        <Button onClick={() => doExport(api.exportExam)} variant="outline" size="sm">
+          <Download className="mr-1 h-4 w-4" />
+          Export XLSX
+        </Button>
+        <Button onClick={() => doExport(api.exportDaisy)} variant="outline" size="sm">
+          <DownloadCloud className="mr-1 h-4 w-4" />
+          Export Daisy
+        </Button>
+        <Button onClick={() => doExport(api.exportCsv)} variant="outline" size="sm">
+          <TableIcon className="mr-1 h-4 w-4" />
+          Export CSV
+        </Button>
+        <Button onClick={() => doExport(api.exportResultsPdf)} variant="outline" size="sm">
+          <FileText className="mr-1 h-4 w-4" />
+          Export results PDF
+        </Button>
       </div>
 
-      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
-      {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
-      {!data && !error && <p className="text-gray-500">Loading…</p>}
+      {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
+
+      {!data && !error && <p className="text-muted-foreground">Loading…</p>}
+
       {data && !data.has_scheme && (
-        <p className="text-gray-500">
+        <p className="text-muted-foreground">
           No grade scheme yet — configure one on the Scheme tab to compute final grades.
         </p>
       )}
 
       {data && data.has_scheme && (
         <>
-          <div className="flex flex-wrap gap-2 text-sm">
-            <Stat label="Students" value={data.total_students} />
-            <Stat label="Fully graded" value={`${data.complete}/${data.total_students}`} />
-            {data.unresolved_conflicts > 0 && (
-              <Stat label="Unresolved conflicts" value={data.unresolved_conflicts} />
+          <div className="flex flex-wrap gap-2">
+            <Badge variant="secondary">{data.students.length} students</Badge>
+            <Badge variant="secondary">{data.conflicts ?? 0} unresolved conflict(s)</Badge>
+            {d && (
+              <>
+                {d.mean != null && <Badge variant="secondary">mean {d.mean.toFixed(1)}</Badge>}
+                {d.median != null && <Badge variant="secondary">median {d.median.toFixed(1)}</Badge>}
+                {d.min != null && <Badge variant="secondary">min {d.min.toFixed(1)}</Badge>}
+                {d.max != null && <Badge variant="secondary">max {d.max.toFixed(1)}</Badge>}
+                {d.stdev != null && <Badge variant="secondary">σ {d.stdev.toFixed(1)}</Badge>}
+              </>
             )}
-            {Object.entries(data.distribution)
-              .sort()
-              .map(([g, c]) => (
-                <Stat key={g} label={g} value={c} />
-              ))}
           </div>
 
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-gray-500">
-                <th className="py-1">ID</th>
-                <th>Total</th>
-                <th>Grade</th>
-                <th>Complete</th>
-              </tr>
-            </thead>
-            <tbody>
-              {data.results.map((r) => (
-                <tr key={r.id} className="border-b">
-                  <td className="py-1">{r.id}</td>
-                  <td>{r.total.toFixed(2)}</td>
-                  <td className="font-medium">
-                    {r.grade}
-                    {r.estimated.length > 0 && (
-                      <span className="ml-1 text-xs text-amber-600">(est)</span>
-                    )}
-                  </td>
-                  <td>{r.complete ? '✓' : '—'}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-lg">Student results</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>ID</TableHead>
+                    <TableHead>Grade</TableHead>
+                    <TableHead>Total</TableHead>
+                    <TableHead>Estimate</TableHead>
+                    <TableHead>Complete</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {data.students.map((s) => (
+                    <TableRow key={s.id}>
+                      <TableCell className="font-mono text-xs">{s.id}</TableCell>
+                      <TableCell>{s.grade ?? '—'}</TableCell>
+                      <TableCell>{s.total?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.estimate?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.complete ? '✓' : '…'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
         </>
       )}
     </div>

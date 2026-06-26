@@ -2,17 +2,43 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import {
   api,
-  type Exam,
-  type GradeScheme,
   type QuestionConfigUpdate,
   type ResultsResponse,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { Button } from '#/components/ui/button'
+import { Input } from '#/components/ui/input'
+import { Label } from '#/components/ui/label'
+import { Badge } from '#/components/ui/badge'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+} from '#/components/ui/card'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import { Checkbox } from '#/components/ui/checkbox'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from '#/components/ui/table'
+import { Save, Eye, Play } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/scheme')({ component: SchemeView })
 
-// Built-in question types. `comment` is ungraded (points cells are "-", read as
-// 0); the results PDF renders it as student notes rather than a graded answer.
 const QTYPES: { v: string; l: string }[] = [
   { v: '', l: '—' },
   { v: 'mc', l: 'Multiple choice' },
@@ -21,39 +47,9 @@ const QTYPES: { v: string; l: string }[] = [
   { v: 'comment', l: 'Comment (ungraded)' },
 ]
 
-/** Resolve a stored qtype (possibly uppercase) to the canonical lowercase, or "". */
 function normQtype(v: string): string {
   const lo = v.toLowerCase()
   return QTYPES.some((t) => t.v === lo) ? lo : ''
-}
-
-function defaultScheme(cfg: QuestionConfigUpdate[]): GradeScheme {
-  const sum = cfg.map((c) => c.var).filter(Boolean).join(' + ') || '0'
-  return {
-    constants: [],
-    vars: [{ name: 'total', expr: sum }],
-    rules: [{ when: 'total >= 0', grade: 'PASS' }],
-    total_var: 'total',
-    default_grade: 'FAIL',
-  }
-}
-
-/// Highest numeric value seen in each output column - a sensible default max.
-function maxPerColumn(cols: string[], rows: Record<string, string>[]): Record<string, number> {
-  const out: Record<string, number> = {}
-  for (const col of cols) {
-    let mx = 0
-    let seen = false
-    for (const r of rows) {
-      const v = parseFloat((r[col] ?? '').trim())
-      if (Number.isFinite(v)) {
-        seen = true
-        if (v > mx) mx = v
-      }
-    }
-    out[col] = seen ? mx : 0
-  }
-  return out
 }
 
 function SchemeView() {
@@ -71,58 +67,77 @@ function SchemeView() {
   useEffect(() => {
     api
       .getExam(name)
-      .then(async (s: Exam) => {
-        const rows = await api.examRows(s.exam_file).catch(() => [])
-        const mx = maxPerColumn(s.output_columns, rows)
-        setColMax(mx)
-        const initial = s.output_columns.map((col, i) => {
-          const q = s.questions[col]
+      .then((e) => {
+        const cols = e.output_columns
+        const questions = e.questions
+        const cfgList: QuestionConfigUpdate[] = cols.map((col) => {
+          const q = questions[col]
+          const maxGuess = colMax[col] ?? undefined
           return {
             col,
-            var: q?.var || `q${i + 1}`,
-            group: q?.group || '',
-            qtype: normQtype(q?.qtype || ''),
-            // Auto-imply the max from the sheet when not already configured.
-            max_points: q?.max_points || mx[col] || 0,
-            position: q?.position ?? i,
-            estimate: q?.estimate || '',
+            var: q?.var ?? col.replace(/\s+/g, '_').toLowerCase(),
+            group: q?.group ?? '',
+            qtype: normQtype(q?.qtype ?? ''),
+            max_points: q?.max_points ?? maxGuess ?? undefined,
+            position: q?.position ?? undefined,
           }
         })
-        setCfg(initial)
-        setSchemeText(JSON.stringify(s.scheme ?? defaultScheme(initial), null, 2))
+        setCfg(cfgList)
+        if (e.scheme) {
+          const s = e.scheme
+          const parts = [`constants: ${JSON.stringify(s.constants)}`]
+          if (s.vars?.length) parts.push(s.vars.map((v) => `${v.name} = ${v.expr}`).join('\n'))
+          if (s.rules?.length) parts.push(s.rules.map((r) => `when ${r.when} -> ${r.grade}`).join('\n'))
+          setSchemeText(parts.join('\n\n'))
+        } else {
+          setSchemeText('')
+        }
+        return api.examRows(e.exam_file)
+      })
+      .then((rows) => {
+        const m: Record<string, number> = {}
+        for (const col of Object.keys(rows[0] ?? {})) {
+          let max = 0
+          for (const r of rows) {
+            const v = parseFloat(r[col])
+            if (!isNaN(v) && v > max) max = v
+          }
+          if (max > 0) m[col] = max
+        }
+        setColMax(m)
       })
       .catch((e: Error) => setError(e.message))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
   function setRow(i: number, patch: Partial<QuestionConfigUpdate>) {
     setCfg((rows) => rows.map((r, j) => (j === i ? { ...r, ...patch } : r)))
   }
-  // Apply a patch to selected rows (or all rows when nothing is selected).
+
   function applyToSelected(patch: (r: QuestionConfigUpdate) => Partial<QuestionConfigUpdate>) {
     setCfg((rows) =>
       rows.map((r) => (selected.size === 0 || selected.has(r.col) ? { ...r, ...patch(r) } : r)),
     )
   }
+
   function toggleSel(col: string) {
     setSelected((s) => {
       const n = new Set(s)
-      if (n.has(col)) n.delete(col)
-      else n.add(col)
+      if (n.has(col)) n.delete(col); else n.add(col)
       return n
     })
   }
+
   function toggleAll() {
     setSelected((s) => (s.size === cfg.length ? new Set() : new Set(cfg.map((r) => r.col))))
   }
 
-  function parseScheme(): GradeScheme | null {
+  function parseScheme(): { vars: { name: string; expr: string }[]; constants: { name: string; value: number }[]; rules: { when: string; grade: string }[] } | null {
     try {
-      return JSON.parse(schemeText) as GradeScheme
-    } catch {
-      setError('Scheme JSON is invalid')
-      return null
-    }
+      return JSON.parse(schemeText)
+    } catch { return null }
   }
+
   async function saveConfig() {
     setError(null)
     try {
@@ -132,22 +147,36 @@ function SchemeView() {
       setError((e as Error).message)
     }
   }
+
   async function doPreview() {
     setError(null)
-    const sc = parseScheme()
-    if (!sc) return
+    setPreview(null)
     try {
-      setPreview(await api.previewResults(name, sc))
+      const s = parseScheme()
+      if (!s) return setError('Failed to parse scheme JSON')
+      await api.putQuestionsConfig(name, cfg)
+      const r = await api.previewResults(name, {
+        vars: s.vars,
+        constants: s.constants,
+        rules: s.rules,
+      })
+      setPreview(r)
     } catch (e) {
       setError((e as Error).message)
     }
   }
+
   async function saveScheme() {
     setError(null)
-    const sc = parseScheme()
-    if (!sc) return
     try {
-      await api.putScheme(name, sc)
+      const s = parseScheme()
+      if (!s) return setError('Failed to parse scheme JSON')
+      await api.putQuestionsConfig(name, cfg)
+      await api.putScheme(name, {
+        vars: s.vars,
+        constants: s.constants,
+        rules: s.rules,
+      })
       setInfo('Scheme saved')
     } catch (e) {
       setError((e as Error).message)
@@ -160,143 +189,201 @@ function SchemeView() {
     <div className="mx-auto max-w-4xl space-y-5 p-8">
       <ExamNav name={name} active="scheme" />
       <h1 className="text-2xl font-bold">Grade scheme</h1>
-      {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
-      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
 
-      <section>
-        <h2 className="mb-2 font-semibold">Question config</h2>
-        <p className="mb-2 text-sm text-gray-500">
-          <code>var</code> is the name used in scheme expressions; <code>group</code> is an
-          optional section tag (aggregate with <code>groupsum("tag")</code>). Tick rows to bulk-edit
-          them; with none ticked, bulk actions apply to all.
-        </p>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            Question config
+            <Badge variant="secondary" className="text-xs">{scope}</Badge>
+          </CardTitle>
+          <CardDescription>Configure each question's type, max points, and group</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="flex flex-wrap items-center gap-2">
+            <Label className="text-sm">Bulk set group:</Label>
+            <Input
+              className="h-8 w-40"
+              placeholder="group name"
+              value={bulkGroup}
+              onChange={(e) => setBulkGroup(e.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => applyToSelected(() => ({ group: bulkGroup }))}
+            >
+              Apply
+            </Button>
 
-        <div className="mb-2 flex flex-wrap items-center gap-2 rounded border bg-gray-50 p-2 text-sm">
-          <span className="text-gray-500">Bulk ({scope}):</span>
-          <input
-            className="w-28 rounded border px-1"
-            placeholder="group"
-            value={bulkGroup}
-            onChange={(e) => setBulkGroup(e.target.value)}
+            <Label className="ml-2 text-sm">Bulk set type:</Label>
+            <Select value={bulkType} onValueChange={setBulkType}>
+              <SelectTrigger className="h-8 w-auto">
+                <SelectValue placeholder="—" />
+              </SelectTrigger>
+              <SelectContent>
+                {QTYPES.map((t) => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}
+              </SelectContent>
+            </Select>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => applyToSelected(() => ({ qtype: bulkType }))}
+            >
+              Apply
+            </Button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="border-b text-left">
+                  <th className="p-2">
+                    <Checkbox
+                      checked={selected.size === cfg.length && cfg.length > 0}
+                      onCheckedChange={toggleAll}
+                    />
+                  </th>
+                  <th className="p-2 font-medium">Column</th>
+                  <th className="p-2 font-medium">Var</th>
+                  <th className="p-2 font-medium">Group</th>
+                  <th className="p-2 font-medium">Type</th>
+                  <th className="p-2 font-medium">Max</th>
+                  <th className="p-2 font-medium">Pos</th>
+                </tr>
+              </thead>
+              <tbody>
+                {cfg.map((r, i) => (
+                  <tr key={r.col} className="border-b hover:bg-muted/50">
+                    <td className="p-2">
+                      <Checkbox
+                        checked={selected.has(r.col)}
+                        onCheckedChange={() => toggleSel(r.col)}
+                      />
+                    </td>
+                    <td className="p-2 text-muted-foreground">{r.col}</td>
+                    <td className="p-2">
+                      <Input
+                        className="h-7 w-32"
+                        value={r.var ?? ''}
+                        onChange={(e) => setRow(i, { var: e.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <Input
+                        className="h-7 w-24"
+                        value={r.group ?? ''}
+                        onChange={(e) => setRow(i, { group: e.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <select
+                        className="h-7 rounded-md border border-input bg-transparent px-2 text-sm"
+                        value={r.qtype ?? ''}
+                        onChange={(e) => setRow(i, { qtype: e.target.value })}
+                      >
+                        {QTYPES.map((t) => <option key={t.v} value={t.v}>{t.l}</option>)}
+                      </select>
+                    </td>
+                    <td className="p-2">
+                      <Input
+                        className="h-7 w-16"
+                        type="number"
+                        value={r.max_points ?? ''}
+                        onChange={(e) => setRow(i, { max_points: e.target.value ? Number(e.target.value) : undefined })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <Input
+                        className="h-7 w-16"
+                        type="number"
+                        value={r.position ?? ''}
+                        onChange={(e) => setRow(i, { position: e.target.value ? Number(e.target.value) : undefined })}
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </CardContent>
+        <CardFooter>
+          <Button onClick={saveConfig} variant="outline" size="sm">
+            <Save className="mr-1 h-4 w-4" />
+            Save config
+          </Button>
+        </CardFooter>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Grade scheme</CardTitle>
+          <CardDescription>
+            JSON format:{' '}
+            {'{ constants: [{name, value}], vars: [{name, expr}], rules: [{when, grade}] }'}
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <textarea
+            className="min-h-[200px] w-full rounded-md border border-input bg-transparent p-3 font-mono text-sm"
+            value={schemeText}
+            onChange={(e) => setSchemeText(e.target.value)}
           />
-          <button
-            onClick={() => applyToSelected(() => ({ group: bulkGroup }))}
-            className="rounded border px-2 py-0.5 hover:bg-white"
-          >
-            set group
-          </button>
-          <select
-            className="w-40 rounded border px-1"
-            value={bulkType}
-            onChange={(e) => setBulkType(e.target.value)}
-          >
-            {QTYPES.map((t) => (
-              <option key={t.v} value={t.v}>
-                {t.v ? t.l : 'type…'}
-              </option>
-            ))}
-          </select>
-          <button
-            onClick={() => applyToSelected(() => ({ qtype: bulkType }))}
-            className="rounded border px-2 py-0.5 hover:bg-white"
-          >
-            set type
-          </button>
-          <button
-            onClick={() => applyToSelected((r) => ({ max_points: colMax[r.col] ?? r.max_points }))}
-            className="rounded border px-2 py-0.5 hover:bg-white"
-          >
-            max from sheet
-          </button>
-        </div>
-
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b text-left text-gray-500">
-              <th className="py-1">
-                <input
-                  type="checkbox"
-                  checked={cfg.length > 0 && selected.size === cfg.length}
-                  onChange={toggleAll}
-                />
-              </th>
-              <th className="py-1">Question</th>
-              <th>var</th>
-              <th>group</th>
-              <th>type</th>
-              <th>max</th>
-              <th>estimate</th>
-            </tr>
-          </thead>
-          <tbody>
-            {cfg.map((r, i) => (
-              <tr key={r.col} className="border-b">
-                <td>
-                  <input type="checkbox" checked={selected.has(r.col)} onChange={() => toggleSel(r.col)} />
-                </td>
-                <td className="py-1 pr-2">{r.col}</td>
-                <td><input className="w-20 rounded border px-1" value={r.var} onChange={(e) => setRow(i, { var: e.target.value })} /></td>
-                <td><input className="w-24 rounded border px-1" value={r.group} onChange={(e) => setRow(i, { group: e.target.value })} /></td>
-                <td>
-                  <select className="w-32 rounded border px-1" value={normQtype(r.qtype)} onChange={(e) => setRow(i, { qtype: e.target.value })}>
-                    {QTYPES.map((t) => (
-                      <option key={t.v} value={t.v}>{t.l}</option>
-                    ))}
-                  </select>
-                </td>
-                <td>
-                  <input className="w-16 rounded border px-1" type="number" value={r.max_points} onChange={(e) => setRow(i, { max_points: Number(e.target.value) })} />
-                  {colMax[r.col] ? <span className="ml-1 text-xs text-gray-400">/{colMax[r.col]}</span> : null}
-                </td>
-                <td><input className="w-40 rounded border px-1" value={r.estimate ?? ''} onChange={(e) => setRow(i, { estimate: e.target.value })} placeholder="optional expr" /></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-        <button onClick={saveConfig} className="mt-2 rounded border px-3 py-1 text-sm hover:bg-gray-50">
-          Save question config
-        </button>
-      </section>
-
-      <section>
-        <h2 className="mb-2 font-semibold">Scheme</h2>
-        <p className="mb-2 text-sm text-gray-500">
-          Named <code>vars</code> (expressions), tunable <code>constants</code>, and ordered{' '}
-          <code>rules</code> (<code>when</code> → <code>grade</code>, first match wins).
-        </p>
-        <textarea
-          className="h-72 w-full rounded border p-2 font-mono text-xs"
-          value={schemeText}
-          onChange={(e) => setSchemeText(e.target.value)}
-          spellCheck={false}
-        />
-        <div className="mt-2 flex gap-2">
-          <button onClick={doPreview} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
-            Preview
-          </button>
-          <button onClick={saveScheme} className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700">
-            Save scheme
-          </button>
-        </div>
-      </section>
+          <div className="flex gap-2">
+            <Button onClick={doPreview} variant="outline" size="sm">
+              <Eye className="mr-1 h-4 w-4" />
+              Preview
+            </Button>
+            <Button onClick={saveScheme} size="sm">
+              <Save className="mr-1 h-4 w-4" />
+              Save scheme
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
       {preview && (
-        <section>
-          <h2 className="mb-2 font-semibold">Live preview</h2>
-          <div className="flex flex-wrap gap-2 text-sm">
-            <div className="rounded border px-3 py-1">
-              Fully graded: <span className="font-medium">{preview.complete}/{preview.total_students}</span>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <Play className="h-5 w-5 text-green-600" />
+              Results preview
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="flex flex-wrap gap-2">
+              <Badge variant="secondary">{preview.students.length} students</Badge>
+              <Badge variant="secondary">{preview.conflicts ?? 0} conflict(s)</Badge>
             </div>
-            {Object.entries(preview.distribution)
-              .sort()
-              .map(([g, c]) => (
-                <div key={g} className="rounded border px-3 py-1">
-                  {g}: <span className="font-medium">{c}</span>
-                </div>
-              ))}
-          </div>
-        </section>
+            <div className="max-h-80 overflow-auto rounded border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>ID</TableHead>
+                    <TableHead>Grade</TableHead>
+                    <TableHead>Total</TableHead>
+                    <TableHead>Estimate</TableHead>
+                    <TableHead>Complete</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {preview.students.map((s) => (
+                    <TableRow key={s.id}>
+                      <TableCell className="font-mono text-xs">{s.id}</TableCell>
+                      <TableCell>{s.grade ?? '—'}</TableCell>
+                      <TableCell>{s.total?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.estimate?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.complete ? '✓' : '…'}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+          </CardContent>
+        </Card>
       )}
+
+      {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     </div>
   )
 }

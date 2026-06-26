@@ -13,6 +13,39 @@ import {
   type SessionSummary,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { Button } from '#/components/ui/button'
+import { Input } from '#/components/ui/input'
+import { Textarea } from '#/components/ui/textarea'
+import { Label } from '#/components/ui/label'
+import { Checkbox } from '#/components/ui/checkbox'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from '#/components/ui/accordion'
+import {
+  Card,
+  CardContent,
+} from '#/components/ui/card'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import {
+  Wand2,
+  Shuffle,
+  Download,
+  Plus,
+  Sparkles,
+  SkipForward,
+  Save,
+  Brain,
+} from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/')({ component: ExamView })
 
@@ -26,15 +59,12 @@ function ExamView() {
   const didInitCol = useRef(false)
   const [index, setIndex] = useState(0)
   const [gradeValue, setGradeValue] = useState('')
-  // AI suggestions are cached/prefetched per (column,row) so moving to a row is
-  // instant; `pending` tracks in-flight fetches so the box can show progress.
   const [suggestions, setSuggestions] = useState<Record<string, AIGradeSuggestion>>({})
   const [pending, setPending] = useState<Record<string, boolean>>({})
   const [status, setStatus] = useState<QuestionStatus | null>(null)
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [activeSession, setActiveSession] = useState('default')
   const [autoSuggest, setAutoSuggest] = useState(true)
-  // Per-question settings (synced from the selected column).
   const [qGlobalId, setQGlobalId] = useState('')
   const [qExamText, setQExamText] = useState('')
   const [qSample, setQSample] = useState('')
@@ -110,7 +140,6 @@ function ExamView() {
     return map
   }, [exam, rows])
 
-  // Initial default: pick the first output column that still needs grading.
   useEffect(() => {
     if (didInitCol.current || !exam || rows.length === 0) return
     if (exam.output_columns.length === 0) {
@@ -122,11 +151,8 @@ function ExamView() {
     didInitCol.current = true
   }, [exam, rows, colStatus])
 
-  useEffect(() => {
-    setIndex(0)
-  }, [col])
+  useEffect(() => { setIndex(0) }, [col])
 
-  // Sync the per-question settings fields when the selected question changes.
   useEffect(() => {
     const q = exam?.questions[col]
     setQGlobalId(q?.global_question_id ?? '')
@@ -143,8 +169,6 @@ function ExamView() {
   const suggestKey = (c: string, r: ExamRow) => `${c}::${rowId(r, idCols)}`
   const iclReady = status?.icl_ready ?? false
 
-  // Fetch (and cache) an AI suggestion for one row. No-op if cached, already
-  // in-flight, or the question isn't ICL-ready yet (N graded examples enforced).
   async function fetchSuggestion(
     targetCol: string,
     row: ExamRow,
@@ -159,7 +183,7 @@ function ExamView() {
       setSuggestions((m) => ({ ...m, [key]: s }))
       return s
     } catch {
-      return undefined // e.g. backend rejects until enough graded examples
+      return undefined
     } finally {
       setPending((p) => {
         const n = { ...p }
@@ -169,8 +193,6 @@ function ExamView() {
     }
   }
 
-  // Auto-prefetch the current and next ungraded responses so AI grades are ready
-  // on arrival. Gated on ICL readiness and the auto-suggest toggle.
   useEffect(() => {
     if (!autoSuggest || !current || !col || !iclReady) return
     void fetchSuggestion(col, current)
@@ -182,14 +204,11 @@ function ExamView() {
   const curKey = current ? suggestKey(col, current) : ''
   const curSuggestion = curKey ? suggestions[curKey] : undefined
 
-  // On moving to a different response, reset the grade box - prefilled from a
-  // ready suggestion (auto mode) or cleared so the grader starts fresh.
   useEffect(() => {
     setGradeValue(autoSuggest && curSuggestion ? curSuggestion.grade : '')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [curKey])
 
-  // Late-arriving suggestion (fetched after landing): fill if still untouched.
   useEffect(() => {
     if (autoSuggest && curSuggestion && gradeValue === '') setGradeValue(curSuggestion.grade)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -329,12 +348,14 @@ function ExamView() {
     return (
       <div className="mx-auto max-w-3xl p-8">
         {error ? (
-          <p className="rounded bg-red-100 p-3 text-red-700">{error}</p>
+          <Alert variant="destructive">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
         ) : (
-          <p className="text-gray-500">Loading…</p>
+          <p className="text-muted-foreground">Loading…</p>
         )}
-        <Link to="/" className="mt-4 inline-block text-blue-600 hover:underline">
-          ← back
+        <Link to="/">
+          <Button variant="link" className="mt-4">← back</Button>
         </Link>
       </div>
     )
@@ -351,220 +372,229 @@ function ExamView() {
       <ExamNav name={name} active="grade" />
       <h1 className="text-2xl font-bold">{exam.name}</h1>
 
-      <label className="flex items-center gap-2 text-sm text-gray-600">
-        Course:
-        <input
-          className="rounded border px-2 py-1"
-          placeholder="e.g. CS101"
-          value={course}
-          onChange={(e) => setCourse(e.target.value)}
-          onBlur={saveCourse}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') void saveCourse()
-          }}
-        />
-      </label>
-
-      <label className="flex items-center gap-2 text-sm text-gray-600">
-        Session:
-        <select
-          className="rounded border px-2 py-1"
-          value={activeSession}
-          onChange={(e) => setActiveSession(e.target.value)}
-        >
-          {sessions.length === 0 && <option value="default">default (0)</option>}
-          {sessions.map((s) => (
-            <option key={s.name} value={s.name}>
-              {s.name} ({s.graded_count})
-            </option>
-          ))}
-        </select>
-        <button
-          onClick={newSession}
-          className="rounded border px-3 py-1 hover:bg-gray-50"
-        >
-          New session
-        </button>
-        <span className="ml-3 flex items-center gap-1">
-          <input
-            type="checkbox"
-            id="autosuggest"
-            checked={autoSuggest}
-            onChange={(e) => setAutoSuggest(e.target.checked)}
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2">
+          <Label htmlFor="course-input" className="text-sm text-muted-foreground">Course:</Label>
+          <Input
+            id="course-input"
+            className="h-8 w-40"
+            placeholder="e.g. CS101"
+            value={course}
+            onChange={(e) => setCourse(e.target.value)}
+            onBlur={saveCourse}
+            onKeyDown={(e) => { if (e.key === 'Enter') void saveCourse() }}
           />
-          <label htmlFor="autosuggest">auto AI-suggest</label>
-        </span>
-      </label>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <Label htmlFor="session-select" className="text-sm text-muted-foreground">Session:</Label>
+          <Select value={activeSession} onValueChange={setActiveSession}>
+            <SelectTrigger className="h-8 w-auto min-w-[8rem]">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {sessions.length === 0 && <SelectItem value="default">default (0)</SelectItem>}
+              {sessions.map((s) => (
+                <SelectItem key={s.name} value={s.name}>
+                  {s.name} ({s.graded_count})
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <Button onClick={newSession} variant="outline" size="sm">
+            <Plus className="h-3 w-3" />
+            New session
+          </Button>
+        </div>
+
+        <label className="flex items-center gap-1.5 text-sm text-muted-foreground">
+          <Checkbox
+            checked={autoSuggest}
+            onCheckedChange={(c) => setAutoSuggest(c === true)}
+          />
+          <span>auto AI-suggest</span>
+        </label>
+      </div>
 
       {missing.length > 0 && (
-        <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
-          <span>
-            This file has {det.output_columns.length} question(s); this exam covers{' '}
-            {exam.output_columns.length}.
-          </span>
-          <button
-            disabled={busy}
-            onClick={addQuestions}
-            className="rounded bg-amber-600 px-3 py-1 font-medium text-white hover:bg-amber-700 disabled:opacity-50"
-          >
-            Add {missing.length} more
-          </button>
-        </div>
+        <Alert>
+          <AlertDescription className="flex flex-wrap items-center gap-3">
+            <span>
+              This file has {det.output_columns.length} question(s); this exam covers{' '}
+              {exam.output_columns.length}.
+            </span>
+            <Button
+              disabled={busy}
+              onClick={addQuestions}
+              variant="secondary"
+              size="sm"
+            >
+              <Wand2 className="mr-1 h-3 w-3" />
+              Add {missing.length} more
+            </Button>
+          </AlertDescription>
+        </Alert>
       )}
 
       <div className="flex flex-wrap items-center gap-2">
-        <select
-          className="rounded border p-2"
-          value={col}
-          onChange={(e) => setCol(e.target.value)}
-        >
-          {exam.output_columns.map((c) => (
-            <option key={c} value={c}>
-              {c} ({colStatus[c]?.graded ?? 0}/{colStatus[c]?.applicable ?? 0})
-            </option>
-          ))}
-        </select>
-        <button
-          disabled={busy}
-          onClick={() => sample('random')}
-          className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
-        >
+        <Select value={col} onValueChange={setCol}>
+          <SelectTrigger className="w-auto min-w-[12rem]">
+            <SelectValue placeholder="Select question" />
+          </SelectTrigger>
+          <SelectContent>
+            {exam.output_columns.map((c) => (
+              <SelectItem key={c} value={c}>
+                {c} ({colStatus[c]?.graded ?? 0}/{colStatus[c]?.applicable ?? 0})
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
+        <Button disabled={busy} onClick={() => sample('random')} variant="outline" size="sm">
+          <Shuffle className="mr-1 h-3 w-3" />
           random sample
-        </button>
-        <button
-          disabled={busy}
-          onClick={() => sample('maximin')}
-          className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
-        >
+        </Button>
+        <Button disabled={busy} onClick={() => sample('maximin')} variant="outline" size="sm">
+          <Wand2 className="mr-1 h-3 w-3" />
           maximin sample
-        </button>
-        <button
-          disabled={busy}
-          onClick={exportExam}
-          className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
-        >
+        </Button>
+        <Button disabled={busy} onClick={exportExam} variant="outline" size="sm">
+          <Download className="mr-1 h-3 w-3" />
           export
-        </button>
+        </Button>
       </div>
 
-      <details className="rounded border bg-gray-50 p-2 text-sm">
-        <summary className="cursor-pointer select-none text-gray-700">
-          Question settings
-          {qGlobalId.trim() ? ` · linked: ${qGlobalId.trim()}` : ''}
-          {status ? ` · ${status.external} pooled example(s)` : ''}
-        </summary>
-        <div className="mt-2 space-y-2">
-          <label className="block">
-            <span className="text-gray-600">
-              Global question id — link the same question across exams/terms to share graded
-              examples (so the AI has context even with few responses here)
-            </span>
-            <input
-              className="mt-1 w-full rounded border px-2 py-1"
-              placeholder="e.g. pvt_q37_version_control"
-              value={qGlobalId}
-              onChange={(e) => setQGlobalId(e.target.value)}
-            />
-          </label>
-          <label className="block">
-            <span className="text-gray-600">Exam question text (included in the AI prompt)</span>
-            <textarea
-              className="mt-1 w-full rounded border px-2 py-1"
-              rows={2}
-              value={qExamText}
-              onChange={(e) => setQExamText(e.target.value)}
-            />
-          </label>
-          <label className="block">
-            <span className="text-gray-600">Sample answer (optional)</span>
-            <textarea
-              className="mt-1 w-full rounded border px-2 py-1"
-              rows={2}
-              value={qSample}
-              onChange={(e) => setQSample(e.target.value)}
-            />
-          </label>
-          <button onClick={saveQuestion} className="rounded border px-3 py-1 hover:bg-white">
-            Save question settings
-          </button>
-        </div>
-      </details>
+      <Accordion type="single" collapsible>
+        <AccordionItem value="question-settings">
+          <AccordionTrigger className="text-sm text-muted-foreground">
+            Question settings
+            {qGlobalId.trim() ? ` · linked: ${qGlobalId.trim()}` : ''}
+            {status ? ` · ${status.external} pooled example(s)` : ''}
+          </AccordionTrigger>
+          <AccordionContent className="space-y-3">
+            <div className="space-y-2">
+              <Label htmlFor="global-id">
+                Global question id — link the same question across exams/terms to share graded examples
+              </Label>
+              <Input
+                id="global-id"
+                placeholder="e.g. pvt_q37_version_control"
+                value={qGlobalId}
+                onChange={(e) => setQGlobalId(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="exam-text">Exam question text</Label>
+              <Textarea
+                id="exam-text"
+                rows={2}
+                value={qExamText}
+                onChange={(e) => setQExamText(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="sample-answer">Sample answer (optional)</Label>
+              <Textarea
+                id="sample-answer"
+                rows={2}
+                value={qSample}
+                onChange={(e) => setQSample(e.target.value)}
+              />
+            </div>
+            <Button onClick={saveQuestion} variant="outline" size="sm">
+              Save question settings
+            </Button>
+          </AccordionContent>
+        </AccordionItem>
+      </Accordion>
 
-      <div className="text-sm text-gray-600">
+      <div className="text-sm text-muted-foreground">
         graded {gradedCount}/{rows.length} · {ungraded.length} ungraded ·{' '}
         ICL ready: {status ? (status.icl_ready ? 'yes' : 'no') : '…'} ·{' '}
         {status?.external ?? 0} pooled
       </div>
 
-      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
-      {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
+      {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
 
       {current ? (
         <>
-          <div className="text-sm text-gray-500">
-            {safeIndex + 1}/{ungraded.length} ungraded · id:{' '}
-            {rowId(current, exam.id_columns)}
-          </div>
-          <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded border bg-gray-50 p-4">
-            {current[inputCol]}
+          <div className="text-sm text-muted-foreground">
+            {safeIndex + 1}/{ungraded.length} ungraded · id: {rowId(current, exam.id_columns)}
           </div>
 
-          <div className="min-h-[4.75rem] rounded border-l-4 border-blue-400 bg-blue-50 p-3 text-sm">
+          <Card>
+            <CardContent className="max-h-80 overflow-auto whitespace-pre-wrap p-4">
+              {current[inputCol]}
+            </CardContent>
+          </Card>
+
+          <div className="min-h-[4.75rem] rounded-md border-l-4 border-primary bg-muted/50 p-3 text-sm">
             {curSuggestion ? (
-              <>
-                <div className="font-medium">AI grade: {curSuggestion.grade}</div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-1 font-medium">
+                  <Brain className="h-4 w-4" />
+                  AI grade: {curSuggestion.grade}
+                </div>
                 {curSuggestion.reasoning_summary && (
-                  <div className="mt-1 text-gray-600">{curSuggestion.reasoning_summary}</div>
+                  <div className="text-muted-foreground">{curSuggestion.reasoning_summary}</div>
                 )}
-              </>
+              </div>
             ) : pending[curKey] ? (
-              <span className="text-gray-500">Thinking…</span>
+              <span className="text-muted-foreground">
+                <Sparkles className="mr-1 inline h-4 w-4 animate-pulse" />
+                Thinking…
+              </span>
             ) : !iclReady ? (
-              <span className="text-gray-500">
+              <span className="text-muted-foreground">
                 AI suggestions unlock after {status?.min_icl_examples ?? 5} graded examples
                 {' '}({iclHave} so far{iclNeed ? `, ${iclNeed} to go` : ''}).
               </span>
             ) : (
-              <span className="text-gray-400">No suggestion for this response.</span>
+              <span className="text-muted-foreground">No suggestion for this response.</span>
             )}
           </div>
 
           <div className="flex items-center gap-2">
-            <input
-              className="flex-1 rounded border p-2"
+            <Input
+              className="flex-1"
               placeholder="grade e.g. 7.5 or 2+1.5"
               value={gradeValue}
               onChange={(e) => setGradeValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') void save()
-              }}
+              onKeyDown={(e) => { if (e.key === 'Enter') void save() }}
             />
-            <button
+            <Button
               disabled={busy || !iclReady || !!pending[curKey]}
               onClick={suggestNow}
+              variant="outline"
               title={!iclReady ? `Needs ${iclNeed} more graded example(s)` : undefined}
-              className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
             >
-              {pending[curKey] ? 'Thinking…' : 'AI suggest'}
-            </button>
-            <button
-              disabled={busy}
-              onClick={save}
-              className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-            >
+              {pending[curKey] ? (
+                <><Sparkles className="mr-1 h-4 w-4 animate-pulse" />Thinking…</>
+              ) : (
+                <><Brain className="mr-1 h-4 w-4" />AI suggest</>
+              )}
+            </Button>
+            <Button disabled={busy} onClick={save}>
+              <Save className="mr-1 h-4 w-4" />
               Save
-            </button>
-            <button
+            </Button>
+            <Button
               disabled={busy || ungraded.length < 2}
               onClick={() => setIndex((i) => (i + 1) % ungraded.length)}
-              className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
+              variant="outline"
             >
+              <SkipForward className="mr-1 h-4 w-4" />
               Skip
-            </button>
+            </Button>
           </div>
         </>
       ) : (
-        <p className="text-gray-500">Nothing left to grade for this question.</p>
+        <Card>
+          <CardContent className="p-6 text-center text-muted-foreground">
+            Nothing left to grade for this question.
+          </CardContent>
+        </Card>
       )}
     </div>
   )

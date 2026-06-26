@@ -1,7 +1,26 @@
+import { FileText, Upload, Download, Printer, Scan } from 'lucide-react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type ChangeEvent } from 'react'
 import { api } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { Button } from '#/components/ui/button'
+import { Label } from '#/components/ui/label'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardDescription,
+  CardContent,
+  CardFooter,
+} from '#/components/ui/card'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
 
 export const Route = createFileRoute('/exam/$name/pdf')({ component: PdfView })
 
@@ -23,9 +42,9 @@ function PdfView() {
     if (!f) return
     setError(null)
     try {
-      await api.uploadFile('scans', f)
-      setScans(await api.listScans())
-      setScan(f.name)
+      const path = await api.uploadScan(f)
+      setScan(path)
+      setScans((prev) => (prev.includes(path) ? prev : [...prev, path]))
     } catch (err) {
       setError((err as Error).message)
     }
@@ -37,12 +56,9 @@ function PdfView() {
     setInfo(null)
     setPdfPath(null)
     try {
-      const r = await api.exportResultsPdf(name, withCover ? scan : undefined)
-      const miss = r.covers_missing?.length
-        ? ` (${r.covers_missing.length} without a detected cover page)`
-        : ''
-      setPdfPath(r.path)
-      setInfo(`Generated ${r.path} — ${r.students} students${miss}`)
+      const result = await api.generateResultsPdf(name, scan || undefined, withCover)
+      setPdfPath(result.path)
+      setInfo(`PDF generated: ${result.path}`)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -52,76 +68,83 @@ function PdfView() {
 
   async function download() {
     if (!pdfPath) return
-    const filename = pdfPath.split('/').pop()
-    if (!filename) return
-    setError(null)
-    try {
-      await api.downloadGraded(filename)
-    } catch (e) {
-      setError((e as Error).message)
-    }
+    const a = document.createElement('a')
+    a.href = `/api/exam-files/${encodeURIComponent(pdfPath)}`
+    a.download = pdfPath.split('/').pop() ?? 'results.pdf'
+    a.click()
   }
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-8">
       <ExamNav name={name} active="pdf" />
       <h1 className="text-2xl font-bold">Results PDF</h1>
-      <p className="text-sm text-gray-500">
-        One continuous PDF: a LaTeX answer sheet per student (responses, marks, grade, id barcode),
-        with the original scanned cover page prepended when a scanned exam PDF is provided.
-      </p>
 
-      <section className="space-y-2">
-        <h2 className="font-semibold">1. Scanned exam PDF (cover pages)</h2>
-        <div className="flex flex-wrap items-center gap-3">
-          {scans.length > 0 && (
-            <select className="rounded border p-2" value={scan} onChange={(e) => setScan(e.target.value)}>
-              <option value="">select a scanned PDF…</option>
-              {scans.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-          )}
-          <label className="text-sm text-gray-600">
-            {scans.length > 0 ? 'or upload' : 'upload a scanned exam PDF'}{' '}
-            <input type="file" accept="application/pdf,.pdf" onChange={onUpload} className="text-sm" />
-          </label>
-        </div>
-      </section>
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2 text-lg">
+            <Printer className="h-5 w-5" />
+            Generate answer sheets
+          </CardTitle>
+          <CardDescription>
+            Render LaTeX answer sheets with student responses, marks, and grades
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Scanned exam PDF (optional — prepends cover pages matched by barcode)</Label>
+            <Select value={scan} onValueChange={setScan}>
+              <SelectTrigger>
+                <SelectValue placeholder="No scan selected" />
+              </SelectTrigger>
+              <SelectContent>
+                {scans.map((f) => (
+                  <SelectItem key={f} value={f}>{f}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
 
-      <section className="space-y-2">
-        <h2 className="font-semibold">2. Generate</h2>
-        <div className="flex gap-2">
-          <button
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+            <Upload className="h-4 w-4" />
+            <span>Or upload a scan:</span>
+            <input
+              type="file"
+              accept=".pdf"
+              onChange={onUpload}
+              className="text-sm file:mr-2 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-xs file:text-primary-foreground"
+            />
+          </div>
+        </CardContent>
+        <CardFooter className="flex-wrap gap-2">
+          <Button disabled={busy} onClick={() => generate(false)}>
+            <FileText className="mr-1 h-4 w-4" />
+            {busy ? 'Generating…' : 'Generate PDF'}
+          </Button>
+          <Button
             disabled={busy || !scan}
             onClick={() => generate(true)}
-            className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+            variant="secondary"
           >
-            Generate with cover pages
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => generate(false)}
-            className="rounded border px-3 py-1 text-sm hover:bg-gray-50 disabled:opacity-50"
-          >
-            Answer sheets only
-          </button>
-        </div>
-      </section>
+            <Scan className="mr-1 h-4 w-4" />
+            {busy ? 'Generating…' : 'With cover pages'}
+          </Button>
+        </CardFooter>
+      </Card>
 
-      {busy && <p className="text-gray-500">Rendering… (this can take a minute)</p>}
-      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
       {pdfPath && (
-        <button
-          onClick={download}
-          className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
-        >
-          Download PDF
-        </button>
+        <Alert>
+          <AlertDescription className="flex items-center justify-between">
+            <span>PDF ready: {pdfPath}</span>
+            <Button onClick={download} variant="outline" size="sm">
+              <Download className="mr-1 h-4 w-4" />
+              Download
+            </Button>
+          </AlertDescription>
+        </Alert>
       )}
-      {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
+
+      {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     </div>
   )
 }

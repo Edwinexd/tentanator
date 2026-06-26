@@ -2,16 +2,26 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type ChangeEvent } from 'react'
 import { api, type Exam, type GradeConflict, type ImportSummary } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { Button } from '#/components/ui/button'
+import { Label } from '#/components/ui/label'
+import {
+  Card,
+  CardHeader,
+  CardTitle,
+  CardContent,
+} from '#/components/ui/card'
+import { Badge } from '#/components/ui/badge'
+import { Alert, AlertDescription } from '#/components/ui/alert'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '#/components/ui/select'
+import { Upload, CheckCircle2, AlertTriangle } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/import')({ component: ImportView })
-
-function Badge({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="rounded border px-3 py-1">
-      {label}: <span className="font-medium">{value}</span>
-    </div>
-  )
-}
 
 function ImportView() {
   const { name } = Route.useParams()
@@ -34,26 +44,11 @@ function ImportView() {
     api.getExam(name).then(setExam).catch((e: Error) => setError(e.message))
     api.listExamFiles().then(setExams).catch(() => {})
     loadConflicts()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
   useEffect(() => {
-    // Clear the previous file's columns/id synchronously so a Preview/Apply
-    // before the fetch resolves can't send a stale id_column.
-    setSummary(null)
-    setMapping({})
-    setColumns([])
-    setIdColumn('')
-    if (!file) {
-      return
-    }
-    api
-      .examColumns(file)
-      .then((cols) => {
-        setColumns(cols)
-        setIdColumn(cols[0] ?? '')
-      })
-      .catch((e: Error) => setError(e.message))
+    if (!file) { setColumns([]); return }
+    api.examColumns(file).then(setColumns).catch((e: Error) => setError(e.message))
   }, [file])
 
   async function onUpload(e: ChangeEvent<HTMLInputElement>) {
@@ -61,43 +56,48 @@ function ImportView() {
     if (!f) return
     setError(null)
     try {
-      await api.uploadFile('exams', f)
-      setExams(await api.listExamFiles())
-      setFile(f.name)
+      const path = await api.uploadExamFile(f)
+      setFile(path)
     } catch (err) {
       setError((err as Error).message)
     }
   }
 
   function buildReq() {
-    const mappings = Object.entries(mapping)
-      .filter(([, c]) => c)
-      .map(([output_col, column]) => ({ column, output_col }))
-    return { file, id_column: idColumn, mappings, label: file }
+    const mappingEntries = Object.entries(mapping).filter(([, v]) => v && v !== '_skip')
+    return {
+      file,
+      id_column: idColumn,
+      column_mapping: mappingEntries.map(([from, to]) => ({ from, to })),
+    }
   }
+
   async function preview() {
     setError(null)
-    setInfo(null)
+    setSummary(null)
     try {
-      setSummary(await api.importPreview(name, buildReq()))
+      const r = await api.importPreview(name, buildReq())
+      setSummary(r)
     } catch (e) {
       setError((e as Error).message)
     }
   }
+
   async function apply() {
     setError(null)
     try {
-      const sum = await api.importApply(name, buildReq())
-      setSummary(sum)
-      setInfo(`Imported ${sum.new} new, ${sum.same} unchanged, ${sum.conflict} flagged as conflicts`)
+      const r = await api.importApply(name, buildReq())
+      setInfo(`Imported ${r.imported} cell(s) (${r.new_rows} new, ${r.updated_rows} updated)`)
+      setSummary(null)
       loadConflicts()
     } catch (e) {
       setError((e as Error).message)
     }
   }
+
   async function resolve(c: GradeConflict, choose: 'existing' | 'incoming') {
     try {
-      await api.resolveConflict(name, { output_col: c.output_col, row_id: c.row_id, choose })
+      await api.resolveConflict(name, c.row_id, c.column, choose)
       loadConflicts()
     } catch (e) {
       setError((e as Error).message)
@@ -109,143 +109,142 @@ function ImportView() {
     <div className="mx-auto max-w-4xl space-y-5 p-8">
       <ExamNav name={name} active="import" />
       <h1 className="text-2xl font-bold">Import grades</h1>
-      {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
-      {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
 
-      <section className="space-y-2">
-        <p className="text-sm text-gray-500">
-          Pick a graded file (from <code>exams/</code>), map its id column and any grade columns to
-          questions, then preview and apply. Conflicting grades are flagged for review.
-        </p>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="text-sm">
-            File{' '}
-            <select className="rounded border p-1" value={file} onChange={(e) => setFile(e.target.value)}>
-              <option value="">select…</option>
-              {exams.map((e) => (
-                <option key={e} value={e}>
-                  {e}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="text-sm text-gray-600">
-            or upload{' '}
-            <input type="file" accept=".xlsx,.xls,.csv" onChange={onUpload} className="text-sm" />
-          </label>
-          {columns.length > 0 && (
-            <label className="text-sm">
-              ID column{' '}
-              <select className="rounded border p-1" value={idColumn} onChange={(e) => setIdColumn(e.target.value)}>
-                {columns.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg">Upload a graded spreadsheet</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="space-y-2">
+            <Label>Select an existing exam file</Label>
+            <Select value={file} onValueChange={setFile}>
+              <SelectTrigger>
+                <SelectValue placeholder="Choose a file in exams/" />
+              </SelectTrigger>
+              <SelectContent>
+                {exams.map((f) => (
+                  <SelectItem key={f} value={f}>{f}</SelectItem>
                 ))}
-              </select>
-            </label>
-          )}
-        </div>
-      </section>
-
-      {columns.length > 0 && (
-        <section>
-          <h2 className="mb-2 font-semibold">Column → question mapping</h2>
-          <table className="text-sm">
-            <tbody>
-              {outCols.map((col) => (
-                <tr key={col}>
-                  <td className="py-1 pr-3">{col}</td>
-                  <td>
-                    <select
-                      className="rounded border p-1"
-                      value={mapping[col] ?? ''}
-                      onChange={(e) => setMapping((m) => ({ ...m, [col]: e.target.value }))}
-                    >
-                      <option value="">(skip)</option>
-                      {columns.map((c) => (
-                        <option key={c} value={c}>
-                          {c}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          <div className="mt-2 flex gap-2">
-            <button onClick={preview} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
-              Preview
-            </button>
-            <button
-              onClick={apply}
-              className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
-            >
-              Apply
-            </button>
+              </SelectContent>
+            </Select>
           </div>
-        </section>
+
+          <div className="flex items-center gap-4 text-sm text-muted-foreground">
+            <span>Or upload a new one:</span>
+            <input
+              type="file"
+              accept=".xlsx,.csv"
+              onChange={onUpload}
+              className="text-sm file:mr-2 file:rounded file:border-0 file:bg-primary file:px-3 file:py-1 file:text-xs file:text-primary-foreground"
+            />
+          </div>
+        </CardContent>
+      </Card>
+
+      {file && columns.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Column mapping</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="space-y-2">
+              <Label>ID column in import file</Label>
+              <Select value={idColumn} onValueChange={setIdColumn}>
+                <SelectTrigger className="w-64">
+                  <SelectValue placeholder="Select ID column" />
+                </SelectTrigger>
+                <SelectContent>
+                  {columns.map((c) => (
+                    <SelectItem key={c} value={c}>{c}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Map import columns to exam questions</Label>
+              <div className="space-y-2">
+                {outCols.map((outCol) => (
+                  <div key={outCol} className="flex items-center gap-2">
+                    <span className="w-48 text-sm font-medium">{outCol}</span>
+                    <Select
+                      value={mapping[outCol] ?? ''}
+                      onValueChange={(v) => setMapping((m) => ({ ...m, [outCol]: v }))}
+                    >
+                      <SelectTrigger className="w-64">
+                        <SelectValue placeholder="— skip —" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="_skip">— skip —</SelectItem>
+                        {columns.map((c) => (
+                          <SelectItem key={c} value={c}>{c}</SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <Button onClick={preview} disabled={!idColumn}>
+              <Upload className="mr-1 h-4 w-4" />
+              Preview import
+            </Button>
+          </CardContent>
+        </Card>
       )}
 
       {summary && (
-        <section className="text-sm">
-          <h2 className="mb-1 font-semibold">Summary</h2>
-          <div className="flex flex-wrap gap-2">
-            <Badge label="new" value={summary.new} />
-            <Badge label="unchanged" value={summary.same} />
-            <Badge label="conflicts" value={summary.conflict} />
-            <Badge label="skipped" value={summary.skipped} />
-            <Badge label="unknown ids" value={summary.unknown_ids} />
-          </div>
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <CheckCircle2 className="h-5 w-5 text-green-600" />
+              Preview: {summary.new_cells} new, {summary.update_cells} updates
+            </CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="mb-3 flex gap-2">
+              <Badge variant="secondary">{summary.new_rows} new rows</Badge>
+              <Badge variant="secondary">{summary.updated_rows} updated rows</Badge>
+              <Badge variant="secondary">{summary.conflicts} conflict(s)</Badge>
+            </div>
+            <Button onClick={apply}>Apply import</Button>
+          </CardContent>
+        </Card>
       )}
 
       {conflicts.length > 0 && (
-        <section>
-          <h2 className="mb-2 font-semibold">Unresolved conflicts ({conflicts.length})</h2>
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b text-left text-gray-500">
-                <th className="py-1">Question</th>
-                <th>Student</th>
-                <th>Existing</th>
-                <th>Incoming</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {conflicts.map((c) => (
-                <tr key={`${c.output_col}|${c.row_id}|${c.incoming_source}`} className="border-b">
-                  <td className="py-1">{c.output_col}</td>
-                  <td>{c.row_id}</td>
-                  <td>
-                    {c.existing_grade}{' '}
-                    <span className="text-xs text-gray-400">({c.existing_source || 'manual'})</span>
-                  </td>
-                  <td>
-                    {c.incoming_grade} <span className="text-xs text-gray-400">({c.incoming_source})</span>
-                  </td>
-                  <td className="text-right">
-                    <button
-                      onClick={() => resolve(c, 'existing')}
-                      className="mr-1 rounded border px-2 py-0.5 text-xs hover:bg-gray-50"
-                    >
-                      keep existing
-                    </button>
-                    <button
-                      onClick={() => resolve(c, 'incoming')}
-                      className="rounded border px-2 py-0.5 text-xs hover:bg-gray-50"
-                    >
-                      use incoming
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </section>
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <AlertTriangle className="h-5 w-5 text-amber-500" />
+              {conflicts.length} unresolved conflict(s)
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-2">
+            {conflicts.map((c) => (
+              <div key={`${c.row_id}_${c.column}`} className="flex items-center justify-between rounded border p-2 text-sm">
+                <div>
+                  <span className="font-medium">{c.row_id}</span> / <span>{c.column}</span>:{' '}
+                  existing=<span className="font-medium">{c.existing}</span>{' '}
+                  incoming=<span className="font-medium">{c.incoming}</span>
+                </div>
+                <div className="flex gap-1">
+                  <Button onClick={() => resolve(c, 'existing')} variant="outline" size="sm">
+                    Keep {c.existing}
+                  </Button>
+                  <Button onClick={() => resolve(c, 'incoming')} variant="outline" size="sm">
+                    Use {c.incoming}
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
       )}
+
+      {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
+      {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
     </div>
   )
 }
