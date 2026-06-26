@@ -240,6 +240,23 @@ export const api = {
   exportCsv: (name: string) =>
     req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/csv`),
   listScans: () => req<string[]>('GET', '/api/scans'),
+  uploadFile: async (kind: 'exams' | 'scans', file: File): Promise<{ filename: string }> => {
+    const res = await fetch(`${API_BASE}/api/files/${kind}/${encodeURIComponent(file.name)}`, {
+      method: 'PUT',
+      body: file,
+    })
+    if (!res.ok) {
+      let message = res.statusText
+      try {
+        const d = (await res.json()) as { error?: string }
+        if (d.error) message = d.error
+      } catch {
+        // non-JSON
+      }
+      throw new Error(`HTTP ${res.status}: ${message}`)
+    }
+    return (await res.json()) as { filename: string }
+  },
   exportResultsPdf: (name: string, scanned_pdf?: string) =>
     req<{ path: string; students: number; covers_missing: string[] }>(
       'POST',

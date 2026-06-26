@@ -59,7 +59,7 @@ pub fn list_exam_files(config: &Config) -> Vec<String> {
         for e in entries.flatten() {
             if let Some(name) = e.file_name().to_str() {
                 let lower = name.to_lowercase();
-                if lower.ends_with(".xlsx") || lower.ends_with(".csv") {
+                if lower.ends_with(".xlsx") || lower.ends_with(".xls") || lower.ends_with(".csv") {
                     out.push(name.to_string());
                 }
             }

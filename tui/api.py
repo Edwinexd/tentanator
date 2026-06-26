@@ -121,3 +121,25 @@ class TentanatorAPI:
 
     async def get_results(self, name: str) -> Dict[str, Any]:
         return await self._request("GET", f"/api/sessions/{name}/results")
+
+    async def upload_file(self, kind: str, path: str) -> Dict[str, Any]:
+        """Upload a local file (raw body) into exams/ or scans/."""
+        import os
+
+        with open(path, "rb") as fh:
+            data = fh.read()
+        fname = os.path.basename(path)
+        try:
+            resp = await self._client.request(
+                "PUT", f"/api/files/{kind}/{fname}", content=data
+            )
+        except httpx.RequestError as exc:
+            raise APIError(0, f"cannot reach backend ({exc})") from exc
+        if resp.status_code >= 400:
+            detail = resp.text
+            try:
+                detail = resp.json().get("error", detail)
+            except Exception:  # pylint: disable=broad-exception-caught
+                pass
+            raise APIError(resp.status_code, detail)
+        return resp.json()

@@ -4,7 +4,8 @@
 
 use std::collections::HashMap;
 
-use axum::extract::{Path, Query, State};
+use axum::body::Bytes;
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
@@ -29,6 +30,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/legacy-workspaces/{name}/import", post(import_workspace))
         .route("/api/exams", get(list_exams))
         .route("/api/scans", get(list_scans))
+        .route(
+            "/api/files/{kind}/{filename}",
+            put(upload_file).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
+        )
         .route("/api/exams/{file}/columns", get(exam_columns))
         .route("/api/exams/{file}/rows", get(exam_rows))
         .route("/api/sessions", get(list_sessions).post(create_session))
@@ -171,6 +176,28 @@ async fn list_exams(State(s): State<AppState>) -> Json<Vec<String>> {
 
 async fn list_scans(State(s): State<AppState>) -> Json<Vec<String>> {
     Json(store::list_pdf_files(&s.config))
+}
+
+/// Upload a file (raw body) into exams/ or scans/. The filename is reduced to a
+/// basename (no path traversal). Used by the web/TUI file pickers.
+async fn upload_file(
+    State(s): State<AppState>,
+    Path((kind, filename)): Path<(String, String)>,
+    body: Bytes,
+) -> AppResult<Json<Value>> {
+    let dir = match kind.as_str() {
+        "exams" => s.config.exams_dir(),
+        "scans" => s.config.data_dir.join("scans"),
+        _ => return Err(AppError::BadRequest("kind must be 'exams' or 'scans'".into())),
+    };
+    let fname = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| AppError::BadRequest("invalid filename".into()))?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(dir.join(fname), &body)?;
+    Ok(Json(json!({ "filename": fname })))
 }
 
 async fn exam_columns(

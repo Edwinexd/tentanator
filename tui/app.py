@@ -11,12 +11,15 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from pathlib import Path
+
 from textual import on
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import (
     Button,
+    DirectoryTree,
     Footer,
     Header,
     Input,
@@ -29,6 +32,49 @@ from textual.widgets import (
 )
 
 from api import APIError, TentanatorAPI
+
+
+class FilePickerScreen(Screen):
+    """Browse the local filesystem and upload a file into exams/ or scans/."""
+
+    BINDINGS = [("escape", "cancel", "Back")]
+
+    def __init__(self, default_kind: str = "exams") -> None:
+        super().__init__()
+        self.default_kind = default_kind
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Label("Pick a file to upload (Enter on a file)")
+        with Horizontal(id="fpbar"):
+            yield Label("Upload as: ")
+            yield Select(
+                [("exam / grades file (exams/)", "exams"), ("scanned exam PDF (scans/)", "scans")],
+                value=self.default_kind,
+                allow_blank=False,
+                id="fpkind",
+            )
+        yield DirectoryTree(str(Path.home()), id="fptree")
+        yield Footer()
+
+    @on(DirectoryTree.FileSelected)
+    async def _selected(self, event: DirectoryTree.FileSelected) -> None:
+        kind = str(self.query_one("#fpkind", Select).value)
+        path = str(event.path)
+        self.notify(f"Uploading {Path(path).name}…", timeout=3)
+        try:
+            res = await self.app.api.upload_file(kind, path)  # type: ignore[attr-defined]
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        except OSError as exc:
+            self.notify(f"Cannot read file: {exc}", severity="error", timeout=8)
+            return
+        self.notify(f"Uploaded {res.get('filename')} to {kind}/")
+        self.app.pop_screen()
+
+    def action_cancel(self) -> None:
+        self.app.pop_screen()
 
 
 def row_id(row: Dict[str, str], id_columns: List[str]) -> str:
@@ -44,7 +90,11 @@ def is_meaningful(text: str) -> bool:
 class SessionListScreen(Screen):
     """Landing screen: pick an existing session or start a new one."""
 
-    BINDINGS = [("n", "new_session", "New session"), ("r", "refresh", "Refresh")]
+    BINDINGS = [
+        ("n", "new_session", "New session"),
+        ("u", "upload", "Upload file"),
+        ("r", "refresh", "Refresh"),
+    ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -79,6 +129,9 @@ class SessionListScreen(Screen):
 
     def action_new_session(self) -> None:
         self.app.push_screen(NewSessionScreen())
+
+    def action_upload(self) -> None:
+        self.app.push_screen(FilePickerScreen())
 
     async def action_refresh(self) -> None:
         await self.refresh_sessions()

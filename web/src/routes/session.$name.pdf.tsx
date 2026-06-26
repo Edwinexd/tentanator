@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import { api } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
@@ -16,6 +16,19 @@ function PdfView() {
   useEffect(() => {
     api.listScans().then(setScans).catch(() => {})
   }, [])
+
+  async function onUpload(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    setError(null)
+    try {
+      await api.uploadFile('scans', f)
+      setScans(await api.listScans())
+      setScan(f.name)
+    } catch (err) {
+      setError((err as Error).message)
+    }
+  }
 
   async function generate(withCover: boolean) {
     setBusy(true)
@@ -45,21 +58,22 @@ function PdfView() {
 
       <section className="space-y-2">
         <h2 className="font-semibold">1. Scanned exam PDF (cover pages)</h2>
-        {scans.length === 0 ? (
-          <p className="text-sm text-amber-700">
-            No scanned PDFs found. Drop the scanned exam (with cover-page barcodes) into{' '}
-            <code>data/scans/</code> to include cover pages.
-          </p>
-        ) : (
-          <select className="rounded border p-2" value={scan} onChange={(e) => setScan(e.target.value)}>
-            <option value="">select a scanned PDF…</option>
-            {scans.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        )}
+        <div className="flex flex-wrap items-center gap-3">
+          {scans.length > 0 && (
+            <select className="rounded border p-2" value={scan} onChange={(e) => setScan(e.target.value)}>
+              <option value="">select a scanned PDF…</option>
+              {scans.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          )}
+          <label className="text-sm text-gray-600">
+            {scans.length > 0 ? 'or upload' : 'upload a scanned exam PDF'}{' '}
+            <input type="file" accept="application/pdf,.pdf" onChange={onUpload} className="text-sm" />
+          </label>
+        </div>
       </section>
 
       <section className="space-y-2">

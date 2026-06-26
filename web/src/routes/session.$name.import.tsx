@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router'
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ChangeEvent } from 'react'
 import { api, type GradeConflict, type ImportSummary, type Session } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
@@ -56,6 +56,19 @@ function ImportView() {
       .catch((e: Error) => setError(e.message))
   }, [file])
 
+  async function onUpload(e: ChangeEvent<HTMLInputElement>) {
+    const f = e.target.files?.[0]
+    if (!f) return
+    setError(null)
+    try {
+      await api.uploadFile('exams', f)
+      setExams(await api.listExams())
+      setFile(f.name)
+    } catch (err) {
+      setError((err as Error).message)
+    }
+  }
+
   function buildReq() {
     const mappings = Object.entries(mapping)
       .filter(([, c]) => c)
@@ -104,7 +117,7 @@ function ImportView() {
           Pick a graded file (from <code>exams/</code>), map its id column and any grade columns to
           questions, then preview and apply. Conflicting grades are flagged for review.
         </p>
-        <div className="flex flex-wrap gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <label className="text-sm">
             File{' '}
             <select className="rounded border p-1" value={file} onChange={(e) => setFile(e.target.value)}>
@@ -115,6 +128,10 @@ function ImportView() {
                 </option>
               ))}
             </select>
+          </label>
+          <label className="text-sm text-gray-600">
+            or upload{' '}
+            <input type="file" accept=".xlsx,.xls,.csv" onChange={onUpload} className="text-sm" />
           </label>
           {columns.length > 0 && (
             <label className="text-sm">
