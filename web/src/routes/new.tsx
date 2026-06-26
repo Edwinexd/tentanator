@@ -15,6 +15,13 @@ import { Label } from '#/components/ui/label'
 import { Checkbox } from '#/components/ui/checkbox'
 import { Alert, AlertDescription } from '#/components/ui/alert'
 import { Separator } from '#/components/ui/separator'
+import {
+  Select,
+  SelectTrigger,
+  SelectValue,
+  SelectContent,
+  SelectItem,
+} from '#/components/ui/select'
 import { ArrowLeft, Wand2 } from 'lucide-react'
 
 export const Route = createFileRoute('/new')({ component: NewSession })

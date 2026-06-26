@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import {
   api,
+  type GradeScheme,
   type QuestionConfigUpdate,
   type ResultsResponse,
 } from '#/lib/api'
@@ -78,8 +79,8 @@ function SchemeView() {
             var: q?.var ?? col.replace(/\s+/g, '_').toLowerCase(),
             group: q?.group ?? '',
             qtype: normQtype(q?.qtype ?? ''),
-            max_points: q?.max_points ?? maxGuess ?? undefined,
-            position: q?.position ?? undefined,
+            max_points: q?.max_points ?? maxGuess ?? 0,
+            position: q?.position ?? 0,
           }
         })
         setCfg(cfgList)
@@ -132,9 +133,16 @@ function SchemeView() {
     setSelected((s) => (s.size === cfg.length ? new Set() : new Set(cfg.map((r) => r.col))))
   }
 
-  function parseScheme(): { vars: { name: string; expr: string }[]; constants: { name: string; value: number }[]; rules: { when: string; grade: string }[] } | null {
+  function parseScheme(): GradeScheme | null {
     try {
-      return JSON.parse(schemeText)
+      const raw = JSON.parse(schemeText) as Partial<GradeScheme>
+      return {
+        constants: raw.constants ?? [],
+        vars: raw.vars ?? [],
+        rules: raw.rules ?? [],
+        total_var: raw.total_var ?? '',
+        default_grade: raw.default_grade ?? '',
+      }
     } catch { return null }
   }
 
@@ -155,11 +163,7 @@ function SchemeView() {
       const s = parseScheme()
       if (!s) return setError('Failed to parse scheme JSON')
       await api.putQuestionsConfig(name, cfg)
-      const r = await api.previewResults(name, {
-        vars: s.vars,
-        constants: s.constants,
-        rules: s.rules,
-      })
+      const r = await api.previewResults(name, s)
       setPreview(r)
     } catch (e) {
       setError((e as Error).message)
@@ -172,11 +176,7 @@ function SchemeView() {
       const s = parseScheme()
       if (!s) return setError('Failed to parse scheme JSON')
       await api.putQuestionsConfig(name, cfg)
-      await api.putScheme(name, {
-        vars: s.vars,
-        constants: s.constants,
-        rules: s.rules,
-      })
+      await api.putScheme(name, s)
       setInfo('Scheme saved')
     } catch (e) {
       setError((e as Error).message)
@@ -351,8 +351,8 @@ function SchemeView() {
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="flex flex-wrap gap-2">
-              <Badge variant="secondary">{preview.students.length} students</Badge>
-              <Badge variant="secondary">{preview.conflicts ?? 0} conflict(s)</Badge>
+              <Badge variant="secondary">{preview.results.length} students</Badge>
+              <Badge variant="secondary">{preview.unresolved_conflicts} conflict(s)</Badge>
             </div>
             <div className="max-h-80 overflow-auto rounded border">
               <Table>
@@ -366,12 +366,12 @@ function SchemeView() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {preview.students.map((s) => (
+                  {preview.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade ?? '—'}</TableCell>
-                      <TableCell>{s.total?.toFixed(1) ?? '—'}</TableCell>
-                      <TableCell>{s.estimate?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.grade || '—'}</TableCell>
+                      <TableCell>{s.total.toFixed(1)}</TableCell>
+                      <TableCell>{s.estimated.length > 0 ? s.estimated.join(', ') : '—'}</TableCell>
                       <TableCell>{s.complete ? '✓' : '…'}</TableCell>
                     </TableRow>
                   ))}

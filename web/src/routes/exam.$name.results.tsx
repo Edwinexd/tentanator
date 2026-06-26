@@ -43,6 +43,31 @@ function ResultsView() {
     }
   }
 
+  async function exportPdf() {
+    setError(null)
+    setInfo(null)
+    try {
+      const result = await api.exportResultsPdf(name)
+      // export/results-pdf returns opaque JSON proxied from the renderer; if it
+      // points at a generated file, download it via the graded-files endpoint.
+      const ref =
+        typeof result.path === 'string'
+          ? result.path
+          : typeof result.filename === 'string'
+            ? result.filename
+            : null
+      if (ref) {
+        const filename = ref.split('/').pop() ?? ref
+        await api.downloadGraded(filename)
+        setInfo('Download started')
+      } else {
+        setInfo('Results PDF generated')
+      }
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
   const d = data?.distribution
   return (
     <div className="mx-auto max-w-4xl space-y-4 p-8">
@@ -62,7 +87,7 @@ function ResultsView() {
           <TableIcon className="mr-1 h-4 w-4" />
           Export CSV
         </Button>
-        <Button onClick={() => doExport(api.exportResultsPdf)} variant="outline" size="sm">
+        <Button onClick={exportPdf} variant="outline" size="sm">
           <FileText className="mr-1 h-4 w-4" />
           Export results PDF
         </Button>
@@ -82,8 +107,8 @@ function ResultsView() {
       {data && data.has_scheme && (
         <>
           <div className="flex flex-wrap gap-2">
-            <Badge variant="secondary">{data.students.length} students</Badge>
-            <Badge variant="secondary">{data.conflicts ?? 0} unresolved conflict(s)</Badge>
+            <Badge variant="secondary">{data.results.length} students</Badge>
+            <Badge variant="secondary">{data.unresolved_conflicts} unresolved conflict(s)</Badge>
             {d && (
               <>
                 {d.mean != null && <Badge variant="secondary">mean {d.mean.toFixed(1)}</Badge>}
@@ -111,12 +136,14 @@ function ResultsView() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {data.students.map((s) => (
+                  {data.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade ?? '—'}</TableCell>
-                      <TableCell>{s.total?.toFixed(1) ?? '—'}</TableCell>
-                      <TableCell>{s.estimate?.toFixed(1) ?? '—'}</TableCell>
+                      <TableCell>{s.grade || '—'}</TableCell>
+                      <TableCell>{s.total.toFixed(1)}</TableCell>
+                      <TableCell>
+                        {s.estimated.length > 0 ? s.estimated.join(', ') : '—'}
+                      </TableCell>
                       <TableCell>{s.complete ? '✓' : '…'}</TableCell>
                     </TableRow>
                   ))}

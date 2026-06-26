@@ -65,7 +65,7 @@ function Home() {
     Promise.all([
       api.listExams(),
       api.listLegacyWorkspaces().catch(() => [] as WorkspaceInfo[]),
-      api.legacySessionsCount().catch(() => 0),
+      api.legacySessionsInfo().then((r) => r.count).catch(() => 0),
     ])
       .then(([e, w, ls]) => {
         setExams(e)
@@ -81,7 +81,7 @@ function Home() {
   async function importWorkspace(name: string) {
     setError(null)
     try {
-      const r = await api.importLegacyWorkspace(name)
+      const r = await api.importWorkspace(name)
       setInfo(`Imported ${r.imported_exams.length} exam(s) from workspace "${name}"`)
       refresh()
     } catch (e) {

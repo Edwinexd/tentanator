@@ -42,9 +42,9 @@ function PdfView() {
     if (!f) return
     setError(null)
     try {
-      const path = await api.uploadScan(f)
-      setScan(path)
-      setScans((prev) => (prev.includes(path) ? prev : [...prev, path]))
+      const { filename } = await api.uploadScan(f)
+      setScan(filename)
+      setScans((prev) => (prev.includes(filename) ? prev : [...prev, filename]))
     } catch (err) {
       setError((err as Error).message)
     }
@@ -56,9 +56,16 @@ function PdfView() {
     setInfo(null)
     setPdfPath(null)
     try {
-      const result = await api.generateResultsPdf(name, scan || undefined, withCover)
-      setPdfPath(result.path)
-      setInfo(`PDF generated: ${result.path}`)
+      // Cover pages are prepended when a scanned PDF is supplied to the
+      // renderer; the "with cover" button opts into passing the scan.
+      const result = await api.exportResultsPdf(name, withCover ? scan || undefined : undefined)
+      const path = typeof result.path === 'string' ? result.path : null
+      if (path) {
+        setPdfPath(path)
+        setInfo(`PDF generated: ${path}`)
+      } else {
+        setInfo('PDF generated.')
+      }
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -68,10 +75,14 @@ function PdfView() {
 
   async function download() {
     if (!pdfPath) return
-    const a = document.createElement('a')
-    a.href = `/api/exam-files/${encodeURIComponent(pdfPath)}`
-    a.download = pdfPath.split('/').pop() ?? 'results.pdf'
-    a.click()
+    // pdfPath is the renderer's absolute server path; the file lives in
+    // graded_exams/, served by the backend at /api/graded/{filename}.
+    const filename = pdfPath.split('/').pop() ?? 'results.pdf'
+    try {
+      await api.downloadGraded(filename)
+    } catch (e) {
+      setError((e as Error).message)
+    }
   }
 
   return (

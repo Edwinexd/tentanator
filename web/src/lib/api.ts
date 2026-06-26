@@ -3,78 +3,55 @@
 //
 // An exam is the central object; sessions are lightweight grading passes under
 // an exam. Exam *files* on disk live under /api/exam-files.
+//
+// The domain DTOs below are GENERATED from the Rust backend structs via ts-rs
+// (see web/src/lib/generated/). Do not hand-edit them — change the Rust struct
+// and regenerate (`cd backend && cargo test export_bindings`). Request/response
+// transport shapes that have no dedicated Rust struct stay hand-written here.
+
+import type { AIGradeSuggestion } from './generated/AIGradeSuggestion'
+import type { Exam } from './generated/Exam'
+import type { ExamSummary } from './generated/ExamSummary'
+import type { GradeConflict } from './generated/GradeConflict'
+import type { GradeRule } from './generated/GradeRule'
+import type { GradeScheme } from './generated/GradeScheme'
+import type { GradedItem } from './generated/GradedItem'
+import type { ImportResult } from './generated/ImportResult'
+import type { QuestionGrades } from './generated/QuestionGrades'
+import type { SamplingResult } from './generated/SamplingResult'
+import type { SchemeConst } from './generated/SchemeConst'
+import type { SchemeVar } from './generated/SchemeVar'
+import type { Session } from './generated/Session'
+import type { SessionSummary } from './generated/SessionSummary'
+import type { StudentResult } from './generated/StudentResult'
+import type { WorkspaceInfo } from './generated/WorkspaceInfo'
+
+export type {
+  AIGradeSuggestion,
+  Exam,
+  ExamSummary,
+  GradeConflict,
+  GradeRule,
+  GradeScheme,
+  GradedItem,
+  ImportResult,
+  QuestionGrades,
+  SamplingResult,
+  SchemeConst,
+  SchemeVar,
+  Session,
+  SessionSummary,
+  StudentResult,
+  WorkspaceInfo,
+}
 
 const API_BASE: string =
   (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8787'
 
-export interface ExamSummary {
-  name: string
-  exam_file: string
-  course: string | null
-  last_updated: string
-  num_questions: number
-  archived: boolean
-}
+// ---------------------------------------------------------------------------
+// Response structs (transport shapes without a dedicated Rust struct)
+// ---------------------------------------------------------------------------
 
-export interface GradedItem {
-  row_id: string
-  input_text: string
-  grade: string
-  timestamp: string
-}
-
-export interface SamplingResult {
-  algorithm: string
-  selected_ids: string[]
-  quality_score: number
-  num_samples: number
-  timestamp: string
-}
-
-export interface Question {
-  question_name: string
-  input_column: string
-  exam_question: string
-  sample_answer: string
-  global_question_id: string | null
-  graded_items: GradedItem[]
-  sampling_result: SamplingResult | null
-  var: string
-  group: string
-  qtype: string
-  max_points: number
-  position: number
-  estimate?: string | null
-}
-
-export interface SchemeConst {
-  name: string
-  value: number
-}
-export interface SchemeVar {
-  name: string
-  expr: string
-}
-export interface GradeRule {
-  when: string
-  grade: string
-}
-export interface GradeScheme {
-  constants: SchemeConst[]
-  vars: SchemeVar[]
-  rules: GradeRule[]
-  total_var: string
-  default_grade: string
-}
-
-export interface StudentResult {
-  id: string
-  grade: string
-  total: number
-  vars: Record<string, number>
-  estimated: string[]
-  complete: boolean
-}
 export interface ResultsResponse {
   results: StudentResult[]
   distribution: Record<string, number>
@@ -88,11 +65,11 @@ export interface ColMapping {
   column: string
   output_col: string
 }
-export interface ImportReq {
-  file: string
-  id_column: string
-  mappings: ColMapping[]
-  label?: string
+export interface ConflictSample {
+  output_col: string
+  row_id: string
+  existing: string
+  incoming: string
 }
 export interface ImportSummary {
   new: number
@@ -100,19 +77,8 @@ export interface ImportSummary {
   conflict: number
   skipped: number
   unknown_ids: number
-  conflicts: { output_col: string; row_id: string; existing: string; incoming: string }[]
+  conflicts: ConflictSample[]
 }
-export interface GradeConflict {
-  output_col: string
-  row_id: string
-  existing_grade: string
-  existing_source: string
-  incoming_grade: string
-  incoming_source: string
-  input_text: string
-  timestamp: string
-}
-
 export interface QuestionConfigUpdate {
   col: string
   var: string
@@ -121,48 +87,6 @@ export interface QuestionConfigUpdate {
   max_points: number
   position: number
   estimate?: string
-}
-
-export interface Exam {
-  name: string
-  exam_file: string
-  id_columns: string[]
-  input_columns: string[]
-  output_columns: string[]
-  course: string | null
-  last_updated: string
-  questions: Record<string, Question>
-  scheme?: GradeScheme | null
-}
-
-export interface Session {
-  exam: string
-  name: string
-  created_at: string
-  last_updated: string
-}
-
-export interface SessionSummary {
-  exam: string
-  name: string
-  created_at: string
-  last_updated: string
-  graded_count: number
-}
-
-export interface WorkspaceInfo {
-  name: string
-  exams: number
-}
-export interface ImportResult {
-  imported_exams: string[]
-  imported_files: number
-  skipped_files: number
-}
-
-export interface AIGradeSuggestion {
-  grade: string
-  reasoning_summary?: string | null
 }
 
 export interface QuestionStatus {
@@ -174,8 +98,97 @@ export interface QuestionStatus {
   sampling_result: SamplingResult | null
 }
 
+export interface RenderQuestion {
+  label: string
+  group: string
+  qtype: string
+  response: string
+  points: number | null
+  max: number
+  estimated: boolean
+}
+export interface RenderStudent {
+  id: string
+  grade: string
+  total: number
+  questions: RenderQuestion[]
+}
+export interface RenderData {
+  exam: string
+  students: RenderStudent[]
+}
+
+// ---------------------------------------------------------------------------
+// Request structs
+// ---------------------------------------------------------------------------
+
+export interface CreateExam {
+  exam_file: string
+  id_columns: string[]
+  input_columns: string[]
+  output_columns: string[]
+  name?: string
+  course?: string
+}
+
+export interface ExamMeta {
+  course: string | null
+}
+
+export interface ColumnsReq {
+  id_columns: string[]
+  input_columns: string[]
+  output_columns: string[]
+}
+
+export interface CreateSessionReq {
+  name?: string
+}
+
+export interface QuestionMeta {
+  exam_question?: string | null
+  sample_answer?: string | null
+  global_question_id?: string | null
+}
+
+export interface SamplingReq {
+  algorithm: Algorithm
+  n_samples?: number
+}
+
+export interface GradeReq {
+  row_id: string
+  grade: string
+  session?: string
+}
+
+export interface SuggestReq {
+  row_id: string
+}
+
+export interface ImportReq {
+  file: string
+  id_column: string
+  mappings: ColMapping[]
+  label?: string
+}
+
+export interface ResolveReq {
+  output_col: string
+  row_id: string
+  choose: string
+}
+
+export interface ResultsPdfReq {
+  scanned_pdf?: string | null
+}
+
 export type ExamRow = Record<string, string>
 export type Algorithm = 'random' | 'maximin'
+
+// ---------------------------------------------------------------------------
+// Plumbing
+// ---------------------------------------------------------------------------
 
 async function req<T>(method: string, path: string, body?: unknown): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
@@ -225,12 +238,39 @@ async function triggerDownload(method: string, path: string): Promise<void> {
   URL.revokeObjectURL(url)
 }
 
+async function uploadBinary(
+  kind: 'exams' | 'scans',
+  file: File,
+): Promise<{ filename: string }> {
+  const res = await fetch(`${API_BASE}/api/files/${kind}/${enc(file.name)}`, {
+    method: 'PUT',
+    body: file,
+  })
+  if (!res.ok) {
+    let message = res.statusText
+    try {
+      const d = (await res.json()) as { error?: string }
+      if (d.error) message = d.error
+    } catch {
+      // non-JSON
+    }
+    throw new Error(`HTTP ${res.status}: ${message}`)
+  }
+  return (await res.json()) as { filename: string }
+}
+
 export const api = {
+  // --- health ---
+  health: () => req<{ status: string }>('GET', '/api/health'),
+
   // --- exam files on disk ---
   listExamFiles: () => req<string[]>('GET', '/api/exam-files'),
+  listScans: () => req<string[]>('GET', '/api/scans'),
   examColumns: (file: string) => req<string[]>('GET', `/api/exam-files/${enc(file)}/columns`),
   examRows: (file: string) =>
     req<{ rows: ExamRow[] }>('GET', `/api/exam-files/${enc(file)}/rows`).then((r) => r.rows),
+  uploadExamFile: (file: File) => uploadBinary('exams', file),
+  uploadScan: (file: File) => uploadBinary('scans', file),
 
   // --- exams (the central entity) ---
   listExams: (opts: { archived?: boolean; course?: string } = {}) => {
@@ -239,21 +279,12 @@ export const api = {
     if (opts.course) params.set('course', opts.course)
     return req<ExamSummary[]>('GET', `/api/exams?${params.toString()}`)
   },
-  createExam: (payload: {
-    exam_file: string
-    id_columns: string[]
-    input_columns: string[]
-    output_columns: string[]
-    name?: string
-    course?: string
-  }) => req<Exam>('POST', '/api/exams', payload),
+  createExam: (payload: CreateExam) => req<Exam>('POST', '/api/exams', payload),
   getExam: (name: string) => req<Exam>('GET', `/api/exams/${enc(name)}`),
-  updateExam: (name: string, meta: { course?: string }) =>
+  updateExam: (name: string, meta: ExamMeta) =>
     req<Exam>('PUT', `/api/exams/${enc(name)}`, meta),
-  updateExamColumns: (
-    name: string,
-    body: { id_columns: string[]; input_columns: string[]; output_columns: string[] },
-  ) => req<Exam>('PUT', `/api/exams/${enc(name)}/columns`, body),
+  updateExamColumns: (name: string, body: ColumnsReq) =>
+    req<Exam>('PUT', `/api/exams/${enc(name)}/columns`, body),
   archiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/archive`),
   unarchiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/unarchive`),
   deleteExam: (name: string) => req<void>('DELETE', `/api/exams/${enc(name)}`),
@@ -270,78 +301,71 @@ export const api = {
   listSessions: (exam: string) =>
     req<SessionSummary[]>('GET', `/api/exams/${enc(exam)}/sessions`),
   createSession: (exam: string, name?: string) =>
-    req<Session>('POST', `/api/exams/${enc(exam)}/sessions`, { name }),
+    req<Session>('POST', `/api/exams/${enc(exam)}/sessions`, { name } satisfies CreateSessionReq),
   deleteSession: (exam: string, session: string) =>
     req<void>('DELETE', `/api/exams/${enc(exam)}/sessions/${enc(session)}`),
 
   // --- questions & grading ---
-  putQuestion: (name: string, col: string, meta: Record<string, unknown>) =>
-    req<Question>('PUT', `/api/exams/${enc(name)}/questions/${enc(col)}`, meta),
+  putQuestion: (name: string, col: string, meta: QuestionMeta) =>
+    req<QuestionGrades>('PUT', `/api/exams/${enc(name)}/questions/${enc(col)}`, meta),
   sampling: (name: string, col: string, algorithm: Algorithm, nSamples?: number) =>
     req<SamplingResult>(
       'POST',
       `/api/exams/${enc(name)}/questions/${enc(col)}/sampling`,
-      nSamples !== undefined ? { algorithm, n_samples: nSamples } : { algorithm },
+      (nSamples !== undefined
+        ? { algorithm, n_samples: nSamples }
+        : { algorithm }) satisfies SamplingReq,
     ),
   grade: (name: string, col: string, rowId: string, grade: string, session?: string) =>
-    req<Question>('POST', `/api/exams/${enc(name)}/questions/${enc(col)}/grade`, {
+    req<QuestionGrades>('POST', `/api/exams/${enc(name)}/questions/${enc(col)}/grade`, {
       row_id: rowId,
       grade,
       session,
-    }),
+    } satisfies GradeReq),
+  ungrade: (name: string, col: string, rowId: string) =>
+    req<QuestionGrades>(
+      'DELETE',
+      `/api/exams/${enc(name)}/questions/${enc(col)}/grade/${enc(rowId)}`,
+    ),
   suggest: (name: string, col: string, rowId: string) =>
     req<AIGradeSuggestion>('POST', `/api/exams/${enc(name)}/questions/${enc(col)}/suggest`, {
       row_id: rowId,
-    }),
+    } satisfies SuggestReq),
   questionStatus: (name: string, col: string) =>
     req<QuestionStatus>('GET', `/api/exams/${enc(name)}/questions/${enc(col)}/status`),
 
-  // --- exports & results ---
-  exportExam: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export`),
-  exportDaisy: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/daisy`),
-  exportCsv: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/csv`),
-  downloadGraded: (filename: string) => triggerDownload('GET', `/api/graded/${enc(filename)}`),
-  listScans: () => req<string[]>('GET', '/api/scans'),
-  uploadFile: async (kind: 'exams' | 'scans', file: File): Promise<{ filename: string }> => {
-    const res = await fetch(`${API_BASE}/api/files/${kind}/${enc(file.name)}`, {
-      method: 'PUT',
-      body: file,
-    })
-    if (!res.ok) {
-      let message = res.statusText
-      try {
-        const d = (await res.json()) as { error?: string }
-        if (d.error) message = d.error
-      } catch {
-        // non-JSON
-      }
-      throw new Error(`HTTP ${res.status}: ${message}`)
-    }
-    return (await res.json()) as { filename: string }
-  },
-  exportResultsPdf: (name: string, scanned_pdf?: string) =>
-    req<{ path: string; students: number; covers_missing: string[] }>(
-      'POST',
-      `/api/exams/${enc(name)}/export/results-pdf`,
-      { scanned_pdf: scanned_pdf || null },
-    ),
-
-  putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
-    req<Exam>('PUT', `/api/exams/${enc(name)}/questions-config`, updates),
+  // --- scheme, config & results ---
   putScheme: (name: string, scheme: GradeScheme) =>
     req<void>('PUT', `/api/exams/${enc(name)}/scheme`, scheme),
+  putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
+    req<Exam>('PUT', `/api/exams/${enc(name)}/questions-config`, updates),
   getResults: (name: string) => req<ResultsResponse>('GET', `/api/exams/${enc(name)}/results`),
   previewResults: (name: string, scheme: GradeScheme) =>
     req<ResultsResponse>('POST', `/api/exams/${enc(name)}/results`, scheme),
+  renderData: (name: string) =>
+    req<RenderData>('GET', `/api/exams/${enc(name)}/render-data`),
 
+  // --- imports & conflicts ---
   importPreview: (name: string, body: ImportReq) =>
     req<ImportSummary>('POST', `/api/exams/${enc(name)}/import/preview`, body),
   importApply: (name: string, body: ImportReq) =>
     req<ImportSummary>('POST', `/api/exams/${enc(name)}/import/apply`, body),
   getConflicts: (name: string) =>
     req<GradeConflict[]>('GET', `/api/exams/${enc(name)}/conflicts`),
-  resolveConflict: (name: string, body: { output_col: string; row_id: string; choose: string }) =>
+  resolveConflict: (name: string, body: ResolveReq) =>
     req<void>('POST', `/api/exams/${enc(name)}/conflicts/resolve`, body),
+
+  // --- exports & downloads ---
+  exportExam: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export`),
+  exportDaisy: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/daisy`),
+  exportCsv: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/csv`),
+  downloadGraded: (filename: string) => triggerDownload('GET', `/api/graded/${enc(filename)}`),
+  // POST export/results-pdf returns opaque JSON proxied from the renderer
+  // service (NOT a file download).
+  exportResultsPdf: (name: string, scannedPdf?: string) =>
+    req<Record<string, unknown>>('POST', `/api/exams/${enc(name)}/export/results-pdf`, {
+      scanned_pdf: scannedPdf ?? null,
+    } satisfies ResultsPdfReq),
 }
 
 export function rowId(row: ExamRow, idColumns: string[]): string {

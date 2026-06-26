@@ -56,8 +56,8 @@ function ImportView() {
     if (!f) return
     setError(null)
     try {
-      const path = await api.uploadExamFile(f)
-      setFile(path)
+      const { filename } = await api.uploadExamFile(f)
+      setFile(filename)
     } catch (err) {
       setError((err as Error).message)
     }
@@ -68,7 +68,10 @@ function ImportView() {
     return {
       file,
       id_column: idColumn,
-      column_mapping: mappingEntries.map(([from, to]) => ({ from, to })),
+      mappings: mappingEntries.map(([outCol, importCol]) => ({
+        column: importCol,
+        output_col: outCol,
+      })),
     }
   }
 
@@ -87,7 +90,11 @@ function ImportView() {
     setError(null)
     try {
       const r = await api.importApply(name, buildReq())
-      setInfo(`Imported ${r.imported} cell(s) (${r.new_rows} new, ${r.updated_rows} updated)`)
+      setInfo(
+        `Imported ${r.new} new, ${r.same} unchanged, ${r.conflict} conflict(s)` +
+          (r.skipped ? `, ${r.skipped} skipped` : '') +
+          (r.unknown_ids ? `, ${r.unknown_ids} unknown id(s)` : ''),
+      )
       setSummary(null)
       loadConflicts()
     } catch (e) {
@@ -97,7 +104,11 @@ function ImportView() {
 
   async function resolve(c: GradeConflict, choose: 'existing' | 'incoming') {
     try {
-      await api.resolveConflict(name, c.row_id, c.column, choose)
+      await api.resolveConflict(name, {
+        output_col: c.output_col,
+        row_id: c.row_id,
+        choose,
+      })
       loadConflicts()
     } catch (e) {
       setError((e as Error).message)
@@ -199,14 +210,16 @@ function ImportView() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
               <CheckCircle2 className="h-5 w-5 text-green-600" />
-              Preview: {summary.new_cells} new, {summary.update_cells} updates
+              Preview: {summary.new} new, {summary.same} unchanged
             </CardTitle>
           </CardHeader>
           <CardContent>
-            <div className="mb-3 flex gap-2">
-              <Badge variant="secondary">{summary.new_rows} new rows</Badge>
-              <Badge variant="secondary">{summary.updated_rows} updated rows</Badge>
-              <Badge variant="secondary">{summary.conflicts} conflict(s)</Badge>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <Badge variant="secondary">{summary.new} new</Badge>
+              <Badge variant="secondary">{summary.same} unchanged</Badge>
+              <Badge variant="secondary">{summary.conflict} conflict(s)</Badge>
+              <Badge variant="secondary">{summary.skipped} skipped</Badge>
+              <Badge variant="secondary">{summary.unknown_ids} unknown id(s)</Badge>
             </div>
             <Button onClick={apply}>Apply import</Button>
           </CardContent>
@@ -223,18 +236,18 @@ function ImportView() {
           </CardHeader>
           <CardContent className="space-y-2">
             {conflicts.map((c) => (
-              <div key={`${c.row_id}_${c.column}`} className="flex items-center justify-between rounded border p-2 text-sm">
+              <div key={`${c.row_id}_${c.output_col}`} className="flex items-center justify-between rounded border p-2 text-sm">
                 <div>
-                  <span className="font-medium">{c.row_id}</span> / <span>{c.column}</span>:{' '}
-                  existing=<span className="font-medium">{c.existing}</span>{' '}
-                  incoming=<span className="font-medium">{c.incoming}</span>
+                  <span className="font-medium">{c.row_id}</span> / <span>{c.output_col}</span>:{' '}
+                  existing=<span className="font-medium">{c.existing_grade}</span>{' '}
+                  incoming=<span className="font-medium">{c.incoming_grade}</span>
                 </div>
                 <div className="flex gap-1">
                   <Button onClick={() => resolve(c, 'existing')} variant="outline" size="sm">
-                    Keep {c.existing}
+                    Keep {c.existing_grade}
                   </Button>
                   <Button onClick={() => resolve(c, 'incoming')} variant="outline" size="sm">
-                    Use {c.incoming}
+                    Use {c.incoming_grade}
                   </Button>
                 </div>
               </div>
