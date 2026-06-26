@@ -52,14 +52,6 @@ def _fmt_pts(p):
     return f"{p:.2f}" if isinstance(p, (int, float)) else "-"
 
 
-def _qlabel(q):
-    """Heading for a question: "Q{n}", plus the label when it is meaningful (not
-    just the generic points-column name)."""
-    lab = (q.get("label") or "").strip()
-    n = q["_n"]
-    if lab and not re.match(r"(?i)^points?\s*\d+$", lab):
-        return rf"Q{n}: {latex_escape(lab)}"
-    return rf"Q{n}"
 
 
 def build_tex_for_student(st, barcode_dir):
@@ -95,10 +87,8 @@ def build_tex_for_student(st, barcode_dir):
         r"\vspace{4pt}\hrule\vspace{8pt}",
     ]
 
-    # One continuous layout (no per-section re-grouping): all short answers in a
-    # single table, then essays, then ungraded comment/notes - mirroring the
-    # reference sample. Question type drives the bucket; long responses fall back
-    # to the essay layout.
+    # MC / short-answer table (mc, sc, or unset qtype), then essays, then
+    # ungraded comments — mirroring the reference PVT sample layout.
     short, essays, comments = [], [], []
     for i, q in enumerate(st["questions"], 1):
         q = dict(q)
@@ -107,13 +97,13 @@ def build_tex_for_student(st, barcode_dir):
         resp = str(q.get("response", "") or "")
         if qt == "comment":
             comments.append(q)
-        elif qt == "essay" or len(resp) > 120:
+        elif qt == "essay":
             essays.append(q)
         else:
             short.append(q)
 
     if short:
-        lines.append(r"\textbf{Responses} \hfill {\normalfont\itshape Q | Response | Pts}\par\medskip")
+        lines.append(r"\textbf{Multiple-choice} \hfill {\normalfont\itshape Q | Response | Pts}\par\medskip")
         lines.append(r"\renewcommand{\arraystretch}{1.15}")
         lines.append(r"\begin{longtable}{|c|p{0.66\textwidth}|c|}\hline")
         for q in short:
@@ -124,11 +114,15 @@ def build_tex_for_student(st, barcode_dir):
         lines.append(r"\end{longtable}")
 
     for q in essays:
+        n = q["_n"]
+        grp = (q.get("group") or "").strip()
+        label = f"{grp} essay (Q{n})" if grp else f"Essay (Q{n})"
         mx = q.get("max") or 0
+        pts = _fmt_pts(q.get("points"))
         est = " (estimated)" if q.get("estimated") else ""
         lines.append(
-            rf"\par\medskip\textbf{{{_qlabel(q)}}} \hfill "
-            rf"\textbf{{{_fmt_pts(q.get('points'))}{est}}} / {mx:.0f}"
+            rf"\par\medskip\textbf{{{latex_escape(label)}}} \hfill "
+            rf"\textbf{{{pts}{est}}} / {mx:.0f}"
         )
         lines.append(r"\par\smallskip")
         body = str(q.get("response", "") or "")
@@ -141,14 +135,16 @@ def build_tex_for_student(st, barcode_dir):
                     lines.append(latex_escape(p) + r"\par")
 
     for q in comments:
+        n = q["_n"]
         body = str(q.get("response", "") or "")
         if not body or body.strip() in ("", "-"):
             continue
-        lines.append(rf"\par\medskip\textbf{{{_qlabel(q)} notes (not graded)}}\par")
+        lines.append(rf"\par\medskip\textbf{{Student notes (Q{n}, not graded)}}\par")
         for p in re.split(r"\s{4,}|\n+", body):
             p = p.strip()
             if p:
                 lines.append(rf"\textit{{{latex_escape(p)}}}\par")
+
 
     lines.append(r"\end{document}")
     return "\n".join(lines)
