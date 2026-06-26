@@ -53,6 +53,68 @@ function normQtype(v: string): string {
   return QTYPES.some((t) => t.v === lo) ? lo : ''
 }
 
+// Readable round-trip for the scheme editor. One statement per line:
+//   const <name> = <number>          a tunable constant
+//   <name> = <expr>                  a named aggregate variable
+//   when <cond> -> <grade>           a guarded rule (first match wins)
+//   total_var: <name>                headline total var (optional)
+//   default_grade: <grade>           grade when no rule matches (optional)
+// Blank lines and `#` comments are ignored. schemeToText is the exact inverse
+// of textToScheme, so loading then saving a scheme is a no-op.
+function schemeToText(s: GradeScheme): string {
+  const sections: string[] = []
+  const meta: string[] = []
+  if (s.total_var) meta.push(`total_var: ${s.total_var}`)
+  if (s.default_grade) meta.push(`default_grade: ${s.default_grade}`)
+  if (meta.length) sections.push(meta.join('\n'))
+  if (s.constants?.length) sections.push(s.constants.map((c) => `const ${c.name} = ${c.value}`).join('\n'))
+  if (s.vars?.length) sections.push(s.vars.map((v) => `${v.name} = ${v.expr}`).join('\n'))
+  if (s.rules?.length) sections.push(s.rules.map((r) => `when ${r.when} -> ${r.grade}`).join('\n'))
+  return sections.join('\n\n')
+}
+
+function textToScheme(text: string): GradeScheme {
+  const s: GradeScheme = { constants: [], vars: [], rules: [], total_var: '', default_grade: '' }
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim()
+    if (!line || line.startsWith('#')) continue
+    const at = `line ${i + 1}`
+    if (line.startsWith('total_var:')) {
+      s.total_var = line.slice('total_var:'.length).trim()
+    } else if (line.startsWith('default_grade:')) {
+      s.default_grade = line.slice('default_grade:'.length).trim()
+    } else if (line.startsWith('const ')) {
+      const body = line.slice('const '.length)
+      const eq = body.indexOf('=')
+      const name = eq < 0 ? '' : body.slice(0, eq).trim()
+      const value = Number(body.slice(eq + 1).trim())
+      if (eq < 0 || !name || Number.isNaN(value))
+        throw new Error(`${at}: expected 'const <name> = <number>', got '${line}'`)
+      s.constants.push({ name, value })
+    } else if (line.startsWith('when ')) {
+      const body = line.slice('when '.length)
+      const arrow = body.indexOf('->')
+      const when = arrow < 0 ? '' : body.slice(0, arrow).trim()
+      const grade = body.slice(arrow + 2).trim()
+      if (arrow < 0 || !when || !grade)
+        throw new Error(`${at}: expected 'when <cond> -> <grade>', got '${line}'`)
+      s.rules.push({ when, grade })
+    } else if (line.includes('->')) {
+      throw new Error(`${at}: a rule must start with 'when', got '${line}'`)
+    } else if (line.includes('=')) {
+      const eq = line.indexOf('=')
+      const name = line.slice(0, eq).trim()
+      const expr = line.slice(eq + 1).trim()
+      if (!name || !expr) throw new Error(`${at}: expected '<name> = <expr>', got '${line}'`)
+      s.vars.push({ name, expr })
+    } else {
+      throw new Error(`${at}: unrecognized statement '${line}'`)
+    }
+  }
+  return s
+}
+
 function SchemeView() {
   const { name } = Route.useParams()
   const [cfg, setCfg] = useState<QuestionConfigUpdate[]>([])
@@ -84,11 +146,7 @@ function SchemeView() {
           }
         })
         setCfg(cfgList)
-        if (e.scheme) {
-          setSchemeText(JSON.stringify(e.scheme, null, 2))
-        } else {
-          setSchemeText('')
-        }
+        setSchemeText(e.scheme ? schemeToText(e.scheme) : '')
         return api.examRows(e.exam_file)
       })
       .then((rows) => {
@@ -129,18 +187,6 @@ function SchemeView() {
     setSelected((s) => (s.size === cfg.length ? new Set() : new Set(cfg.map((r) => r.col))))
   }
 
-  function parseScheme(): GradeScheme | null {
-    try {
-      const raw = JSON.parse(schemeText) as Partial<GradeScheme>
-      return {
-        constants: raw.constants ?? [],
-        vars: raw.vars ?? [],
-        rules: raw.rules ?? [],
-        total_var: raw.total_var ?? '',
-        default_grade: raw.default_grade ?? '',
-      }
-    } catch { return null }
-  }
 
   async function saveConfig() {
     setError(null)
@@ -156,8 +202,7 @@ function SchemeView() {
     setError(null)
     setPreview(null)
     try {
-      const s = parseScheme()
-      if (!s) return setError('Failed to parse scheme JSON')
+      const s = textToScheme(schemeText)
       await api.putQuestionsConfig(name, cfg)
       const r = await api.previewResults(name, s)
       setPreview(r)
@@ -169,8 +214,7 @@ function SchemeView() {
   async function saveScheme() {
     setError(null)
     try {
-      const s = parseScheme()
-      if (!s) return setError('Failed to parse scheme JSON')
+      const s = textToScheme(schemeText)
       await api.putQuestionsConfig(name, cfg)
       await api.putScheme(name, s)
       setInfo('Scheme saved')
@@ -314,8 +358,10 @@ function SchemeView() {
         <CardHeader>
           <CardTitle className="text-lg">Grade scheme</CardTitle>
           <CardDescription>
-            JSON format:{' '}
-            {'{ constants: [{name, value}], vars: [{name, expr}], rules: [{when, grade}] }'}
+            One statement per line: <code>const name = value</code>,{' '}
+            <code>name = expr</code>, <code>when cond -&gt; grade</code>. Optional{' '}
+            <code>total_var:</code> / <code>default_grade:</code>. Blank lines and{' '}
+            <code>#</code> comments ignored.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
