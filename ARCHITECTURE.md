@@ -113,6 +113,8 @@ status.
 | GET | `/api/legacy-sessions` | — | `{ count }` (loose `.tentanator_sessions/`) |
 | POST | `/api/legacy-sessions/import` | — | `{ imported_exams[] }` |
 | GET | `/api/exam-files` | — | `string[]` filenames in `exams/` |
+| GET | `/api/scans` | — | `string[]` scanned PDF filenames in `scans/` |
+| PUT | `/api/files/{kind}/{filename}` | raw bytes | `{ filename }` (`kind` ∈ `exams`/`scans`) |
 | GET | `/api/exam-files/{file}/columns` | — | `string[]` header names |
 | GET | `/api/exam-files/{file}/rows` | — | `{ rows: object[] }` (cells as strings) |
 
@@ -126,6 +128,7 @@ status.
 | DELETE | `/api/exams/{name}` | — | `204` |
 | POST | `/api/exams/{name}/archive` | — | `204` |
 | POST | `/api/exams/{name}/unarchive` | — | `204` |
+| PUT | `/api/exams/{name}/columns` | `{ id_columns[]?, input_columns[], output_columns[] }` | `Exam` |
 
 ### Sessions (grading passes under an exam)
 | Method | Path | Body | Returns |
@@ -142,7 +145,8 @@ status.
 | POST | `/api/exams/{name}/questions/{col}/grade` | `{ row_id, grade, session? }` | `Question` |
 | DELETE | `/api/exams/{name}/questions/{col}/grade/{row_id}` | — | `Question` |
 | POST | `/api/exams/{name}/questions/{col}/suggest` | `{ row_id }` | `AIGradeSuggestion` |
-| POST | `/api/exams/{name}/export` | — | `{ path }` |
+| GET | `/api/exams/{name}/questions/{col}/status` | — | `QuestionStatus` (graded counts, ICL readiness) |
+| POST | `/api/exams/{name}/export` | — | graded `.xlsx` file (attachment, not JSON) |
 
 `CreateExam = { exam_file, id_columns[], input_columns[], output_columns[], name?, course? }`
 `QuestionMeta = { exam_question?, sample_answer?, global_question_id? }`
@@ -152,6 +156,28 @@ status.
 Grades accept the legacy signed-sum syntax (`"2+1.5+2.5"`, `"7.5"`, `"2+2.5-0.5"`);
 the backend validates and stores both the raw expression (for ICL context) and
 the evaluated numeric total (for export).
+
+### Scheme, results, import & engine exports
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| PUT | `/api/exams/{name}/scheme` | `GradeScheme` | `204` |
+| PUT | `/api/exams/{name}/questions-config` | `QuestionConfigUpdate[]` | `Exam` |
+| GET | `/api/exams/{name}/results` | — | `ResultsResponse` |
+| POST | `/api/exams/{name}/results` | `GradeScheme` | `ResultsResponse` (live preview of an unsaved scheme) |
+| POST | `/api/exams/{name}/import/preview` | `ImportReq` | `ImportSummary` |
+| POST | `/api/exams/{name}/import/apply` | `ImportReq` | `ImportSummary` |
+| GET | `/api/exams/{name}/conflicts` | — | `GradeConflict[]` |
+| POST | `/api/exams/{name}/conflicts/resolve` | `ResolveReq` | `204` |
+| GET | `/api/exams/{name}/render-data` | — | `RenderData` (per-student renderer contract) |
+| GET | `/api/exams/{name}/scans` | — | `ScanMatch[]` (scans eligible for cover pages) |
+| POST | `/api/exams/{name}/export/daisy` | — | Daisy `id,grade` `.xlsx` (attachment) |
+| POST | `/api/exams/{name}/export/csv` | — | per-question `.csv` (attachment) |
+| POST | `/api/exams/{name}/export/results-pdf` | `{ scanned_pdf? }` | renderer JSON (proxied; PDF lands in `graded_exams/`) |
+| GET | `/api/graded/{filename}` | — | streams a file from `graded_exams/` |
+
+`ImportReq = { file, id_column, mappings: [{ column, output_col }], label? }`
+`ResolveReq = { output_col, row_id, choose }` (`choose ∈ existing | incoming`).
 
 ## Examination engine (v2)
 

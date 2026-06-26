@@ -6,6 +6,7 @@ Rust Axum backend defined in ../ARCHITECTURE.md.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Optional
 
 import httpx
@@ -22,31 +23,62 @@ class APIError(Exception):
         self.message = message
 
 
+# A 1:1 mirror of the backend's HTTP routes: every method is a trivial
+# passthrough, so per-method docstrings add noise and the method count tracks
+# the API surface by design (parity is enforced by scripts/check_api_parity.py).
+# pylint: disable=missing-function-docstring,too-many-public-methods
 class TentanatorAPI:
     """Thin async wrapper over the backend's /api endpoints."""
 
     def __init__(self, base_url: str = DEFAULT_BASE_URL) -> None:
         self.base_url = base_url.rstrip("/")
         self._client = httpx.AsyncClient(base_url=self.base_url, timeout=120.0)
+        # Export/download routes stream bytes the backend does not persist, so
+        # the client saves them locally.
+        self.graded_dir = os.getenv("TENTANATOR_GRADED_DIR", "graded_exams")
 
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+    @staticmethod
+    def _error_detail(resp: httpx.Response) -> str:
+        detail = resp.text
+        try:
+            detail = resp.json().get("error", detail)
+        except Exception:  # pylint: disable=broad-exception-caught
+            pass
+        return detail
+
+    async def _send(self, method: str, path: str, **kwargs: Any) -> httpx.Response:
         try:
             resp = await self._client.request(method, path, **kwargs)
         except httpx.RequestError as exc:
             raise APIError(0, f"cannot reach backend at {self.base_url} ({exc})") from exc
         if resp.status_code >= 400:
-            detail = resp.text
-            try:
-                detail = resp.json().get("error", detail)
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
-            raise APIError(resp.status_code, detail)
+            raise APIError(resp.status_code, self._error_detail(resp))
+        return resp
+
+    async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        resp = await self._send(method, path, **kwargs)
         if resp.status_code == 204 or not resp.content:
             return None
         return resp.json()
+
+    async def _download(self, method: str, path: str, **kwargs: Any) -> Dict[str, str]:
+        """Fetch a file attachment and save it under ``graded_dir``.
+
+        Export/download routes stream bytes (not JSON); the backend does not
+        persist them. Returns ``{"filename", "path"}``.
+        """
+        resp = await self._send(method, path, **kwargs)
+        cd = resp.headers.get("content-disposition", "")
+        match = re.search(r'filename="?([^"]+)"?', cd)
+        filename = match.group(1) if match else (os.path.basename(path) or "download")
+        os.makedirs(self.graded_dir, exist_ok=True)
+        out_path = os.path.join(self.graded_dir, filename)
+        with open(out_path, "wb") as fh:
+            fh.write(resp.content)
+        return {"filename": filename, "path": out_path}
 
     # -- health & exam files ----------------------------------------------
     async def health(self) -> Dict[str, Any]:
@@ -61,6 +93,9 @@ class TentanatorAPI:
     async def exam_rows(self, file: str) -> List[Dict[str, str]]:
         data = await self._request("GET", f"/api/exam-files/{file}/rows")
         return data.get("rows", [])
+
+    async def list_scans(self) -> List[str]:
+        return await self._request("GET", "/api/scans")
 
     # -- exams (the central entity) ---------------------------------------
     async def list_exams(self, archived: bool = False) -> List[Dict[str, Any]]:
@@ -80,6 +115,12 @@ class TentanatorAPI:
 
     async def archive_exam(self, name: str) -> None:
         await self._request("POST", f"/api/exams/{name}/archive")
+
+    async def unarchive_exam(self, name: str) -> None:
+        await self._request("POST", f"/api/exams/{name}/unarchive")
+
+    async def update_exam_columns(self, name: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("PUT", f"/api/exams/{name}/columns", json=body)
 
     # -- legacy import (old Python-app data -> new format, on demand) -------
     async def legacy_sessions_info(self) -> Dict[str, Any]:
@@ -134,30 +175,62 @@ class TentanatorAPI:
     async def question_status(self, name: str, col: str) -> Dict[str, Any]:
         return await self._request("GET", f"/api/exams/{name}/questions/{col}/status")
 
-    async def export(self, name: str) -> Dict[str, Any]:
-        return await self._request("POST", f"/api/exams/{name}/export")
+    async def export(self, name: str) -> Dict[str, str]:
+        return await self._download("POST", f"/api/exams/{name}/export")
+
+    async def export_daisy(self, name: str) -> Dict[str, str]:
+        return await self._download("POST", f"/api/exams/{name}/export/daisy")
+
+    async def export_csv(self, name: str) -> Dict[str, str]:
+        return await self._download("POST", f"/api/exams/{name}/export/csv")
+
+    async def export_results_pdf(self, name: str,
+                                 scanned_pdf: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request(
+            "POST", f"/api/exams/{name}/export/results-pdf",
+            json={"scanned_pdf": scanned_pdf},
+        )
+
+    async def download_graded(self, filename: str) -> Dict[str, str]:
+        return await self._download("GET", f"/api/graded/{filename}")
 
     async def get_results(self, name: str) -> Dict[str, Any]:
         return await self._request("GET", f"/api/exams/{name}/results")
 
+    async def preview_results(self, name: str, scheme: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("POST", f"/api/exams/{name}/results", json=scheme)
+
+    async def render_data(self, name: str) -> Dict[str, Any]:
+        return await self._request("GET", f"/api/exams/{name}/render-data")
+
+    async def list_exam_scans(self, name: str) -> List[Dict[str, Any]]:
+        return await self._request("GET", f"/api/exams/{name}/scans")
+
+    # -- scheme & question config -----------------------------------------
+    async def put_scheme(self, name: str, scheme: Dict[str, Any]) -> None:
+        await self._request("PUT", f"/api/exams/{name}/scheme", json=scheme)
+
+    async def put_questions_config(self, name: str,
+                                   updates: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return await self._request("PUT", f"/api/exams/{name}/questions-config", json=updates)
+
+    # -- import & conflict resolution -------------------------------------
+    async def import_preview(self, name: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("POST", f"/api/exams/{name}/import/preview", json=body)
+
+    async def import_apply(self, name: str, body: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("POST", f"/api/exams/{name}/import/apply", json=body)
+
+    async def get_conflicts(self, name: str) -> List[Dict[str, Any]]:
+        return await self._request("GET", f"/api/exams/{name}/conflicts")
+
+    async def resolve_conflict(self, name: str, body: Dict[str, Any]) -> None:
+        await self._request("POST", f"/api/exams/{name}/conflicts/resolve", json=body)
+
     async def upload_file(self, kind: str, path: str) -> Dict[str, Any]:
         """Upload a local file (raw body) into exams/ or scans/."""
-        import os
-
         with open(path, "rb") as fh:
             data = fh.read()
         fname = os.path.basename(path)
-        try:
-            resp = await self._client.request(
-                "PUT", f"/api/files/{kind}/{fname}", content=data
-            )
-        except httpx.RequestError as exc:
-            raise APIError(0, f"cannot reach backend ({exc})") from exc
-        if resp.status_code >= 400:
-            detail = resp.text
-            try:
-                detail = resp.json().get("error", detail)
-            except Exception:  # pylint: disable=broad-exception-caught
-                pass
-            raise APIError(resp.status_code, detail)
+        resp = await self._send("PUT", f"/api/files/{kind}/{fname}", content=data)
         return resp.json()

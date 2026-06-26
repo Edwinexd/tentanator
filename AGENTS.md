@@ -4,9 +4,32 @@ This file provides guidance to coding agents when working with code in this repo
 
 ## Project Overview
 
-Tentanator is a Python-based AI-powered exam grading system that combines manual grading with in-context learning (few-shot prompting). The workflow: grade sample responses manually → use graded examples as few-shot context → AI suggests grades for remaining responses via Cerebras inference. Works natively with Excel files (.xlsx) for both input and output.
+Tentanator is an AI-powered exam grading system that combines manual grading with in-context learning (few-shot prompting). The workflow: grade sample responses manually → use graded examples as few-shot context → AI suggests grades for remaining responses via Cerebras inference. Works natively with Excel files (.xlsx) for both input and output.
 
-## Development Setup
+## Current architecture (read ARCHITECTURE.md first)
+
+The live system is a shared model with two interchangeable clients — see `ARCHITECTURE.md`:
+
+- `backend/` (Rust + Axum) — the single source of truth. Owns all domain logic, persistence (Turso), sampling, ICL, LLM calls, exports. The HTTP API *is* the model.
+- `tui/` (Python + Textual) — thin client over the HTTP API.
+- `web/` (TanStack Start + React) — thin client over the same HTTP API.
+
+The root Python files (`tentanator.py`, `sampling.py`, `openai_trainer.py`, …) are the **legacy reference implementation**, not the running app. The sections below ("Development Setup" onward) describe that legacy app and are reference-only.
+
+## Client parity (TUI ⇄ Web) — non-negotiable
+
+The TUI and Web never talk to each other; they are both thin clients over the backend. "Parity" therefore means **both clients fully and correctly cover the backend contract**. The backend is authoritative — no business logic lives in a client.
+
+Rules when touching the contract:
+
+- Adding or changing a backend route (`backend/src/routes.rs`) is incomplete until **both** `web/src/lib/api.ts` and `tui/api.py` are updated and the `ARCHITECTURE.md` contract tables list it, or the omission is added to the explicit parity allowlist with a reason.
+- DTO shapes are generated from the Rust structs via ts-rs — do not hand-edit `web/src/lib/generated/`; change the struct and run `cd backend && cargo test export_bindings`. The TUI consumes the same JSON; keep its types in sync.
+- A change is "done" only when the backend, both client API layers, and the `ARCHITECTURE.md` contract tables all agree.
+- A consumer may intentionally omit an endpoint (e.g. browser-only blob downloads). Record such exclusions in `ALLOW_MISSING` rather than leaving them as silent gaps.
+
+Enforcement: `scripts/check_api_parity.py` extracts the `(method, path)` surface from `routes.rs`, both clients, and the doc tables, and fails if any drifts. It runs in CI (`py-check`); run it locally after any contract change. It is the cheapest layer — a backend-emitted OpenAPI spec with generated clients, then conformance tests driven from it, are the stronger follow-ons. Do not let the TUI or the docs fall behind the Web client.
+
+## Development Setup (legacy reference app)
 
 ```bash
 # Create and activate virtual environment

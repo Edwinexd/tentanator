@@ -65,6 +65,8 @@ jobs:
           python-version: '3.13'
       - name: byte-compile tui + renderer
         run: python -m py_compile tui/*.py results-renderer/*.py
+      - name: API contract parity (backend <-> tui <-> web)
+        run: python scripts/check_api_parity.py
 
   images:
     needs: [backend-test, web-check, py-check]
