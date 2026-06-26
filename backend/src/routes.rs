@@ -335,13 +335,18 @@ async fn create_exam(
     for col in &req.output_columns {
         exam.ensure_question(col);
     }
+    // Seed grades already present in the sheet (auto-scored questions) so they
+    // are not re-graded by hand. Read the file before taking the DB lock.
+    let prefilled = exam_data(&s.config, &exam).map(|(rows, _)| rows).unwrap_or_default();
     {
         let conn = s.db().await;
         store::insert_exam(&conn, &exam).await?;
         // Every exam starts with a default grading session.
         store::create_session(&conn, &exam.name, DEFAULT_SESSION).await?;
+        store::seed_prefilled_grades(&conn, &exam, &prefilled, &exam.output_columns).await?;
     }
-    Ok(Json(exam))
+    let conn = s.db().await;
+    Ok(Json(store::load_exam(&conn, &exam.name).await?.unwrap_or(exam)))
 }
 
 async fn get_exam(
@@ -429,6 +434,9 @@ async fn update_exam_columns(
         ));
     }
     let mut exam = load_exam_or_404(&s, &name).await?;
+    // Columns that already had a question keep their grades; only newly-added
+    // ones get seeded from the sheet below.
+    let existing: std::collections::HashSet<String> = exam.questions.keys().cloned().collect();
     exam.id_columns = if req.id_columns.is_empty() {
         vec!["_row_number".to_string()]
     } else {
@@ -439,6 +447,13 @@ async fn update_exam_columns(
     for col in &req.output_columns {
         exam.ensure_question(col);
     }
+    let new_cols: Vec<String> = req
+        .output_columns
+        .iter()
+        .filter(|c| !existing.contains(*c))
+        .cloned()
+        .collect();
+    let prefilled = exam_data(&s.config, &exam).map(|(rows, _)| rows).unwrap_or_default();
     {
         let conn = s.db().await;
         store::set_columns(
@@ -454,6 +469,7 @@ async fn update_exam_columns(
                 store::upsert_question_row(&conn, &name, col, q).await?;
             }
         }
+        store::seed_prefilled_grades(&conn, &exam, &prefilled, &new_cols).await?;
         store::touch(&conn, &name).await?;
     }
     Ok(Json(load_exam_or_404(&s, &name).await?))

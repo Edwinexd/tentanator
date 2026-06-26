@@ -323,6 +323,39 @@ pub async fn put_graded_item(
     Ok(())
 }
 
+/// Seed grades from values already present in the sheet's output columns. A cell
+/// counts as already-graded only if it parses as a numeric grade, so placeholder
+/// text like "Requires grading" or "-" stays ungraded. Used on exam create and
+/// column-expand so auto-scored questions are not re-graded by hand. Returns the
+/// number of grades seeded.
+pub async fn seed_prefilled_grades(
+    conn: &Connection,
+    exam: &Exam,
+    rows: &[HashMap<String, String>],
+    cols: &[String],
+) -> AppResult<usize> {
+    let mut seeded = 0usize;
+    for col in cols {
+        let Some(q) = exam.questions.get(col) else { continue };
+        let input_col = q.input_column.clone();
+        for row in rows {
+            let val = row.get(col).cloned().unwrap_or_default();
+            if crate::grade::evaluate_grade(&val).is_none() {
+                continue;
+            }
+            let item = GradedItem {
+                row_id: crate::domain::row_id(row, &exam.id_columns),
+                input_text: row.get(&input_col).cloned().unwrap_or_default(),
+                grade: val,
+                timestamp: now_iso(),
+            };
+            put_graded_item(conn, &exam.name, col, &item, "prefilled", DEFAULT_SESSION).await?;
+            seeded += 1;
+        }
+    }
+    Ok(seeded)
+}
+
 /// Current (grade, source) for a cell, if graded.
 pub async fn get_graded(
     conn: &Connection,
