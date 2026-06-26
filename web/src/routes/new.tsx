@@ -1,6 +1,6 @@
 import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
-import { api } from '#/lib/api'
+import { api, detectQuestionPairs } from '#/lib/api'
 
 export const Route = createFileRoute('/new')({ component: NewSession })
 
@@ -50,11 +50,20 @@ function NewSession() {
   const [outputCols, setOutputCols] = useState<Set<string>>(new Set())
   const [name, setName] = useState('')
   const [course, setCourse] = useState('')
+  const [detected, setDetected] = useState(0)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     api.listExamFiles().then(setExams).catch((e: Error) => setError(e.message))
   }, [])
+
+  function applyDetection(cols: string[]) {
+    const det = detectQuestionPairs(cols)
+    setIdCols(new Set(det.id_columns))
+    setInputCols(new Set(det.input_columns))
+    setOutputCols(new Set(det.output_columns))
+    setDetected(det.output_columns.length)
+  }
 
   useEffect(() => {
     if (!examFile) return
@@ -62,7 +71,14 @@ function NewSession() {
     setIdCols(new Set())
     setInputCols(new Set())
     setOutputCols(new Set())
-    api.examColumns(examFile).then(setColumns).catch((e: Error) => setError(e.message))
+    setDetected(0)
+    api
+      .examColumns(examFile)
+      .then((cols) => {
+        setColumns(cols)
+        applyDetection(cols)
+      })
+      .catch((e: Error) => setError(e.message))
   }, [examFile])
 
   const toggle = (set: Set<string>, setter: (s: Set<string>) => void) => (col: string) => {
@@ -121,6 +137,15 @@ function NewSession() {
 
       {columns.length > 0 && (
         <>
+          <div className="flex items-center gap-3 text-sm text-gray-600">
+            <button
+              onClick={() => applyDetection(columns)}
+              className="rounded border px-3 py-1 hover:bg-gray-50"
+            >
+              Auto-detect Response/Points
+            </button>
+            <span>Detected {detected} question pair(s).</span>
+          </div>
           <ColumnPicker
             title="ID columns (student identifier)"
             columns={columns}

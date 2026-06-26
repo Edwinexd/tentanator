@@ -1,7 +1,8 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
+  detectQuestionPairs,
   isMeaningful,
   rowId,
   type AIGradeSuggestion,
@@ -19,8 +20,10 @@ function ExamView() {
   const { name } = Route.useParams()
   const [exam, setExam] = useState<Exam | null>(null)
   const [rows, setRows] = useState<ExamRow[]>([])
+  const [fileColumns, setFileColumns] = useState<string[]>([])
   const [course, setCourse] = useState('')
   const [col, setCol] = useState('')
+  const didInitCol = useRef(false)
   const [index, setIndex] = useState(0)
   const [gradeValue, setGradeValue] = useState('')
   const [suggestion, setSuggestion] = useState<AIGradeSuggestion | null>(null)
@@ -48,13 +51,18 @@ function ExamView() {
   }
 
   useEffect(() => {
+    didInitCol.current = false
     api
       .getExam(name)
       .then((s) => {
         setExam(s)
         setCourse(s.course ?? '')
         setRows([])
-        setCol(s.output_columns[0] ?? '')
+        setFileColumns([])
+        api
+          .examColumns(s.exam_file)
+          .then(setFileColumns)
+          .catch(() => setFileColumns([]))
         return api.examRows(s.exam_file)
       })
       .then(setRows)
@@ -81,6 +89,30 @@ function ExamView() {
 
   const safeIndex = ungraded.length ? Math.min(index, ungraded.length - 1) : 0
   const current = ungraded[safeIndex]
+
+  const colStatus = useMemo(() => {
+    const map: Record<string, { applicable: number; graded: number; ungraded: number }> = {}
+    if (!exam) return map
+    for (const c of exam.output_columns) {
+      const q = exam.questions[c]
+      const applicable = rows.filter((r) => isMeaningful(r[q?.input_column ?? ''] ?? '')).length
+      const graded = q?.graded_items.length ?? 0
+      map[c] = { applicable, graded, ungraded: applicable - graded }
+    }
+    return map
+  }, [exam, rows])
+
+  // Initial default: pick the first output column that still needs grading.
+  useEffect(() => {
+    if (didInitCol.current || !exam || rows.length === 0) return
+    if (exam.output_columns.length === 0) {
+      didInitCol.current = true
+      return
+    }
+    const needy = exam.output_columns.find((c) => (colStatus[c]?.ungraded ?? 0) > 0)
+    setCol(needy ?? exam.output_columns[0])
+    didInitCol.current = true
+  }, [exam, rows, colStatus])
 
   useEffect(() => {
     setIndex(0)
@@ -174,8 +206,37 @@ function ExamView() {
   async function exportExam() {
     setBusy(true)
     try {
-      const { path } = await api.exportExam(name)
-      setInfo(`Exported to ${path}`)
+      await api.exportExam(name)
+      setInfo('Download started')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function addQuestions() {
+    if (!exam) return
+    setBusy(true)
+    setInfo(null)
+    setError(null)
+    try {
+      const det = detectQuestionPairs(fileColumns)
+      const extraOut = exam.output_columns.filter((c) => !det.output_columns.includes(c))
+      const output_columns = [...det.output_columns, ...extraOut]
+      const input_columns = [
+        ...det.input_columns,
+        ...extraOut.map((c) => exam.questions[c]?.input_column ?? ''),
+      ]
+      const id_columns = exam.id_columns.length ? exam.id_columns : det.id_columns
+      const updated = await api.updateExamColumns(name, {
+        id_columns,
+        input_columns,
+        output_columns,
+      })
+      setExam(updated)
+      const fresh = await api.examRows(updated.exam_file)
+      setRows(fresh)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -199,6 +260,8 @@ function ExamView() {
   }
 
   const gradedCount = question?.graded_items.length ?? 0
+  const det = detectQuestionPairs(fileColumns)
+  const missing = det.output_columns.filter((c) => !exam.output_columns.includes(c))
 
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-8">
@@ -241,6 +304,22 @@ function ExamView() {
         </button>
       </label>
 
+      {missing.length > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">
+          <span>
+            This file has {det.output_columns.length} question(s); this exam covers{' '}
+            {exam.output_columns.length}.
+          </span>
+          <button
+            disabled={busy}
+            onClick={addQuestions}
+            className="rounded bg-amber-600 px-3 py-1 font-medium text-white hover:bg-amber-700 disabled:opacity-50"
+          >
+            Add {missing.length} more
+          </button>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <select
           className="rounded border p-2"
@@ -249,7 +328,7 @@ function ExamView() {
         >
           {exam.output_columns.map((c) => (
             <option key={c} value={c}>
-              {c}
+              {c} ({colStatus[c]?.graded ?? 0}/{colStatus[c]?.applicable ?? 0})
             </option>
           ))}
         </select>

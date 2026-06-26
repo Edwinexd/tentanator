@@ -24,11 +24,11 @@ function ResultsView() {
     api.getResults(name).then(setData).catch((e: Error) => setError(e.message))
   }, [name])
 
-  async function doExport(fn: (n: string) => Promise<{ path: string }>, label: string) {
+  async function doExport(fn: (n: string) => Promise<void>) {
     setError(null)
     try {
-      const { path } = await fn(name)
-      setInfo(`${label} → ${path}`)
+      await fn(name)
+      setInfo('Download started')
     } catch (e) {
       setError((e as Error).message)
     }
@@ -40,13 +40,13 @@ function ResultsView() {
       <h1 className="text-2xl font-bold">Results</h1>
 
       <div className="flex flex-wrap gap-2">
-        <button onClick={() => doExport(api.exportDaisy, 'Daisy import')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+        <button onClick={() => doExport(api.exportDaisy)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
           Export Daisy (id,grade)
         </button>
-        <button onClick={() => doExport(api.exportCsv, 'Per-question CSV')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+        <button onClick={() => doExport(api.exportCsv)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
           Export per-question CSV
         </button>
-        <button onClick={() => doExport(api.exportExam, 'Graded xlsx')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+        <button onClick={() => doExport(api.exportExam)} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
           Export full graded xlsx
         </button>
       </div>

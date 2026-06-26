@@ -463,6 +463,29 @@ pub async fn set_course(conn: &Connection, exam: &str, course: Option<&str>) -> 
     Ok(())
 }
 
+/// Replace an exam's column mapping (id/input/output). Existing questions and
+/// their grades are left intact; callers `ensure_question` for any new output
+/// columns and upsert them separately.
+pub async fn set_columns(
+    conn: &Connection,
+    exam: &str,
+    id_columns: &[String],
+    input_columns: &[String],
+    output_columns: &[String],
+) -> AppResult<()> {
+    conn.execute(
+        "UPDATE exams SET id_columns = ?, input_columns = ?, output_columns = ? WHERE name = ?",
+        (
+            json_array(id_columns),
+            json_array(input_columns),
+            json_array(output_columns),
+            exam,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
 /// Bump an exam's last-updated timestamp.
 pub async fn touch(conn: &Connection, exam: &str) -> AppResult<()> {
     conn.execute(
@@ -1129,21 +1152,24 @@ pub async fn import_pool_dir(conn: &Connection, dir: &Path) -> AppResult<()> {
 // Excel export (on disk)
 // ---------------------------------------------------------------------------
 
-pub fn export_to_excel(
-    config: &Config,
+/// Stem of an exam's file, for naming downloads.
+fn exam_file_stem(exam: &Exam) -> String {
+    Path::new(&exam.exam_file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("exam")
+        .to_string()
+}
+
+/// Build the full graded xlsx in memory. Returns (download filename, bytes).
+pub fn build_graded_xlsx(
     exam: &Exam,
     exam_rows: &[HashMap<String, String>],
     columns: &[String],
-) -> AppResult<String> {
+) -> AppResult<(String, Vec<u8>)> {
     use rust_xlsxwriter::Workbook;
 
-    std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&exam.exam_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("graded")
-        .to_string();
-    let out_path = config.graded_dir().join(format!("{base}.xlsx"));
+    let filename = format!("{}.xlsx", exam_file_stem(exam));
 
     let mut grades_by_row: HashMap<String, HashMap<String, String>> = HashMap::new();
     for (col, q) in &exam.questions {
@@ -1180,10 +1206,10 @@ pub fn export_to_excel(
                 .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
         }
     }
-    workbook
-        .save(&out_path)
+    let bytes = workbook
+        .save_to_buffer()
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
-    Ok(out_path.to_string_lossy().to_string())
+    Ok((filename, bytes))
 }
 
 fn format_total(total: f64) -> String {
@@ -1196,19 +1222,12 @@ fn format_total(total: f64) -> String {
 
 /// Daisy grade-import sheet: no header, column A = id, column B = final grade,
 /// one row per student sorted by id (matches SU's Daisy import format).
-pub fn export_daisy(
-    config: &Config,
+pub fn build_daisy_xlsx(
     exam: &Exam,
     results: &[crate::scheme::StudentResult],
-) -> AppResult<String> {
+) -> AppResult<(String, Vec<u8>)> {
     use rust_xlsxwriter::Workbook;
-    std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&exam.exam_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("exam")
-        .to_string();
-    let out_path = config.graded_dir().join(format!("{base}_daisy_import.xlsx"));
+    let filename = format!("{}_daisy_import.xlsx", exam_file_stem(exam));
 
     let mut sorted: Vec<&crate::scheme::StudentResult> = results.iter().collect();
     sorted.sort_by(|a, b| a.id.cmp(&b.id));
@@ -1223,31 +1242,24 @@ pub fn export_daisy(
             .write_string(r as u32, 1, &sr.grade)
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
     }
-    workbook
-        .save(&out_path)
+    let bytes = workbook
+        .save_to_buffer()
         .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
-    Ok(out_path.to_string_lossy().to_string())
+    Ok((filename, bytes))
 }
 
 /// Per-question CSV: id columns, each question's points, total and final grade.
-pub fn export_per_question_csv(
-    config: &Config,
+pub fn build_per_question_csv(
     exam: &Exam,
     exam_rows: &[HashMap<String, String>],
     results: &[crate::scheme::StudentResult],
-) -> AppResult<String> {
-    std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&exam.exam_file)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("exam")
-        .to_string();
-    let out_path = config.graded_dir().join(format!("{base}_per_question.csv"));
+) -> AppResult<(String, Vec<u8>)> {
+    let filename = format!("{}_per_question.csv", exam_file_stem(exam));
 
     let by_id: HashMap<&str, &crate::scheme::StudentResult> =
         results.iter().map(|r| (r.id.as_str(), r)).collect();
 
-    let mut w = csv::Writer::from_path(&out_path)?;
+    let mut w = csv::Writer::from_writer(Vec::new());
     let mut header: Vec<String> = exam.id_columns.clone();
     header.extend(exam.output_columns.iter().cloned());
     header.push("total".to_string());
@@ -1279,7 +1291,10 @@ pub fn export_per_question_csv(
         w.write_record(&rec)?;
     }
     w.flush()?;
-    Ok(out_path.to_string_lossy().to_string())
+    let bytes = w
+        .into_inner()
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e.to_string())))?;
+    Ok((filename, bytes))
 }
 
 #[cfg(test)]

@@ -10,7 +10,8 @@ use std::collections::HashMap;
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
@@ -29,6 +30,22 @@ use crate::{llm, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
 const DEFAULT_SESSION: &str = "default";
+const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+
+/// Build an attachment response so the browser downloads the file.
+fn download(filename: &str, content_type: &str, bytes: Vec<u8>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type.to_string()),
+            (
+                header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{filename}\""),
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
+}
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -52,6 +69,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/api/exams/{name}/archive", post(archive_exam))
         .route("/api/exams/{name}/unarchive", post(unarchive_exam))
+        .route("/api/exams/{name}/columns", put(update_exam_columns))
         .route(
             "/api/exams/{name}/sessions",
             get(list_sessions).post(create_session),
@@ -78,6 +96,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/exams/{name}/export/csv", post(export_csv_route))
         .route("/api/exams/{name}/render-data", get(render_data))
         .route("/api/exams/{name}/export/results-pdf", post(export_results_pdf))
+        .route("/api/graded/{filename}", get(download_graded))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -388,6 +407,58 @@ async fn unarchive_exam(
     }
 }
 
+#[derive(Deserialize)]
+struct ColumnsReq {
+    #[serde(default)]
+    id_columns: Vec<String>,
+    input_columns: Vec<String>,
+    output_columns: Vec<String>,
+}
+
+/// Replace an exam's column mapping. Adds a question for each new output column
+/// (index-paired with its input); existing questions and their grades are kept.
+/// Used to expand a partially-configured exam to all its question columns.
+async fn update_exam_columns(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ColumnsReq>,
+) -> AppResult<Json<Exam>> {
+    if req.input_columns.is_empty() || req.output_columns.is_empty() {
+        return Err(AppError::BadRequest(
+            "input_columns and output_columns are required".into(),
+        ));
+    }
+    let mut exam = load_exam_or_404(&s, &name).await?;
+    exam.id_columns = if req.id_columns.is_empty() {
+        vec!["_row_number".to_string()]
+    } else {
+        req.id_columns
+    };
+    exam.input_columns = req.input_columns;
+    exam.output_columns = req.output_columns.clone();
+    for col in &req.output_columns {
+        exam.ensure_question(col);
+    }
+    {
+        let conn = s.db().await;
+        store::set_columns(
+            &conn,
+            &name,
+            &exam.id_columns,
+            &exam.input_columns,
+            &exam.output_columns,
+        )
+        .await?;
+        for col in &req.output_columns {
+            if let Some(q) = exam.questions.get(col) {
+                store::upsert_question_row(&conn, &name, col, q).await?;
+            }
+        }
+        store::touch(&conn, &name).await?;
+    }
+    Ok(Json(load_exam_or_404(&s, &name).await?))
+}
+
 // ---------------------------------------------------------------------------
 // Sessions (lightweight grading passes under an exam)
 // ---------------------------------------------------------------------------
@@ -672,11 +743,11 @@ async fn question_status(
 async fn export(
     State(s): State<AppState>,
     Path(name): Path<String>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, cols) = exam_data(&s.config, &exam)?;
-    let path = store::export_to_excel(&s.config, &exam, &rows, &cols)?;
-    Ok(Json(json!({ "path": path })))
+    let (filename, bytes) = store::build_graded_xlsx(&exam, &rows, &cols)?;
+    Ok(download(&filename, XLSX_MIME, bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,7 +1156,7 @@ async fn import_apply(
 async fn export_daisy_route(
     State(s): State<AppState>,
     Path(name): Path<String>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
     let scheme = exam
@@ -1093,14 +1164,14 @@ async fn export_daisy_route(
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("no grade scheme configured".into()))?;
     let resp = compute_results(&exam, &rows, scheme);
-    let path = store::export_daisy(&s.config, &exam, &resp.results)?;
-    Ok(Json(json!({ "path": path })))
+    let (filename, bytes) = store::build_daisy_xlsx(&exam, &resp.results)?;
+    Ok(download(&filename, XLSX_MIME, bytes))
 }
 
 async fn export_csv_route(
     State(s): State<AppState>,
     Path(name): Path<String>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
     let results = exam
@@ -1108,8 +1179,33 @@ async fn export_csv_route(
         .as_ref()
         .map(|sc| compute_results(&exam, &rows, sc).results)
         .unwrap_or_default();
-    let path = store::export_per_question_csv(&s.config, &exam, &rows, &results)?;
-    Ok(Json(json!({ "path": path })))
+    let (filename, bytes) = store::build_per_question_csv(&exam, &rows, &results)?;
+    Ok(download(&filename, "text/csv; charset=utf-8", bytes))
+}
+
+/// Stream a previously-produced file from `graded_exams/` (e.g. the results PDF).
+async fn download_graded(
+    State(s): State<AppState>,
+    Path(filename): Path<String>,
+) -> AppResult<Response> {
+    let fname = std::path::Path::new(&filename)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| AppError::BadRequest("invalid filename".into()))?;
+    let path = s.config.graded_dir().join(fname);
+    let bytes = std::fs::read(&path)
+        .map_err(|_| AppError::NotFound(format!("file '{fname}' not found")))?;
+    let ct = if fname.ends_with(".pdf") {
+        "application/pdf"
+    } else if fname.ends_with(".csv") {
+        "text/csv; charset=utf-8"
+    } else if fname.ends_with(".xlsx") {
+        XLSX_MIME
+    } else {
+        "application/octet-stream"
+    };
+    Ok(download(fname, ct, bytes))
 }
 
 // ---------------------------------------------------------------------------

@@ -199,6 +199,32 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 const enc = encodeURIComponent
 
+async function triggerDownload(method: string, path: string): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, { method })
+  if (!res.ok) {
+    let message = res.statusText
+    try {
+      const d = (await res.json()) as { error?: string }
+      if (d.error) message = d.error
+    } catch {
+      /* */
+    }
+    throw new Error(`HTTP ${res.status}: ${message}`)
+  }
+  const blob = await res.blob()
+  const cd = res.headers.get('content-disposition') ?? ''
+  const m = /filename="?([^"]+)"?/.exec(cd)
+  const filename = m ? m[1] : 'download'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
+}
+
 export const api = {
   // --- exam files on disk ---
   listExamFiles: () => req<string[]>('GET', '/api/exam-files'),
@@ -224,6 +250,10 @@ export const api = {
   getExam: (name: string) => req<Exam>('GET', `/api/exams/${enc(name)}`),
   updateExam: (name: string, meta: { course?: string }) =>
     req<Exam>('PUT', `/api/exams/${enc(name)}`, meta),
+  updateExamColumns: (
+    name: string,
+    body: { id_columns: string[]; input_columns: string[]; output_columns: string[] },
+  ) => req<Exam>('PUT', `/api/exams/${enc(name)}/columns`, body),
   archiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/archive`),
   unarchiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/unarchive`),
   deleteExam: (name: string) => req<void>('DELETE', `/api/exams/${enc(name)}`),
@@ -267,10 +297,10 @@ export const api = {
     req<QuestionStatus>('GET', `/api/exams/${enc(name)}/questions/${enc(col)}/status`),
 
   // --- exports & results ---
-  exportExam: (name: string) => req<{ path: string }>('POST', `/api/exams/${enc(name)}/export`),
-  exportDaisy: (name: string) =>
-    req<{ path: string }>('POST', `/api/exams/${enc(name)}/export/daisy`),
-  exportCsv: (name: string) => req<{ path: string }>('POST', `/api/exams/${enc(name)}/export/csv`),
+  exportExam: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export`),
+  exportDaisy: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/daisy`),
+  exportCsv: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/csv`),
+  downloadGraded: (filename: string) => triggerDownload('GET', `/api/graded/${enc(filename)}`),
   listScans: () => req<string[]>('GET', '/api/scans'),
   uploadFile: async (kind: 'exams' | 'scans', file: File): Promise<{ filename: string }> => {
     const res = await fetch(`${API_BASE}/api/files/${kind}/${enc(file.name)}`, {
@@ -321,4 +351,33 @@ export function rowId(row: ExamRow, idColumns: string[]): string {
 export function isMeaningful(text: string): boolean {
   const t = (text ?? '').trim()
   return t !== '' && t !== '-' && t !== 'N/A'
+}
+
+export function detectQuestionPairs(columns: string[]): {
+  id_columns: string[]
+  input_columns: string[]
+  output_columns: string[]
+} {
+  const inputs = new Map<number, string>()
+  const outputs = new Map<number, string>()
+  for (const c of columns) {
+    const t = c.trim()
+    let m = /^response\s*(\d+)$/i.exec(t)
+    if (m) {
+      inputs.set(Number(m[1]), c)
+      continue
+    }
+    m = /^points?\s*(\d+)$/i.exec(t)
+    if (m) outputs.set(Number(m[1]), c)
+  }
+  const ns = [...inputs.keys()].filter((n) => outputs.has(n)).sort((a, b) => a - b)
+  const id =
+    columns.find((c) => /daisy\s*id/i.test(c)) ??
+    columns.find((c) => /^id$/i.test(c)) ??
+    columns[0]
+  return {
+    id_columns: id ? [id] : [],
+    input_columns: ns.map((n) => inputs.get(n)!),
+    output_columns: ns.map((n) => outputs.get(n)!),
+  }
 }

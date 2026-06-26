@@ -12,6 +12,7 @@ function PdfView() {
   const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [pdfPath, setPdfPath] = useState<string | null>(null)
 
   useEffect(() => {
     api.listScans().then(setScans).catch(() => {})
@@ -34,16 +35,30 @@ function PdfView() {
     setBusy(true)
     setError(null)
     setInfo(null)
+    setPdfPath(null)
     try {
       const r = await api.exportResultsPdf(name, withCover ? scan : undefined)
       const miss = r.covers_missing?.length
         ? ` (${r.covers_missing.length} without a detected cover page)`
         : ''
+      setPdfPath(r.path)
       setInfo(`Generated ${r.path} — ${r.students} students${miss}`)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function download() {
+    if (!pdfPath) return
+    const filename = pdfPath.split('/').pop()
+    if (!filename) return
+    setError(null)
+    try {
+      await api.downloadGraded(filename)
+    } catch (e) {
+      setError((e as Error).message)
     }
   }
 
@@ -98,6 +113,14 @@ function PdfView() {
 
       {busy && <p className="text-gray-500">Rendering… (this can take a minute)</p>}
       {info && <p className="rounded bg-green-100 p-2 text-green-800">{info}</p>}
+      {pdfPath && (
+        <button
+          onClick={download}
+          className="rounded bg-blue-600 px-3 py-1 text-sm font-medium text-white hover:bg-blue-700"
+        >
+          Download PDF
+        </button>
+      )}
       {error && <p className="rounded bg-red-100 p-2 text-red-700">{error}</p>}
     </div>
   )
