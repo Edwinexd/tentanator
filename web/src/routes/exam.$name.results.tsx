@@ -3,7 +3,7 @@ import { useEffect, useState } from 'react'
 import { api, type ResultsResponse } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
-export const Route = createFileRoute('/session/$name/results')({ component: ResultsView })
+export const Route = createFileRoute('/exam/$name/results')({ component: ResultsView })
 
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
@@ -46,7 +46,7 @@ function ResultsView() {
         <button onClick={() => doExport(api.exportCsv, 'Per-question CSV')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
           Export per-question CSV
         </button>
-        <button onClick={() => doExport(api.exportSession, 'Graded xlsx')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
+        <button onClick={() => doExport(api.exportExam, 'Graded xlsx')} className="rounded border px-3 py-1 text-sm hover:bg-gray-50">
           Export full graded xlsx
         </button>
       </div>

@@ -53,7 +53,7 @@ function NewSession() {
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    api.listExams().then(setExams).catch((e: Error) => setError(e.message))
+    api.listExamFiles().then(setExams).catch((e: Error) => setError(e.message))
   }, [])
 
   useEffect(() => {
@@ -78,15 +78,15 @@ function NewSession() {
     if (inputCols.size === 0 || outputCols.size === 0)
       return setError('Select at least one input and one output column')
     try {
-      const session = await api.createSession({
-        csv_file: examFile,
+      const exam = await api.createExam({
+        exam_file: examFile,
         id_columns: [...idCols],
         input_columns: [...inputCols],
         output_columns: [...outputCols],
         name: name.trim() || undefined,
         course: course.trim() || undefined,
       })
-      navigate({ to: '/session/$name', params: { name: session.session_name } })
+      navigate({ to: '/exam/$name', params: { name: exam.name } })
     } catch (e) {
       setError((e as Error).message)
     }
@@ -95,7 +95,7 @@ function NewSession() {
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-8">
       <div className="flex items-center justify-between">
-        <h1 className="text-2xl font-bold">New session</h1>
+        <h1 className="text-2xl font-bold">New exam</h1>
         <Link to="/" className="text-blue-600 hover:underline">
           ← back
         </Link>
@@ -149,7 +149,7 @@ function NewSession() {
             />
           </div>
           <div>
-            <h3 className="mb-1 font-medium">Session name (optional)</h3>
+            <h3 className="mb-1 font-medium">Exam name (optional)</h3>
             <input
               className="w-full rounded border p-2"
               placeholder="auto-generated if blank"
@@ -161,7 +161,7 @@ function NewSession() {
             onClick={create}
             className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
           >
-            Create session
+            Create exam
           </button>
         </>
       )}

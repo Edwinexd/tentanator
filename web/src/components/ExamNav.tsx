@@ -4,11 +4,11 @@ type Tab = 'grade' | 'import' | 'scheme' | 'results' | 'pdf'
 
 export function ExamNav({ name, active }: { name: string; active: Tab }) {
   const tabs: { id: Tab; label: string; to: string }[] = [
-    { id: 'grade', label: 'Grade', to: '/session/$name' },
-    { id: 'import', label: 'Import', to: '/session/$name/import' },
-    { id: 'scheme', label: 'Scheme', to: '/session/$name/scheme' },
-    { id: 'results', label: 'Results', to: '/session/$name/results' },
-    { id: 'pdf', label: 'PDF', to: '/session/$name/pdf' },
+    { id: 'grade', label: 'Grade', to: '/exam/$name' },
+    { id: 'import', label: 'Import', to: '/exam/$name/import' },
+    { id: 'scheme', label: 'Scheme', to: '/exam/$name/scheme' },
+    { id: 'results', label: 'Results', to: '/exam/$name/results' },
+    { id: 'pdf', label: 'PDF', to: '/exam/$name/pdf' },
   ]
   return (
     <div className="flex items-center justify-between border-b pb-2">
@@ -27,7 +27,7 @@ export function ExamNav({ name, active }: { name: string; active: Tab }) {
         ))}
       </div>
       <Link to="/" className="text-sm text-blue-600 hover:underline">
-        ← sessions
+        ← exams
       </Link>
     </div>
   )

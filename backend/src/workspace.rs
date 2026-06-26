@@ -1,15 +1,12 @@
-//! Legacy workspace import.
+//! On-demand legacy import (old Python-app data -> new exam-centric store).
 //!
-//! The old `workspace.py` stored each project as a folder under
-//! `workspaces/<name>/` and switched between them by moving the contents in and
-//! out of the data root. That was a band-aid for the lack of a real session
-//! model. The new system is a single flat store (the Turso DB); sessions are
-//! grouped by an optional `course` tag instead of by location.
-//!
-//! This module only exists to import that old data: it lists the leftover
-//! `workspaces/<name>/` folders and imports their sessions (into the DB, tagged
-//! with the workspace name as `course`), exams (copied to `exams/`) and graded
-//! pool.
+//! The pre-Rust app stored each project as a folder under `workspaces/<name>/`.
+//! This module lists those leftover folders and, on request, imports their old
+//! session JSON files as exams (one `Exam` + a `default` session each, tagged
+//! `course = <name>`), copies their exam files into `exams/`, and merges their
+//! graded pool. It is NOT run on startup; trigger it via
+//! `/api/legacy-workspaces/{name}/import`. Existing exams/files are never
+//! overwritten (name collisions are suffixed with the workspace name).
 
 use std::path::Path;
 
@@ -19,19 +16,21 @@ use turso::Connection;
 
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
-use crate::store::{self, OnCollision};
+use crate::store;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WorkspaceInfo {
     pub name: String,
-    pub sessions: usize,
+    /// Number of importable legacy session files in the workspace.
+    pub exams: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ImportResult {
-    pub imported_sessions: Vec<String>,
-    pub imported_exams: usize,
-    pub skipped_exams: usize,
+    /// Names of the exams created in the new store.
+    pub imported_exams: Vec<String>,
+    pub imported_files: usize,
+    pub skipped_files: usize,
 }
 
 fn count_sessions(dir: &Path) -> usize {
@@ -56,7 +55,7 @@ pub fn list_importable(config: &Config) -> Vec<WorkspaceInfo> {
             if e.path().is_dir() {
                 out.push(WorkspaceInfo {
                     name: e.file_name().to_string_lossy().to_string(),
-                    sessions: count_sessions(&e.path()),
+                    exams: count_sessions(&e.path()),
                 });
             }
         }
@@ -65,9 +64,10 @@ pub fn list_importable(config: &Config) -> Vec<WorkspaceInfo> {
     out
 }
 
-/// Import a legacy `workspaces/<name>/` folder into the DB. Sessions are tagged
-/// with `course = <name>` and suffixed on name collision; exams are copied into
-/// `exams/` (never overwriting); the graded pool is merged.
+/// Import a legacy `workspaces/<name>/` folder into the DB in the new format.
+/// Each old session becomes an exam (tagged `course = <name>`, suffixed on
+/// collision); exam files are copied into `exams/` (never overwriting); the
+/// graded pool is merged.
 pub async fn import_workspace(
     conn: &Connection,
     config: &Config,
@@ -78,9 +78,9 @@ pub async fn import_workspace(
         return Err(AppError::NotFound(format!("workspace '{name}' not found")));
     }
 
-    // Exams (never overwrite an existing exam).
-    let mut imported_exams = 0usize;
-    let mut skipped_exams = 0usize;
+    // Exam files (never overwrite an existing one).
+    let mut imported_files = 0usize;
+    let mut skipped_files = 0usize;
     let dst_exams = config.exams_dir();
     std::fs::create_dir_all(&dst_exams)?;
     if let Ok(entries) = std::fs::read_dir(ws.join("exams")) {
@@ -88,18 +88,18 @@ pub async fn import_workspace(
             if e.path().is_file() {
                 let dst = dst_exams.join(e.file_name());
                 if dst.exists() {
-                    skipped_exams += 1;
+                    skipped_files += 1;
                 } else {
                     std::fs::copy(e.path(), &dst)?;
-                    imported_exams += 1;
+                    imported_files += 1;
                 }
             }
         }
     }
 
-    // Sessions (+ caches) into the DB, tagged with the course.
+    // Sessions (+ caches) into the DB as exams, tagged with the course.
     let src_sessions = ws.join(".tentanator_sessions");
-    let mut imported_sessions = Vec::new();
+    let mut imported_exams = Vec::new();
     if let Ok(entries) = std::fs::read_dir(&src_sessions) {
         for e in entries.flatten() {
             let fname = e.file_name().to_string_lossy().to_string();
@@ -113,29 +113,26 @@ pub async fn import_workspace(
             let Ok(value) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            if let Some(stored) = store::import_session_value(
+            let stored = store::import_legacy_session(
                 conn,
                 &value,
                 stem,
                 &src_sessions,
-                false,
                 Some(name),
-                OnCollision::Suffix(name),
+                name,
             )
-            .await?
-            {
-                imported_sessions.push(stored);
-            }
+            .await?;
+            imported_exams.push(stored);
         }
     }
 
-    // Cross-session graded pool.
+    // Cross-exam graded pool.
     store::import_pool_dir(conn, &ws.join("global_bank").join("graded_pool")).await?;
 
     Ok(ImportResult {
-        imported_sessions,
         imported_exams,
-        skipped_exams,
+        imported_files,
+        skipped_files,
     })
 }
 
@@ -168,15 +165,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_tags_course_into_db() {
+    async fn import_tags_course_and_creates_exam() {
         let config = tmp_config();
         let ws = config.data_dir.join("workspaces").join("CS101");
         std::fs::create_dir_all(ws.join("exams")).unwrap();
         std::fs::create_dir_all(ws.join(".tentanator_sessions")).unwrap();
-        std::fs::write(ws.join("exams").join("e.csv"), "id\n1\n").unwrap();
+        std::fs::write(ws.join("exams").join("e.xlsx"), b"x").unwrap();
         std::fs::write(
             ws.join(".tentanator_sessions").join("s.json"),
-            r#"{"session_name":"s","csv_file":"e.csv","id_columns":["id"],"input_columns":["a"],"output_columns":["g"],"questions":{}}"#,
+            r#"{"session_name":"s","csv_file":"e.xlsx","id_columns":["id"],"input_columns":["a"],"output_columns":["g"],"questions":{}}"#,
         )
         .unwrap();
 
@@ -185,11 +182,15 @@ mod tests {
         db::init_schema(&conn).await.unwrap();
 
         let result = import_workspace(&conn, &config, "CS101").await.unwrap();
-        assert_eq!(result.imported_sessions, vec!["s".to_string()]);
-        assert_eq!(result.imported_exams, 1);
+        assert_eq!(result.imported_exams, vec!["s".to_string()]);
+        assert_eq!(result.imported_files, 1);
 
-        let loaded = store::load_session(&conn, "s").await.unwrap().unwrap();
+        let loaded = store::load_exam(&conn, "s").await.unwrap().unwrap();
         assert_eq!(loaded.course.as_deref(), Some("CS101"));
-        assert!(config.exams_dir().join("e.csv").exists());
+        assert_eq!(loaded.exam_file, "e.xlsx");
+        // A default grading session is created for the imported exam.
+        let sessions = store::list_sessions(&conn, "s").await.unwrap();
+        assert!(sessions.iter().any(|x| x.name == "default"));
+        assert!(config.exams_dir().join("e.xlsx").exists());
     }
 }

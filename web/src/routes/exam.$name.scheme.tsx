@@ -2,14 +2,14 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import {
   api,
+  type Exam,
   type GradeScheme,
   type QuestionConfigUpdate,
   type ResultsResponse,
-  type Session,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
-export const Route = createFileRoute('/session/$name/scheme')({ component: SchemeView })
+export const Route = createFileRoute('/exam/$name/scheme')({ component: SchemeView })
 
 function defaultScheme(cfg: QuestionConfigUpdate[]): GradeScheme {
   const sum = cfg.map((c) => c.var).filter(Boolean).join(' + ') || '0'
@@ -32,8 +32,8 @@ function SchemeView() {
 
   useEffect(() => {
     api
-      .getSession(name)
-      .then((s: Session) => {
+      .getExam(name)
+      .then((s: Exam) => {
         const initial = s.output_columns.map((col, i) => {
           const q = s.questions[col]
           return {

@@ -1,12 +1,13 @@
-//! Core domain types. JSON shapes mirror the legacy Python session format so
-//! existing `.tentanator_sessions/*.json` files stay readable.
+//! Core domain types.
+//!
+//! An [`Exam`] is the central object: the response file, its column mapping,
+//! per-question config, the grade scheme and the single canonical grade set.
+//! A [`Session`] is a lightweight named work-pass under an exam; grades recorded
+//! in a session land in the exam's one grade set, tagged with the session name.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-// All fields default so partial / legacy session JSON never fails to load.
-// Old sessions may carry extra fields (e.g. a per-item `embedding`); serde
-// ignores unknown fields by default, so those import cleanly too.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct GradedItem {
     #[serde(default)]
@@ -96,15 +97,15 @@ impl QuestionGrades {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Session {
+pub struct Exam {
     #[serde(default)]
-    pub session_name: String,
-    pub csv_file: String,
+    pub name: String,
+    pub exam_file: String,
     pub id_columns: Vec<String>,
     pub input_columns: Vec<String>,
     pub output_columns: Vec<String>,
-    /// Optional grouping label (e.g. a course code). Replaces the old workspace
-    /// directory hack - sessions are filtered/grouped by this, not by location.
+    /// Optional grouping label (e.g. a course code). Exams are filtered/grouped
+    /// by this tag.
     #[serde(default)]
     pub course: Option<String>,
     #[serde(default)]
@@ -116,7 +117,7 @@ pub struct Session {
     pub scheme: Option<crate::scheme::GradeScheme>,
 }
 
-impl Session {
+impl Exam {
     /// Ensure a question exists for `output_col`, pairing it with the input
     /// column by index (falling back to the first input column).
     pub fn ensure_question(&mut self, output_col: &str) -> &mut QuestionGrades {
@@ -152,14 +153,38 @@ pub struct AIGradeSuggestion {
     pub reasoning_summary: Option<String>,
 }
 
+/// An exam in list form (no questions/grades loaded).
 #[derive(Clone, Debug, Serialize)]
-pub struct SessionSummary {
-    pub session_name: String,
-    pub csv_file: String,
+pub struct ExamSummary {
+    pub name: String,
+    pub exam_file: String,
     pub course: Option<String>,
     pub last_updated: String,
     pub num_questions: usize,
     pub archived: bool,
+}
+
+/// A lightweight named grading session belonging to an exam. Grades recorded
+/// during a session write into the exam's single grade set, tagged with `name`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Session {
+    #[serde(default)]
+    pub exam: String,
+    pub name: String,
+    #[serde(default)]
+    pub created_at: String,
+    #[serde(default)]
+    pub last_updated: String,
+}
+
+/// A session in list form, with how many grades were recorded under it.
+#[derive(Clone, Debug, Serialize)]
+pub struct SessionSummary {
+    pub exam: String,
+    pub name: String,
+    pub created_at: String,
+    pub last_updated: String,
+    pub graded_count: usize,
 }
 
 /// An imported grade that disagrees with an existing one, pending resolution.

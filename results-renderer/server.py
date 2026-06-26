@@ -32,7 +32,7 @@ def health():
 @app.post("/render")
 def render(req: RenderReq):
     try:
-        r = httpx.get(f"{API}/api/sessions/{req.exam}/render-data", timeout=180)
+        r = httpx.get(f"{API}/api/exams/{req.exam}/render-data", timeout=180)
     except httpx.RequestError as e:
         raise HTTPException(502, f"cannot reach backend: {e}")
     if r.status_code != 200:

@@ -1,27 +1,19 @@
 // Typed client for the Tentanator Rust backend. The web app holds no grading
 // logic; every call hits the API described in ../../ARCHITECTURE.md.
+//
+// An exam is the central object; sessions are lightweight grading passes under
+// an exam. Exam *files* on disk live under /api/exam-files.
 
 const API_BASE: string =
   (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://127.0.0.1:8787'
 
-export interface SessionSummary {
-  session_name: string
-  csv_file: string
+export interface ExamSummary {
+  name: string
+  exam_file: string
   course: string | null
   last_updated: string
   num_questions: number
   archived: boolean
-}
-
-export interface WorkspaceInfo {
-  name: string
-  sessions: number
-}
-
-export interface ImportResult {
-  imported_sessions: string[]
-  imported_exams: number
-  skipped_exams: number
 }
 
 export interface GradedItem {
@@ -131,9 +123,9 @@ export interface QuestionConfigUpdate {
   estimate?: string
 }
 
-export interface Session {
-  session_name: string
-  csv_file: string
+export interface Exam {
+  name: string
+  exam_file: string
   id_columns: string[]
   input_columns: string[]
   output_columns: string[]
@@ -141,6 +133,31 @@ export interface Session {
   last_updated: string
   questions: Record<string, Question>
   scheme?: GradeScheme | null
+}
+
+export interface Session {
+  exam: string
+  name: string
+  created_at: string
+  last_updated: string
+}
+
+export interface SessionSummary {
+  exam: string
+  name: string
+  created_at: string
+  last_updated: string
+  graded_count: number
+}
+
+export interface WorkspaceInfo {
+  name: string
+  exams: number
+}
+export interface ImportResult {
+  imported_exams: string[]
+  imported_files: number
+  skipped_files: number
 }
 
 export interface AIGradeSuggestion {
@@ -180,68 +197,83 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return (await res.json()) as T
 }
 
-export const api = {
-  listExams: () => req<string[]>('GET', '/api/exams'),
-  examColumns: (file: string) => req<string[]>('GET', `/api/exams/${encodeURIComponent(file)}/columns`),
-  examRows: (file: string) =>
-    req<{ rows: ExamRow[] }>('GET', `/api/exams/${encodeURIComponent(file)}/rows`).then((r) => r.rows),
+const enc = encodeURIComponent
 
-  listSessions: (opts: { archived?: boolean; course?: string } = {}) => {
+export const api = {
+  // --- exam files on disk ---
+  listExamFiles: () => req<string[]>('GET', '/api/exam-files'),
+  examColumns: (file: string) => req<string[]>('GET', `/api/exam-files/${enc(file)}/columns`),
+  examRows: (file: string) =>
+    req<{ rows: ExamRow[] }>('GET', `/api/exam-files/${enc(file)}/rows`).then((r) => r.rows),
+
+  // --- exams (the central entity) ---
+  listExams: (opts: { archived?: boolean; course?: string } = {}) => {
     const params = new URLSearchParams()
     if (opts.archived) params.set('archived', 'true')
     if (opts.course) params.set('course', opts.course)
-    return req<SessionSummary[]>('GET', `/api/sessions?${params.toString()}`)
+    return req<ExamSummary[]>('GET', `/api/exams?${params.toString()}`)
   },
-  createSession: (payload: {
-    csv_file: string
+  createExam: (payload: {
+    exam_file: string
     id_columns: string[]
     input_columns: string[]
     output_columns: string[]
     name?: string
     course?: string
-  }) => req<Session>('POST', '/api/sessions', payload),
-  getSession: (name: string) => req<Session>('GET', `/api/sessions/${encodeURIComponent(name)}`),
-  updateSession: (name: string, meta: { course?: string }) =>
-    req<Session>('PUT', `/api/sessions/${encodeURIComponent(name)}`, meta),
+  }) => req<Exam>('POST', '/api/exams', payload),
+  getExam: (name: string) => req<Exam>('GET', `/api/exams/${enc(name)}`),
+  updateExam: (name: string, meta: { course?: string }) =>
+    req<Exam>('PUT', `/api/exams/${enc(name)}`, meta),
+  archiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/archive`),
+  unarchiveExam: (name: string) => req<void>('POST', `/api/exams/${enc(name)}/unarchive`),
+  deleteExam: (name: string) => req<void>('DELETE', `/api/exams/${enc(name)}`),
 
+  // --- legacy import (old Python-app data -> new format, on demand) ---
   listLegacyWorkspaces: () => req<WorkspaceInfo[]>('GET', '/api/legacy-workspaces'),
   importWorkspace: (name: string) =>
-    req<ImportResult>('POST', `/api/legacy-workspaces/${encodeURIComponent(name)}/import`),
+    req<ImportResult>('POST', `/api/legacy-workspaces/${enc(name)}/import`),
+  legacySessionsInfo: () => req<{ count: number }>('GET', '/api/legacy-sessions'),
+  importLegacySessions: () =>
+    req<{ imported_exams: string[] }>('POST', '/api/legacy-sessions/import'),
 
+  // --- sessions (grading passes under an exam) ---
+  listSessions: (exam: string) =>
+    req<SessionSummary[]>('GET', `/api/exams/${enc(exam)}/sessions`),
+  createSession: (exam: string, name?: string) =>
+    req<Session>('POST', `/api/exams/${enc(exam)}/sessions`, { name }),
+  deleteSession: (exam: string, session: string) =>
+    req<void>('DELETE', `/api/exams/${enc(exam)}/sessions/${enc(session)}`),
+
+  // --- questions & grading ---
   putQuestion: (name: string, col: string, meta: Record<string, unknown>) =>
-    req<Question>('PUT', `/api/sessions/${encodeURIComponent(name)}/questions/${encodeURIComponent(col)}`, meta),
+    req<Question>('PUT', `/api/exams/${enc(name)}/questions/${enc(col)}`, meta),
   sampling: (name: string, col: string, algorithm: Algorithm, nSamples?: number) =>
     req<SamplingResult>(
       'POST',
-      `/api/sessions/${encodeURIComponent(name)}/questions/${encodeURIComponent(col)}/sampling`,
+      `/api/exams/${enc(name)}/questions/${enc(col)}/sampling`,
       nSamples !== undefined ? { algorithm, n_samples: nSamples } : { algorithm },
     ),
-  grade: (name: string, col: string, rowId: string, grade: string) =>
-    req<Question>(
-      'POST',
-      `/api/sessions/${encodeURIComponent(name)}/questions/${encodeURIComponent(col)}/grade`,
-      { row_id: rowId, grade },
-    ),
+  grade: (name: string, col: string, rowId: string, grade: string, session?: string) =>
+    req<Question>('POST', `/api/exams/${enc(name)}/questions/${enc(col)}/grade`, {
+      row_id: rowId,
+      grade,
+      session,
+    }),
   suggest: (name: string, col: string, rowId: string) =>
-    req<AIGradeSuggestion>(
-      'POST',
-      `/api/sessions/${encodeURIComponent(name)}/questions/${encodeURIComponent(col)}/suggest`,
-      { row_id: rowId },
-    ),
+    req<AIGradeSuggestion>('POST', `/api/exams/${enc(name)}/questions/${enc(col)}/suggest`, {
+      row_id: rowId,
+    }),
   questionStatus: (name: string, col: string) =>
-    req<QuestionStatus>(
-      'GET',
-      `/api/sessions/${encodeURIComponent(name)}/questions/${encodeURIComponent(col)}/status`,
-    ),
-  exportSession: (name: string) =>
-    req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export`),
+    req<QuestionStatus>('GET', `/api/exams/${enc(name)}/questions/${enc(col)}/status`),
+
+  // --- exports & results ---
+  exportExam: (name: string) => req<{ path: string }>('POST', `/api/exams/${enc(name)}/export`),
   exportDaisy: (name: string) =>
-    req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/daisy`),
-  exportCsv: (name: string) =>
-    req<{ path: string }>('POST', `/api/sessions/${encodeURIComponent(name)}/export/csv`),
+    req<{ path: string }>('POST', `/api/exams/${enc(name)}/export/daisy`),
+  exportCsv: (name: string) => req<{ path: string }>('POST', `/api/exams/${enc(name)}/export/csv`),
   listScans: () => req<string[]>('GET', '/api/scans'),
   uploadFile: async (kind: 'exams' | 'scans', file: File): Promise<{ filename: string }> => {
-    const res = await fetch(`${API_BASE}/api/files/${kind}/${encodeURIComponent(file.name)}`, {
+    const res = await fetch(`${API_BASE}/api/files/${kind}/${enc(file.name)}`, {
       method: 'PUT',
       body: file,
     })
@@ -260,27 +292,26 @@ export const api = {
   exportResultsPdf: (name: string, scanned_pdf?: string) =>
     req<{ path: string; students: number; covers_missing: string[] }>(
       'POST',
-      `/api/sessions/${encodeURIComponent(name)}/export/results-pdf`,
+      `/api/exams/${enc(name)}/export/results-pdf`,
       { scanned_pdf: scanned_pdf || null },
     ),
 
   putQuestionsConfig: (name: string, updates: QuestionConfigUpdate[]) =>
-    req<Session>('PUT', `/api/sessions/${encodeURIComponent(name)}/questions-config`, updates),
+    req<Exam>('PUT', `/api/exams/${enc(name)}/questions-config`, updates),
   putScheme: (name: string, scheme: GradeScheme) =>
-    req<void>('PUT', `/api/sessions/${encodeURIComponent(name)}/scheme`, scheme),
-  getResults: (name: string) =>
-    req<ResultsResponse>('GET', `/api/sessions/${encodeURIComponent(name)}/results`),
+    req<void>('PUT', `/api/exams/${enc(name)}/scheme`, scheme),
+  getResults: (name: string) => req<ResultsResponse>('GET', `/api/exams/${enc(name)}/results`),
   previewResults: (name: string, scheme: GradeScheme) =>
-    req<ResultsResponse>('POST', `/api/sessions/${encodeURIComponent(name)}/results`, scheme),
+    req<ResultsResponse>('POST', `/api/exams/${enc(name)}/results`, scheme),
 
   importPreview: (name: string, body: ImportReq) =>
-    req<ImportSummary>('POST', `/api/sessions/${encodeURIComponent(name)}/import/preview`, body),
+    req<ImportSummary>('POST', `/api/exams/${enc(name)}/import/preview`, body),
   importApply: (name: string, body: ImportReq) =>
-    req<ImportSummary>('POST', `/api/sessions/${encodeURIComponent(name)}/import/apply`, body),
+    req<ImportSummary>('POST', `/api/exams/${enc(name)}/import/apply`, body),
   getConflicts: (name: string) =>
-    req<GradeConflict[]>('GET', `/api/sessions/${encodeURIComponent(name)}/conflicts`),
+    req<GradeConflict[]>('GET', `/api/exams/${enc(name)}/conflicts`),
   resolveConflict: (name: string, body: { output_col: string; row_id: string; choose: string }) =>
-    req<void>('POST', `/api/sessions/${encodeURIComponent(name)}/conflicts/resolve`, body),
+    req<void>('POST', `/api/exams/${enc(name)}/conflicts/resolve`, body),
 }
 
 export function rowId(row: ExamRow, idColumns: string[]): string {

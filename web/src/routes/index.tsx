@@ -1,21 +1,27 @@
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useState } from 'react'
-import { api, type SessionSummary, type WorkspaceInfo } from '#/lib/api'
+import { api, type ExamSummary, type WorkspaceInfo } from '#/lib/api'
 
 export const Route = createFileRoute('/')({ component: Home })
 
 function Home() {
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [exams, setExams] = useState<ExamSummary[]>([])
   const [legacy, setLegacy] = useState<WorkspaceInfo[]>([])
+  const [legacyCount, setLegacyCount] = useState(0)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
 
   const refresh = useCallback(() => {
-    Promise.all([api.listSessions(), api.listLegacyWorkspaces().catch(() => [])])
-      .then(([s, w]) => {
-        setSessions(s)
+    Promise.all([
+      api.listExams(),
+      api.listLegacyWorkspaces().catch(() => [] as WorkspaceInfo[]),
+      api.legacySessionsInfo().catch(() => ({ count: 0 })),
+    ])
+      .then(([e, w, ls]) => {
+        setExams(e)
         setLegacy(w)
+        setLegacyCount(ls.count)
       })
       .catch((e: Error) => setError(e.message))
       .finally(() => setLoading(false))
@@ -28,14 +34,27 @@ function Home() {
     try {
       const r = await api.importWorkspace(name)
       setInfo(
-        `Imported ${r.imported_sessions.length} session(s) and ${r.imported_exams} exam(s) from ${name}` +
-          (r.skipped_exams ? ` (${r.skipped_exams} exam(s) already present)` : ''),
+        `Imported ${r.imported_exams.length} exam(s) and ${r.imported_files} file(s) from ${name}` +
+          (r.skipped_files ? ` (${r.skipped_files} file(s) already present)` : ''),
       )
       refresh()
     } catch (e) {
       setError((e as Error).message)
     }
   }
+
+  async function importLegacySessions() {
+    setError(null)
+    try {
+      const r = await api.importLegacySessions()
+      setInfo(`Imported ${r.imported_exams.length} legacy exam(s) from .tentanator_sessions/`)
+      refresh()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  const hasLegacy = legacy.length > 0 || legacyCount > 0
 
   return (
     <div className="mx-auto max-w-3xl p-8">
@@ -45,11 +64,11 @@ function Home() {
           to="/new"
           className="rounded bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700"
         >
-          New session
+          New exam
         </Link>
       </div>
 
-      <h2 className="mt-8 mb-3 text-xl font-semibold">Sessions</h2>
+      <h2 className="mt-8 mb-3 text-xl font-semibold">Exams</h2>
 
       {loading && <p className="text-gray-500">Loading…</p>}
       {error && (
@@ -58,22 +77,22 @@ function Home() {
         </p>
       )}
       {info && <p className="rounded bg-green-100 p-3 text-green-800">{info}</p>}
-      {!loading && !error && sessions.length === 0 && (
-        <p className="text-gray-500">No sessions yet. Create one to start grading.</p>
+      {!loading && !error && exams.length === 0 && (
+        <p className="text-gray-500">No exams yet. Create one to start grading.</p>
       )}
 
       <ul className="divide-y rounded border">
-        {sessions.map((s) => (
-          <li key={s.session_name}>
+        {exams.map((s) => (
+          <li key={s.name}>
             <Link
-              to="/session/$name"
-              params={{ name: s.session_name }}
+              to="/exam/$name"
+              params={{ name: s.name }}
               className="flex items-center justify-between px-4 py-3 hover:bg-gray-50"
             >
               <div>
-                <div className="font-medium">{s.session_name}</div>
+                <div className="font-medium">{s.name}</div>
                 <div className="text-sm text-gray-500">
-                  {s.csv_file} · {s.num_questions} question(s) · updated{' '}
+                  {s.exam_file} · {s.num_questions} question(s) · updated{' '}
                   {s.last_updated.slice(0, 19)}
                 </div>
               </div>
@@ -87,30 +106,47 @@ function Home() {
         ))}
       </ul>
 
-      {legacy.length > 0 && (
+      {hasLegacy && (
         <div className="mt-10">
-          <h2 className="mb-1 text-xl font-semibold">Import legacy workspaces</h2>
+          <h2 className="mb-1 text-xl font-semibold">Import legacy data</h2>
           <p className="mb-3 text-sm text-gray-500">
-            Old <code>workspaces/&lt;name&gt;/</code> folders. Importing copies their
-            sessions and exams into the store and tags the sessions with the
-            workspace name as their course.
+            Bring exams from the old layout into the new format. Existing exams and
+            files are never overwritten.
           </p>
-          <ul className="divide-y rounded border">
-            {legacy.map((w) => (
-              <li key={w.name} className="flex items-center justify-between px-4 py-3">
-                <span>
-                  {w.name}{' '}
-                  <span className="text-sm text-gray-500">({w.sessions} session(s))</span>
-                </span>
-                <button
-                  onClick={() => importWorkspace(w.name)}
-                  className="rounded border px-3 py-1 text-sm hover:bg-gray-50"
-                >
-                  Import
-                </button>
-              </li>
-            ))}
-          </ul>
+
+          {legacyCount > 0 && (
+            <div className="mb-3 flex items-center justify-between rounded border px-4 py-3">
+              <span>
+                <code>.tentanator_sessions/</code>{' '}
+                <span className="text-sm text-gray-500">({legacyCount} session(s))</span>
+              </span>
+              <button
+                onClick={importLegacySessions}
+                className="rounded border px-3 py-1 text-sm hover:bg-gray-50"
+              >
+                Import
+              </button>
+            </div>
+          )}
+
+          {legacy.length > 0 && (
+            <ul className="divide-y rounded border">
+              {legacy.map((w) => (
+                <li key={w.name} className="flex items-center justify-between px-4 py-3">
+                  <span>
+                    {w.name}{' '}
+                    <span className="text-sm text-gray-500">({w.exams} exam(s))</span>
+                  </span>
+                  <button
+                    onClick={() => importWorkspace(w.name)}
+                    className="rounded border px-3 py-1 text-sm hover:bg-gray-50"
+                  >
+                    Import
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>

@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Root directory that holds exams/, graded_exams/, .tentanator_sessions/, etc.
+    /// Root directory that holds exams/, graded_exams/, scans/ and the DB.
     pub data_dir: PathBuf,
     pub openai_api_key: String,
     pub openai_base_url: String,
@@ -62,6 +62,8 @@ impl Config {
     pub fn graded_dir(&self) -> PathBuf {
         self.data_dir.join("graded_exams")
     }
+
+    // --- legacy on-disk locations (read only, for on-demand import) ---
 
     pub fn sessions_dir(&self) -> PathBuf {
         self.data_dir.join(".tentanator_sessions")

@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let bind = config.bind_addr.clone();
 
-    // Open the Turso database and import any legacy on-disk data into it.
+    // Open the Turso database.
     std::fs::create_dir_all(&config.data_dir).ok();
     let db_path = config.data_dir.join(".tentanator.db");
     let database = db::open(
@@ -56,7 +56,6 @@ async fn main() -> anyhow::Result<()> {
     .await?;
     let conn = database.connect()?;
     db::init_schema(&conn).await?;
-    store::import_legacy_on_startup(&conn, &config).await?;
 
     if config.openai_api_key.is_empty() {
         tracing::warn!("OPENAI_API_KEY is empty - embeddings (maximin sampling) will fail");

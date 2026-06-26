@@ -1,6 +1,10 @@
 //! HTTP routes. DB work goes through the shared mutexed connection
 //! (`s.db().await`), held only across DB calls and released across LLM/file I/O.
 //! All business logic lives in `store`, `sampling`, `grade`, `llm`.
+//!
+//! An exam is the central object (`/api/exams/{name}/...`); sessions are
+//! lightweight grading passes under an exam. Exam *files* on disk live under
+//! `/api/exam-files`.
 
 use std::collections::HashMap;
 
@@ -14,7 +18,9 @@ use serde_json::{json, Value};
 use tower_http::cors::CorsLayer;
 
 use crate::config::Config;
-use crate::domain::{self, AIGradeSuggestion, GradedItem, QuestionGrades, Session, SessionSummary};
+use crate::domain::{
+    self, AIGradeSuggestion, Exam, ExamSummary, GradedItem, QuestionGrades, Session, SessionSummary,
+};
 use crate::error::{AppError, AppResult};
 use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
@@ -22,48 +28,56 @@ use crate::scheme::{self, GradeScheme, StudentResult};
 use crate::{llm, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
+const DEFAULT_SESSION: &str = "default";
 
 pub fn router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(health))
         .route("/api/legacy-workspaces", get(list_legacy_workspaces))
         .route("/api/legacy-workspaces/{name}/import", post(import_workspace))
-        .route("/api/exams", get(list_exams))
+        .route("/api/legacy-sessions", get(legacy_sessions_info))
+        .route("/api/legacy-sessions/import", post(import_legacy_sessions))
+        .route("/api/exam-files", get(list_exam_files))
         .route("/api/scans", get(list_scans))
         .route(
             "/api/files/{kind}/{filename}",
             put(upload_file).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
-        .route("/api/exams/{file}/columns", get(exam_columns))
-        .route("/api/exams/{file}/rows", get(exam_rows))
-        .route("/api/sessions", get(list_sessions).post(create_session))
+        .route("/api/exam-files/{file}/columns", get(exam_columns))
+        .route("/api/exam-files/{file}/rows", get(exam_rows))
+        .route("/api/exams", get(list_exams).post(create_exam))
         .route(
-            "/api/sessions/{name}",
-            get(get_session).put(update_session).delete(delete_session),
+            "/api/exams/{name}",
+            get(get_exam).put(update_exam).delete(delete_exam),
         )
-        .route("/api/sessions/{name}/archive", post(archive_session))
-        .route("/api/sessions/{name}/unarchive", post(unarchive_session))
-        .route("/api/sessions/{name}/questions/{col}", put(put_question))
-        .route("/api/sessions/{name}/questions/{col}/sampling", post(run_sampling))
-        .route("/api/sessions/{name}/questions/{col}/grade", post(grade_item))
+        .route("/api/exams/{name}/archive", post(archive_exam))
+        .route("/api/exams/{name}/unarchive", post(unarchive_exam))
         .route(
-            "/api/sessions/{name}/questions/{col}/grade/{row_id}",
+            "/api/exams/{name}/sessions",
+            get(list_sessions).post(create_session),
+        )
+        .route("/api/exams/{name}/sessions/{session}", delete(delete_session))
+        .route("/api/exams/{name}/questions/{col}", put(put_question))
+        .route("/api/exams/{name}/questions/{col}/sampling", post(run_sampling))
+        .route("/api/exams/{name}/questions/{col}/grade", post(grade_item))
+        .route(
+            "/api/exams/{name}/questions/{col}/grade/{row_id}",
             delete(ungrade_item),
         )
-        .route("/api/sessions/{name}/questions/{col}/suggest", post(suggest))
-        .route("/api/sessions/{name}/questions/{col}/status", get(question_status))
-        .route("/api/sessions/{name}/scheme", put(put_scheme))
-        .route("/api/sessions/{name}/questions-config", put(put_questions_config))
-        .route("/api/sessions/{name}/results", get(get_results).post(preview_results))
-        .route("/api/sessions/{name}/import/preview", post(import_preview))
-        .route("/api/sessions/{name}/import/apply", post(import_apply))
-        .route("/api/sessions/{name}/conflicts", get(get_conflicts))
-        .route("/api/sessions/{name}/conflicts/resolve", post(resolve_conflict))
-        .route("/api/sessions/{name}/export", post(export))
-        .route("/api/sessions/{name}/export/daisy", post(export_daisy_route))
-        .route("/api/sessions/{name}/export/csv", post(export_csv_route))
-        .route("/api/sessions/{name}/render-data", get(render_data))
-        .route("/api/sessions/{name}/export/results-pdf", post(export_results_pdf))
+        .route("/api/exams/{name}/questions/{col}/suggest", post(suggest))
+        .route("/api/exams/{name}/questions/{col}/status", get(question_status))
+        .route("/api/exams/{name}/scheme", put(put_scheme))
+        .route("/api/exams/{name}/questions-config", put(put_questions_config))
+        .route("/api/exams/{name}/results", get(get_results).post(preview_results))
+        .route("/api/exams/{name}/import/preview", post(import_preview))
+        .route("/api/exams/{name}/import/apply", post(import_apply))
+        .route("/api/exams/{name}/conflicts", get(get_conflicts))
+        .route("/api/exams/{name}/conflicts/resolve", post(resolve_conflict))
+        .route("/api/exams/{name}/export", post(export))
+        .route("/api/exams/{name}/export/daisy", post(export_daisy_route))
+        .route("/api/exams/{name}/export/csv", post(export_csv_route))
+        .route("/api/exams/{name}/render-data", get(render_data))
+        .route("/api/exams/{name}/export/results-pdf", post(export_results_pdf))
         .layer(CorsLayer::permissive())
         .with_state(state)
 }
@@ -81,8 +95,8 @@ struct ListQuery {
 }
 
 #[derive(Deserialize)]
-struct CreateSession {
-    csv_file: String,
+struct CreateExam {
+    exam_file: String,
     id_columns: Vec<String>,
     input_columns: Vec<String>,
     output_columns: Vec<String>,
@@ -93,8 +107,14 @@ struct CreateSession {
 }
 
 #[derive(Deserialize)]
-struct SessionMeta {
+struct ExamMeta {
     course: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreateSessionReq {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +134,8 @@ struct SamplingReq {
 struct GradeReq {
     row_id: String,
     grade: String,
+    #[serde(default)]
+    session: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,23 +147,23 @@ struct SuggestReq {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn session_exam(
+fn exam_data(
     config: &Config,
-    session: &Session,
+    exam: &Exam,
 ) -> AppResult<(Vec<HashMap<String, String>>, Vec<String>)> {
-    let path = store::resolve_exam_path(config, &session.csv_file).ok_or_else(|| {
-        AppError::NotFound(format!("exam file '{}' not found", session.csv_file))
+    let path = store::resolve_exam_path(config, &exam.exam_file).ok_or_else(|| {
+        AppError::NotFound(format!("exam file '{}' not found", exam.exam_file))
     })?;
     let rows = store::read_exam_data(&path)?;
     let cols = store::get_exam_columns(&path)?;
     Ok((rows, cols))
 }
 
-async fn load_session_or_404(s: &AppState, name: &str) -> AppResult<Session> {
+async fn load_exam_or_404(s: &AppState, name: &str) -> AppResult<Exam> {
     let conn = s.db().await;
-    store::load_session(&conn, name)
+    store::load_exam(&conn, name)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))
 }
 
 fn no_question(col: &str) -> AppError {
@@ -149,12 +171,17 @@ fn no_question(col: &str) -> AppError {
 }
 
 // ---------------------------------------------------------------------------
-// Health, legacy import & exams
+// Health & exam files (on disk)
 // ---------------------------------------------------------------------------
 
 async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
+
+// ---------------------------------------------------------------------------
+// Legacy import (old Python-app data -> new format, on demand). Not run on
+// startup; the user triggers it from the home screen.
+// ---------------------------------------------------------------------------
 
 async fn list_legacy_workspaces(
     State(s): State<AppState>,
@@ -170,7 +197,24 @@ async fn import_workspace(
     Ok(Json(workspace::import_workspace(&conn, &s.config, &name).await?))
 }
 
-async fn list_exams(State(s): State<AppState>) -> Json<Vec<String>> {
+/// How many loose legacy sessions sit at the data root (`.tentanator_sessions/`).
+async fn legacy_sessions_info(State(s): State<AppState>) -> Json<Value> {
+    let active = store::count_session_files(&s.config.sessions_dir());
+    let archived = store::count_session_files(&s.config.archive_dir());
+    Json(json!({ "count": active + archived }))
+}
+
+/// Import the loose root-level `.tentanator_sessions/` (active + archive) plus
+/// the root graded pool into the new exam-centric store.
+async fn import_legacy_sessions(State(s): State<AppState>) -> AppResult<Json<Value>> {
+    let conn = s.db().await;
+    let mut imported = store::import_session_dir(&conn, &s.config.sessions_dir(), false).await?;
+    imported.extend(store::import_session_dir(&conn, &s.config.archive_dir(), true).await?);
+    store::import_pool_dir(&conn, &s.config.graded_pool_dir()).await?;
+    Ok(Json(json!({ "imported_exams": imported })))
+}
+
+async fn list_exam_files(State(s): State<AppState>) -> Json<Vec<String>> {
     Json(store::list_exam_files(&s.config))
 }
 
@@ -220,43 +264,43 @@ async fn exam_rows(
 }
 
 // ---------------------------------------------------------------------------
-// Sessions
+// Exams
 // ---------------------------------------------------------------------------
 
-async fn list_sessions(
+async fn list_exams(
     State(s): State<AppState>,
     Query(q): Query<ListQuery>,
-) -> AppResult<Json<Vec<SessionSummary>>> {
-    let mut sessions = {
+) -> AppResult<Json<Vec<ExamSummary>>> {
+    let mut exams = {
         let conn = s.db().await;
-        store::list_sessions(&conn, q.archived).await?
+        store::list_exams(&conn, q.archived).await?
     };
     if let Some(course) = q.course.filter(|c| !c.is_empty()) {
-        sessions.retain(|x| x.course.as_deref() == Some(course.as_str()));
+        exams.retain(|x| x.course.as_deref() == Some(course.as_str()));
     }
-    Ok(Json(sessions))
+    Ok(Json(exams))
 }
 
-async fn create_session(
+async fn create_exam(
     State(s): State<AppState>,
-    Json(req): Json<CreateSession>,
-) -> AppResult<Json<Session>> {
+    Json(req): Json<CreateExam>,
+) -> AppResult<Json<Exam>> {
     if req.input_columns.is_empty() || req.output_columns.is_empty() {
         return Err(AppError::BadRequest(
             "input_columns and output_columns are required".into(),
         ));
     }
     let raw_name = req.name.clone().unwrap_or_else(|| {
-        let stem = std::path::Path::new(&req.csv_file)
+        let stem = std::path::Path::new(&req.exam_file)
             .file_stem()
             .and_then(|x| x.to_str())
-            .unwrap_or("session");
+            .unwrap_or("exam");
         format!("{stem}_{}", store::timestamp_compact())
     });
 
-    let mut session = Session {
-        session_name: store::sanitize_name(&raw_name),
-        csv_file: req.csv_file,
+    let mut exam = Exam {
+        name: store::sanitize_name(&raw_name),
+        exam_file: req.exam_file,
         id_columns: if req.id_columns.is_empty() {
             vec!["_row_number".to_string()]
         } else {
@@ -270,55 +314,57 @@ async fn create_session(
         scheme: None,
     };
     for col in &req.output_columns {
-        session.ensure_question(col);
+        exam.ensure_question(col);
     }
     {
         let conn = s.db().await;
-        store::insert_session(&conn, &session).await?;
+        store::insert_exam(&conn, &exam).await?;
+        // Every exam starts with a default grading session.
+        store::create_session(&conn, &exam.name, DEFAULT_SESSION).await?;
     }
-    Ok(Json(session))
+    Ok(Json(exam))
 }
 
-async fn get_session(
+async fn get_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
-) -> AppResult<Json<Session>> {
-    Ok(Json(load_session_or_404(&s, &name).await?))
+) -> AppResult<Json<Exam>> {
+    Ok(Json(load_exam_or_404(&s, &name).await?))
 }
 
-async fn update_session(
+async fn update_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
-    Json(req): Json<SessionMeta>,
-) -> AppResult<Json<Session>> {
+    Json(req): Json<ExamMeta>,
+) -> AppResult<Json<Exam>> {
     let conn = s.db().await;
-    if !store::session_exists(&conn, &name).await? {
-        return Err(AppError::NotFound(format!("session '{name}' not found")));
+    if !store::exam_exists(&conn, &name).await? {
+        return Err(AppError::NotFound(format!("exam '{name}' not found")));
     }
     if let Some(course) = req.course {
         let course = if course.is_empty() { None } else { Some(course) };
         store::set_course(&conn, &name, course.as_deref()).await?;
     }
     store::touch(&conn, &name).await?;
-    store::load_session(&conn, &name)
+    store::load_exam(&conn, &name)
         .await?
         .map(Json)
-        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))
 }
 
-async fn delete_session(
+async fn delete_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
     let conn = s.db().await;
-    if store::delete_session(&conn, &name).await? {
+    if store::delete_exam(&conn, &name).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(AppError::NotFound(format!("session '{name}' not found")))
+        Err(AppError::NotFound(format!("exam '{name}' not found")))
     }
 }
 
-async fn archive_session(
+async fn archive_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
@@ -326,11 +372,11 @@ async fn archive_session(
     if store::set_archived(&conn, &name, true).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(AppError::NotFound(format!("session '{name}' not found")))
+        Err(AppError::NotFound(format!("exam '{name}' not found")))
     }
 }
 
-async fn unarchive_session(
+async fn unarchive_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<StatusCode> {
@@ -338,7 +384,56 @@ async fn unarchive_session(
     if store::set_archived(&conn, &name, false).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(AppError::NotFound(format!("session '{name}' not found")))
+        Err(AppError::NotFound(format!("exam '{name}' not found")))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Sessions (lightweight grading passes under an exam)
+// ---------------------------------------------------------------------------
+
+async fn list_sessions(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> AppResult<Json<Vec<SessionSummary>>> {
+    let conn = s.db().await;
+    if !store::exam_exists(&conn, &name).await? {
+        return Err(AppError::NotFound(format!("exam '{name}' not found")));
+    }
+    Ok(Json(store::list_sessions(&conn, &name).await?))
+}
+
+async fn create_session(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<CreateSessionReq>,
+) -> AppResult<Json<Session>> {
+    let conn = s.db().await;
+    if !store::exam_exists(&conn, &name).await? {
+        return Err(AppError::NotFound(format!("exam '{name}' not found")));
+    }
+    let raw = req
+        .name
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| format!("session_{}", store::timestamp_compact()));
+    let session_name = store::sanitize_name(&raw);
+    Ok(Json(store::create_session(&conn, &name, &session_name).await?))
+}
+
+async fn delete_session(
+    State(s): State<AppState>,
+    Path((name, session)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
+    if session == DEFAULT_SESSION {
+        return Err(AppError::BadRequest(
+            "the default session cannot be deleted".into(),
+        ));
+    }
+    let conn = s.db().await;
+    if store::delete_session(&conn, &name, &session).await? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound(format!("session '{session}' not found")))
     }
 }
 
@@ -351,9 +446,9 @@ async fn put_question(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<QuestionMeta>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut session = load_session_or_404(&s, &name).await?;
+    let mut exam = load_exam_or_404(&s, &name).await?;
     {
-        let q = session.ensure_question(&col);
+        let q = exam.ensure_question(&col);
         if let Some(x) = req.exam_question {
             q.exam_question = x;
         }
@@ -364,7 +459,7 @@ async fn put_question(
             q.global_question_id = if x.is_empty() { None } else { Some(x) };
         }
     }
-    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    let q = exam.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
     let conn = s.db().await;
     store::upsert_question_row(&conn, &name, &col, &q).await?;
     store::touch(&conn, &name).await?;
@@ -379,11 +474,11 @@ async fn run_sampling(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SamplingReq>,
 ) -> AppResult<Json<crate::domain::SamplingResult>> {
-    let mut session = load_session_or_404(&s, &name).await?;
-    session.ensure_question(&col);
-    let input_column = session.questions[&col].input_column.clone();
-    let id_columns = session.id_columns.clone();
-    let (rows, _) = session_exam(&s.config, &session)?;
+    let mut exam = load_exam_or_404(&s, &name).await?;
+    exam.ensure_question(&col);
+    let input_column = exam.questions[&col].input_column.clone();
+    let id_columns = exam.id_columns.clone();
+    let (rows, _) = exam_data(&s.config, &exam)?;
 
     let candidates: Vec<(String, String)> = rows
         .iter()
@@ -447,10 +542,10 @@ async fn run_sampling(
         timestamp: store::now_iso(),
     };
     {
-        let q = session.ensure_question(&col);
+        let q = exam.ensure_question(&col);
         q.sampling_result = Some(result.clone());
     }
-    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    let q = exam.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
     let conn = s.db().await;
     store::upsert_question_row(&conn, &name, &col, &q).await?;
     store::touch(&conn, &name).await?;
@@ -463,12 +558,18 @@ async fn grade_item(
     Json(req): Json<GradeReq>,
 ) -> AppResult<Json<QuestionGrades>> {
     validate_grade(&req.grade).map_err(AppError::BadRequest)?;
-    let mut session = load_session_or_404(&s, &name).await?;
-    session.ensure_question(&col);
-    let input_column = session.questions[&col].input_column.clone();
-    let id_columns = session.id_columns.clone();
+    let mut exam = load_exam_or_404(&s, &name).await?;
+    exam.ensure_question(&col);
+    let input_column = exam.questions[&col].input_column.clone();
+    let id_columns = exam.id_columns.clone();
+    let session = req
+        .session
+        .as_deref()
+        .filter(|x| !x.trim().is_empty())
+        .unwrap_or(DEFAULT_SESSION)
+        .to_string();
 
-    let (rows, _) = session_exam(&s.config, &session)?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
     let input_text = rows
         .iter()
         .find(|r| domain::row_id(r, &id_columns) == req.row_id)
@@ -476,10 +577,11 @@ async fn grade_item(
         .unwrap_or_default();
 
     // Persist the question row first so the pool sync can read its global id.
-    let q = session.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
+    let q = exam.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
     {
         let conn = s.db().await;
         store::upsert_question_row(&conn, &name, &col, &q).await?;
+        store::create_session(&conn, &name, &session).await?;
     }
 
     // Cache a feature vector so the row can participate in future sampling.
@@ -503,7 +605,8 @@ async fn grade_item(
         timestamp: store::now_iso(),
     };
     let conn = s.db().await;
-    store::put_graded_item(&conn, &name, &col, &item, "manual").await?;
+    store::put_graded_item(&conn, &name, &col, &item, "manual", &session).await?;
+    store::touch_session(&conn, &name, &session).await?;
     store::touch(&conn, &name).await?;
     store::load_question(&conn, &name, &col)
         .await?
@@ -529,12 +632,12 @@ async fn suggest(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<SuggestReq>,
 ) -> AppResult<Json<AIGradeSuggestion>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let question = session.questions.get(&col).ok_or_else(|| no_question(&col))?;
+    let exam = load_exam_or_404(&s, &name).await?;
+    let question = exam.questions.get(&col).ok_or_else(|| no_question(&col))?;
 
-    let id_columns = session.id_columns.clone();
+    let id_columns = exam.id_columns.clone();
     let input_column = question.input_column.clone();
-    let (rows, _) = session_exam(&s.config, &session)?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
     let response_text = rows
         .iter()
         .find(|r| domain::row_id(r, &id_columns) == req.row_id)
@@ -549,8 +652,8 @@ async fn question_status(
     State(s): State<AppState>,
     Path((name, col)): Path<(String, String)>,
 ) -> AppResult<Json<Value>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let q = session.questions.get(&col).ok_or_else(|| no_question(&col))?;
+    let exam = load_exam_or_404(&s, &name).await?;
+    let q = exam.questions.get(&col).ok_or_else(|| no_question(&col))?;
     let external = q
         .external_graded_items
         .iter()
@@ -570,9 +673,9 @@ async fn export(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let (rows, cols) = session_exam(&s.config, &session)?;
-    let path = store::export_to_excel(&s.config, &session, &rows, &cols)?;
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, cols) = exam_data(&s.config, &exam)?;
+    let path = store::export_to_excel(&s.config, &exam, &rows, &cols)?;
     Ok(Json(json!({ "path": path })))
 }
 
@@ -628,14 +731,14 @@ fn effective_var(col: &str, q: &QuestionGrades) -> String {
 }
 
 fn compute_results(
-    session: &Session,
+    exam: &Exam,
     rows: &[HashMap<String, String>],
     scheme: &GradeScheme,
 ) -> ResultsResponse {
-    let questions: Vec<scheme::QuestionConfig> = session
+    let questions: Vec<scheme::QuestionConfig> = exam
         .output_columns
         .iter()
-        .filter_map(|col| session.questions.get(col).map(|q| (col, q)))
+        .filter_map(|col| exam.questions.get(col).map(|q| (col, q)))
         .map(|(col, q)| scheme::QuestionConfig {
             var: effective_var(col, q),
             label: q.question_name.clone(),
@@ -649,10 +752,10 @@ fn compute_results(
 
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
-        let rid = domain::row_id(row, &session.id_columns);
+        let rid = domain::row_id(row, &exam.id_columns);
         let mut points: HashMap<String, Option<f64>> = HashMap::new();
-        for col in &session.output_columns {
-            if let Some(q) = session.questions.get(col) {
+        for col in &exam.output_columns {
+            if let Some(q) = exam.questions.get(col) {
                 let var = effective_var(col, q);
                 let graded = q
                     .graded_items
@@ -678,12 +781,11 @@ fn compute_results(
     }
 }
 
-/// Effective scheme variables for a session's questions (in column order).
-fn session_question_vars(session: &Session) -> Vec<String> {
-    session
-        .output_columns
+/// Effective scheme variables for an exam's questions (in column order).
+fn exam_question_vars(exam: &Exam) -> Vec<String> {
+    exam.output_columns
         .iter()
-        .filter_map(|c| session.questions.get(c).map(|q| effective_var(c, q)))
+        .filter_map(|c| exam.questions.get(c).map(|q| effective_var(c, q)))
         .collect()
 }
 
@@ -692,8 +794,8 @@ async fn put_scheme(
     Path(name): Path<String>,
     Json(scheme): Json<GradeScheme>,
 ) -> AppResult<StatusCode> {
-    let session = load_session_or_404(&s, &name).await?;
-    scheme::validate_scheme(&scheme, &session_question_vars(&session))
+    let exam = load_exam_or_404(&s, &name).await?;
+    scheme::validate_scheme(&scheme, &exam_question_vars(&exam))
         .map_err(AppError::BadRequest)?;
     let conn = s.db().await;
     store::set_scheme(&conn, &name, &Some(scheme)).await?;
@@ -705,10 +807,10 @@ async fn put_questions_config(
     State(s): State<AppState>,
     Path(name): Path<String>,
     Json(updates): Json<Vec<QuestionConfigUpdate>>,
-) -> AppResult<Json<Session>> {
-    let mut session = load_session_or_404(&s, &name).await?;
+) -> AppResult<Json<Exam>> {
+    let mut exam = load_exam_or_404(&s, &name).await?;
     for u in &updates {
-        let q = session.ensure_question(&u.col);
+        let q = exam.ensure_question(&u.col);
         q.var = u.var.clone();
         q.group = u.group.clone();
         q.qtype = u.qtype.clone();
@@ -719,8 +821,8 @@ async fn put_questions_config(
     // Each question must contribute a unique scheme variable, else points from
     // colliding questions would silently merge during compute.
     let mut seen = std::collections::HashSet::new();
-    for col in &session.output_columns {
-        if let Some(q) = session.questions.get(col) {
+    for col in &exam.output_columns {
+        if let Some(q) = exam.questions.get(col) {
             let v = effective_var(col, q);
             if !seen.insert(v.clone()) {
                 return Err(AppError::BadRequest(format!(
@@ -732,7 +834,7 @@ async fn put_questions_config(
     {
         let conn = s.db().await;
         for u in &updates {
-            let qc = session
+            let qc = exam
                 .questions
                 .get(&u.col)
                 .cloned()
@@ -741,17 +843,17 @@ async fn put_questions_config(
         }
         store::touch(&conn, &name).await?;
     }
-    Ok(Json(load_session_or_404(&s, &name).await?))
+    Ok(Json(load_exam_or_404(&s, &name).await?))
 }
 
 async fn get_results(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<ResultsResponse>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let (rows, _) = session_exam(&s.config, &session)?;
-    let mut resp = match &session.scheme {
-        Some(scheme) => compute_results(&session, &rows, scheme),
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let mut resp = match &exam.scheme {
+        Some(scheme) => compute_results(&exam, &rows, scheme),
         None => ResultsResponse {
             results: Vec::new(),
             distribution: HashMap::new(),
@@ -771,11 +873,11 @@ async fn preview_results(
     Path(name): Path<String>,
     Json(scheme): Json<GradeScheme>,
 ) -> AppResult<Json<ResultsResponse>> {
-    let session = load_session_or_404(&s, &name).await?;
-    scheme::validate_scheme(&scheme, &session_question_vars(&session))
+    let exam = load_exam_or_404(&s, &name).await?;
+    scheme::validate_scheme(&scheme, &exam_question_vars(&exam))
         .map_err(AppError::BadRequest)?;
-    let (rows, _) = session_exam(&s.config, &session)?;
-    Ok(Json(compute_results(&session, &rows, &scheme)))
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    Ok(Json(compute_results(&exam, &rows, &scheme)))
 }
 
 // ---------------------------------------------------------------------------
@@ -829,16 +931,16 @@ fn grades_equal(a: &str, b: &str) -> bool {
     }
 }
 
-/// Read roster + import file, returning (roster id-set, roster by id, import rows).
+/// Read roster + import file, returning (roster id-set, import rows).
 fn load_import(
     s: &AppState,
-    session: &Session,
+    exam: &Exam,
     file: &str,
 ) -> AppResult<(std::collections::HashSet<String>, Vec<HashMap<String, String>>)> {
-    let (roster, _) = session_exam(&s.config, session)?;
+    let (roster, _) = exam_data(&s.config, exam)?;
     let ids: std::collections::HashSet<String> = roster
         .iter()
-        .map(|r| domain::row_id(r, &session.id_columns))
+        .map(|r| domain::row_id(r, &exam.id_columns))
         .collect();
     let ipath = store::resolve_exam_path(&s.config, file)
         .ok_or_else(|| AppError::NotFound(format!("import file '{file}' not found")))?;
@@ -852,10 +954,10 @@ async fn import_preview(
     Json(req): Json<ImportReq>,
 ) -> AppResult<Json<ImportSummary>> {
     let conn = s.db().await;
-    let session = store::load_session(&conn, &name)
+    let exam = store::load_exam(&conn, &name)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))?;
-    let (roster_ids, irows) = load_import(&s, &session, &req.file)?;
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
+    let (roster_ids, irows) = load_import(&s, &exam, &req.file)?;
 
     let mut summary = ImportSummary::default();
     for irow in &irows {
@@ -902,15 +1004,15 @@ async fn import_apply(
     Json(req): Json<ImportReq>,
 ) -> AppResult<Json<ImportSummary>> {
     let conn = s.db().await;
-    let session = store::load_session(&conn, &name)
+    let exam = store::load_exam(&conn, &name)
         .await?
-        .ok_or_else(|| AppError::NotFound(format!("session '{name}' not found")))?;
-    let (roster, _) = session_exam(&s.config, &session)?;
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
+    let (roster, _) = exam_data(&s.config, &exam)?;
     let roster_by_id: HashMap<String, &HashMap<String, String>> = roster
         .iter()
-        .map(|r| (domain::row_id(r, &session.id_columns), r))
+        .map(|r| (domain::row_id(r, &exam.id_columns), r))
         .collect();
-    let (roster_ids, irows) = load_import(&s, &session, &req.file)?;
+    let (roster_ids, irows) = load_import(&s, &exam, &req.file)?;
     let label = format!(
         "imported:{}",
         req.label.clone().unwrap_or_else(|| req.file.clone())
@@ -932,7 +1034,7 @@ async fn import_apply(
                 summary.skipped += 1;
                 continue;
             }
-            let input_text = session
+            let input_text = exam
                 .questions
                 .get(&m.output_col)
                 .and_then(|q| roster_by_id.get(&id).and_then(|r| r.get(&q.input_column)))
@@ -970,7 +1072,7 @@ async fn import_apply(
                             grade: incoming.clone(),
                             timestamp: store::now_iso(),
                         };
-                        store::put_graded_item(&conn, &name, &m.output_col, &item, &label).await?;
+                        store::put_graded_item(&conn, &name, &m.output_col, &item, &label, "").await?;
                     }
                 }
             }
@@ -984,14 +1086,14 @@ async fn export_daisy_route(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let (rows, _) = session_exam(&s.config, &session)?;
-    let scheme = session
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let scheme = exam
         .scheme
         .as_ref()
         .ok_or_else(|| AppError::BadRequest("no grade scheme configured".into()))?;
-    let resp = compute_results(&session, &rows, scheme);
-    let path = store::export_daisy(&s.config, &session, &resp.results)?;
+    let resp = compute_results(&exam, &rows, scheme);
+    let path = store::export_daisy(&s.config, &exam, &resp.results)?;
     Ok(Json(json!({ "path": path })))
 }
 
@@ -999,14 +1101,14 @@ async fn export_csv_route(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Value>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let (rows, _) = session_exam(&s.config, &session)?;
-    let results = session
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let results = exam
         .scheme
         .as_ref()
-        .map(|sc| compute_results(&session, &rows, sc).results)
+        .map(|sc| compute_results(&exam, &rows, sc).results)
         .unwrap_or_default();
-    let path = store::export_per_question_csv(&s.config, &session, &rows, &results)?;
+    let path = store::export_per_question_csv(&s.config, &exam, &rows, &results)?;
     Ok(Json(json!({ "path": path })))
 }
 
@@ -1046,13 +1148,13 @@ async fn render_data(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<RenderData>> {
-    let session = load_session_or_404(&s, &name).await?;
-    let (rows, _) = session_exam(&s.config, &session)?;
-    let scheme = session.scheme.clone().unwrap_or_default();
-    let questions: Vec<scheme::QuestionConfig> = session
+    let exam = load_exam_or_404(&s, &name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let scheme = exam.scheme.clone().unwrap_or_default();
+    let questions: Vec<scheme::QuestionConfig> = exam
         .output_columns
         .iter()
-        .filter_map(|col| session.questions.get(col).map(|q| (col, q)))
+        .filter_map(|col| exam.questions.get(col).map(|q| (col, q)))
         .map(|(col, q)| scheme::QuestionConfig {
             var: effective_var(col, q),
             label: q.question_name.clone(),
@@ -1066,10 +1168,10 @@ async fn render_data(
 
     let mut students = Vec::new();
     for row in &rows {
-        let rid = domain::row_id(row, &session.id_columns);
+        let rid = domain::row_id(row, &exam.id_columns);
         let mut points: HashMap<String, Option<f64>> = HashMap::new();
-        for col in &session.output_columns {
-            if let Some(q) = session.questions.get(col) {
+        for col in &exam.output_columns {
+            if let Some(q) = exam.questions.get(col) {
                 let var = effective_var(col, q);
                 let g = q
                     .graded_items
@@ -1083,8 +1185,8 @@ async fn render_data(
         let est: std::collections::HashSet<&str> = sr.estimated.iter().map(|s| s.as_str()).collect();
 
         let mut rq = Vec::new();
-        for col in &session.output_columns {
-            if let Some(q) = session.questions.get(col) {
+        for col in &exam.output_columns {
+            if let Some(q) = exam.questions.get(col) {
                 let var = effective_var(col, q);
                 let response = row.get(&q.input_column).cloned().unwrap_or_default();
                 let pts = q
@@ -1129,8 +1231,8 @@ async fn export_results_pdf(
     }
     {
         let conn = s.db().await;
-        if !store::session_exists(&conn, &name).await? {
-            return Err(AppError::NotFound(format!("session '{name}' not found")));
+        if !store::exam_exists(&conn, &name).await? {
+            return Err(AppError::NotFound(format!("exam '{name}' not found")));
         }
     }
     let url = format!("{}/render", s.config.renderer_url.trim_end_matches('/'));
@@ -1177,7 +1279,7 @@ async fn resolve_conflict(
                 grade: c.incoming_grade.clone(),
                 timestamp: store::now_iso(),
             };
-            store::put_graded_item(&conn, &name, &c.output_col, &item, &c.incoming_source).await?;
+            store::put_graded_item(&conn, &name, &c.output_col, &item, &c.incoming_source, "").await?;
         }
     }
     store::clear_conflicts_for(&conn, &name, &req.output_col, &req.row_id).await?;

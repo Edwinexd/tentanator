@@ -13,10 +13,11 @@ pub async fn open(path: &str) -> turso::Result<turso::Database> {
 
 /// Create the schema if it does not already exist.
 pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
+    // The central object: one row per examination.
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS sessions (
+        "CREATE TABLE IF NOT EXISTS exams (
             name TEXT PRIMARY KEY,
-            csv_file TEXT NOT NULL,
+            exam_file TEXT NOT NULL,
             id_columns TEXT NOT NULL,
             input_columns TEXT NOT NULL,
             output_columns TEXT NOT NULL,
@@ -29,9 +30,22 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
     )
     .await?;
 
+    // Lightweight named grading sessions, children of an exam.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (
+            exam TEXT NOT NULL,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
+            last_updated TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (exam, name)
+        )",
+        (),
+    )
+    .await?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS questions (
-            session_name TEXT NOT NULL,
+            exam TEXT NOT NULL,
             output_col TEXT NOT NULL,
             question_name TEXT NOT NULL DEFAULT '',
             input_column TEXT NOT NULL DEFAULT '',
@@ -45,22 +59,25 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
             max_points REAL NOT NULL DEFAULT 0,
             position INTEGER NOT NULL DEFAULT 0,
             estimate TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (session_name, output_col)
+            PRIMARY KEY (exam, output_col)
         )",
         (),
     )
     .await?;
 
+    // One canonical grade per (exam, question, student). `session` records which
+    // session recorded it; `source` records provenance (manual / imported:...).
     conn.execute(
         "CREATE TABLE IF NOT EXISTS graded_items (
-            session_name TEXT NOT NULL,
+            exam TEXT NOT NULL,
             output_col TEXT NOT NULL,
             row_id TEXT NOT NULL,
             input_text TEXT NOT NULL DEFAULT '',
             grade TEXT NOT NULL DEFAULT '',
             timestamp TEXT NOT NULL DEFAULT '',
             source TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (session_name, output_col, row_id)
+            session TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (exam, output_col, row_id)
         )",
         (),
     )
@@ -68,12 +85,12 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS caches (
-            session_name TEXT NOT NULL,
+            exam TEXT NOT NULL,
             kind TEXT NOT NULL,
             input_column TEXT NOT NULL,
             row_id TEXT NOT NULL,
             vector BLOB NOT NULL,
-            PRIMARY KEY (session_name, kind, input_column, row_id)
+            PRIMARY KEY (exam, kind, input_column, row_id)
         )",
         (),
     )
@@ -82,12 +99,12 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS graded_pool (
             global_question_id TEXT NOT NULL,
-            source_session TEXT NOT NULL,
+            source_exam TEXT NOT NULL,
             row_id TEXT NOT NULL,
             input_text TEXT NOT NULL DEFAULT '',
             grade TEXT NOT NULL DEFAULT '',
             timestamp TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (global_question_id, source_session, row_id)
+            PRIMARY KEY (global_question_id, source_exam, row_id)
         )",
         (),
     )
@@ -95,7 +112,7 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
 
     conn.execute(
         "CREATE TABLE IF NOT EXISTS grade_conflicts (
-            session_name TEXT NOT NULL,
+            exam TEXT NOT NULL,
             output_col TEXT NOT NULL,
             row_id TEXT NOT NULL,
             existing_grade TEXT NOT NULL DEFAULT '',
@@ -104,26 +121,11 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
             incoming_source TEXT NOT NULL DEFAULT '',
             input_text TEXT NOT NULL DEFAULT '',
             timestamp TEXT NOT NULL DEFAULT '',
-            PRIMARY KEY (session_name, output_col, row_id, incoming_source)
+            PRIMARY KEY (exam, output_col, row_id, incoming_source)
         )",
         (),
     )
     .await?;
-
-    // Best-effort column migrations for DBs created by an earlier schema.
-    // Duplicate-column errors are expected and ignored.
-    for stmt in [
-        "ALTER TABLE questions ADD COLUMN var TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE questions ADD COLUMN qgroup TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE questions ADD COLUMN qtype TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE questions ADD COLUMN max_points REAL NOT NULL DEFAULT 0",
-        "ALTER TABLE questions ADD COLUMN position INTEGER NOT NULL DEFAULT 0",
-        "ALTER TABLE questions ADD COLUMN estimate TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE sessions ADD COLUMN scheme TEXT NOT NULL DEFAULT ''",
-        "ALTER TABLE graded_items ADD COLUMN source TEXT NOT NULL DEFAULT ''",
-    ] {
-        let _ = conn.execute(stmt, ()).await;
-    }
 
     Ok(())
 }

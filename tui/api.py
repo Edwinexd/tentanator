@@ -48,32 +48,45 @@ class TentanatorAPI:
             return None
         return resp.json()
 
-    # -- health & exams ----------------------------------------------------
+    # -- health & exam files ----------------------------------------------
     async def health(self) -> Dict[str, Any]:
         return await self._request("GET", "/api/health")
 
-    async def list_exams(self) -> List[str]:
-        return await self._request("GET", "/api/exams")
+    async def list_exam_files(self) -> List[str]:
+        return await self._request("GET", "/api/exam-files")
 
     async def exam_columns(self, file: str) -> List[str]:
-        return await self._request("GET", f"/api/exams/{file}/columns")
+        return await self._request("GET", f"/api/exam-files/{file}/columns")
 
     async def exam_rows(self, file: str) -> List[Dict[str, str]]:
-        data = await self._request("GET", f"/api/exams/{file}/rows")
+        data = await self._request("GET", f"/api/exam-files/{file}/rows")
         return data.get("rows", [])
 
-    # -- sessions ----------------------------------------------------------
-    async def list_sessions(self, archived: bool = False) -> List[Dict[str, Any]]:
-        return await self._request("GET", "/api/sessions", params={"archived": str(archived).lower()})
+    # -- exams (the central entity) ---------------------------------------
+    async def list_exams(self, archived: bool = False) -> List[Dict[str, Any]]:
+        return await self._request("GET", "/api/exams", params={"archived": str(archived).lower()})
 
-    async def create_session(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._request("POST", "/api/sessions", json=payload)
+    async def create_exam(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("POST", "/api/exams", json=payload)
 
-    async def get_session(self, name: str) -> Dict[str, Any]:
-        return await self._request("GET", f"/api/sessions/{name}")
+    async def get_exam(self, name: str) -> Dict[str, Any]:
+        return await self._request("GET", f"/api/exams/{name}")
 
-    async def update_session(self, name: str, meta: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._request("PUT", f"/api/sessions/{name}", json=meta)
+    async def update_exam(self, name: str, meta: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._request("PUT", f"/api/exams/{name}", json=meta)
+
+    async def delete_exam(self, name: str) -> None:
+        await self._request("DELETE", f"/api/exams/{name}")
+
+    async def archive_exam(self, name: str) -> None:
+        await self._request("POST", f"/api/exams/{name}/archive")
+
+    # -- legacy import (old Python-app data -> new format, on demand) -------
+    async def legacy_sessions_info(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/legacy-sessions")
+
+    async def import_legacy_sessions(self) -> Dict[str, Any]:
+        return await self._request("POST", "/api/legacy-sessions/import")
 
     async def list_legacy_workspaces(self) -> List[Dict[str, Any]]:
         return await self._request("GET", "/api/legacy-workspaces")
@@ -81,46 +94,51 @@ class TentanatorAPI:
     async def import_workspace(self, name: str) -> Dict[str, Any]:
         return await self._request("POST", f"/api/legacy-workspaces/{name}/import")
 
-    async def delete_session(self, name: str) -> None:
-        await self._request("DELETE", f"/api/sessions/{name}")
+    # -- sessions (grading passes under an exam) --------------------------
+    async def list_sessions(self, exam: str) -> List[Dict[str, Any]]:
+        return await self._request("GET", f"/api/exams/{exam}/sessions")
 
-    async def archive_session(self, name: str) -> None:
-        await self._request("POST", f"/api/sessions/{name}/archive")
+    async def create_session(self, exam: str, name: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("POST", f"/api/exams/{exam}/sessions", json={"name": name})
+
+    async def delete_session(self, exam: str, session: str) -> None:
+        await self._request("DELETE", f"/api/exams/{exam}/sessions/{session}")
 
     # -- questions & grading ----------------------------------------------
     async def put_question(self, name: str, col: str, meta: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._request("PUT", f"/api/sessions/{name}/questions/{col}", json=meta)
+        return await self._request("PUT", f"/api/exams/{name}/questions/{col}", json=meta)
 
     async def sampling(self, name: str, col: str, algorithm: str,
                        n_samples: Optional[int] = None) -> Dict[str, Any]:
         body: Dict[str, Any] = {"algorithm": algorithm}
         if n_samples is not None:
             body["n_samples"] = n_samples
-        return await self._request("POST", f"/api/sessions/{name}/questions/{col}/sampling", json=body)
+        return await self._request("POST", f"/api/exams/{name}/questions/{col}/sampling", json=body)
 
-    async def grade(self, name: str, col: str, row_id: str, grade: str) -> Dict[str, Any]:
+    async def grade(self, name: str, col: str, row_id: str, grade: str,
+                    session: Optional[str] = None) -> Dict[str, Any]:
         return await self._request(
-            "POST", f"/api/sessions/{name}/questions/{col}/grade",
-            json={"row_id": row_id, "grade": grade},
+            "POST", f"/api/exams/{name}/questions/{col}/grade",
+            json={"row_id": row_id, "grade": grade, "session": session},
         )
 
     async def ungrade(self, name: str, col: str, row_id: str) -> Dict[str, Any]:
-        return await self._request("DELETE", f"/api/sessions/{name}/questions/{col}/grade/{row_id}")
+        return await self._request("DELETE", f"/api/exams/{name}/questions/{col}/grade/{row_id}")
 
     async def suggest(self, name: str, col: str, row_id: str) -> Dict[str, Any]:
         return await self._request(
-            "POST", f"/api/sessions/{name}/questions/{col}/suggest",
+            "POST", f"/api/exams/{name}/questions/{col}/suggest",
             json={"row_id": row_id},
         )
 
     async def question_status(self, name: str, col: str) -> Dict[str, Any]:
-        return await self._request("GET", f"/api/sessions/{name}/questions/{col}/status")
+        return await self._request("GET", f"/api/exams/{name}/questions/{col}/status")
 
     async def export(self, name: str) -> Dict[str, Any]:
-        return await self._request("POST", f"/api/sessions/{name}/export")
+        return await self._request("POST", f"/api/exams/{name}/export")
 
     async def get_results(self, name: str) -> Dict[str, Any]:
-        return await self._request("GET", f"/api/sessions/{name}/results")
+        return await self._request("GET", f"/api/exams/{name}/results")
 
     async def upload_file(self, kind: str, path: str) -> Dict[str, Any]:
         """Upload a local file (raw body) into exams/ or scans/."""

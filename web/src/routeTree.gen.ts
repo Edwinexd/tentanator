@@ -11,11 +11,11 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as NewRouteImport } from './routes/new'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SessionNameRouteImport } from './routes/session.$name'
-import { Route as SessionNameSchemeRouteImport } from './routes/session.$name.scheme'
-import { Route as SessionNameResultsRouteImport } from './routes/session.$name.results'
-import { Route as SessionNamePdfRouteImport } from './routes/session.$name.pdf'
-import { Route as SessionNameImportRouteImport } from './routes/session.$name.import'
+import { Route as ExamNameRouteImport } from './routes/exam.$name'
+import { Route as ExamNameSchemeRouteImport } from './routes/exam.$name.scheme'
+import { Route as ExamNameResultsRouteImport } from './routes/exam.$name.results'
+import { Route as ExamNamePdfRouteImport } from './routes/exam.$name.pdf'
+import { Route as ExamNameImportRouteImport } from './routes/exam.$name.import'
 
 const NewRoute = NewRouteImport.update({
   id: '/new',
@@ -27,94 +27,94 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SessionNameRoute = SessionNameRouteImport.update({
-  id: '/session/$name',
-  path: '/session/$name',
+const ExamNameRoute = ExamNameRouteImport.update({
+  id: '/exam/$name',
+  path: '/exam/$name',
   getParentRoute: () => rootRouteImport,
 } as any)
-const SessionNameSchemeRoute = SessionNameSchemeRouteImport.update({
+const ExamNameSchemeRoute = ExamNameSchemeRouteImport.update({
   id: '/scheme',
   path: '/scheme',
-  getParentRoute: () => SessionNameRoute,
+  getParentRoute: () => ExamNameRoute,
 } as any)
-const SessionNameResultsRoute = SessionNameResultsRouteImport.update({
+const ExamNameResultsRoute = ExamNameResultsRouteImport.update({
   id: '/results',
   path: '/results',
-  getParentRoute: () => SessionNameRoute,
+  getParentRoute: () => ExamNameRoute,
 } as any)
-const SessionNamePdfRoute = SessionNamePdfRouteImport.update({
+const ExamNamePdfRoute = ExamNamePdfRouteImport.update({
   id: '/pdf',
   path: '/pdf',
-  getParentRoute: () => SessionNameRoute,
+  getParentRoute: () => ExamNameRoute,
 } as any)
-const SessionNameImportRoute = SessionNameImportRouteImport.update({
+const ExamNameImportRoute = ExamNameImportRouteImport.update({
   id: '/import',
   path: '/import',
-  getParentRoute: () => SessionNameRoute,
+  getParentRoute: () => ExamNameRoute,
 } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRouteWithChildren
-  '/session/$name/import': typeof SessionNameImportRoute
-  '/session/$name/pdf': typeof SessionNamePdfRoute
-  '/session/$name/results': typeof SessionNameResultsRoute
-  '/session/$name/scheme': typeof SessionNameSchemeRoute
+  '/exam/$name': typeof ExamNameRouteWithChildren
+  '/exam/$name/import': typeof ExamNameImportRoute
+  '/exam/$name/pdf': typeof ExamNamePdfRoute
+  '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/scheme': typeof ExamNameSchemeRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRouteWithChildren
-  '/session/$name/import': typeof SessionNameImportRoute
-  '/session/$name/pdf': typeof SessionNamePdfRoute
-  '/session/$name/results': typeof SessionNameResultsRoute
-  '/session/$name/scheme': typeof SessionNameSchemeRoute
+  '/exam/$name': typeof ExamNameRouteWithChildren
+  '/exam/$name/import': typeof ExamNameImportRoute
+  '/exam/$name/pdf': typeof ExamNamePdfRoute
+  '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/scheme': typeof ExamNameSchemeRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/new': typeof NewRoute
-  '/session/$name': typeof SessionNameRouteWithChildren
-  '/session/$name/import': typeof SessionNameImportRoute
-  '/session/$name/pdf': typeof SessionNamePdfRoute
-  '/session/$name/results': typeof SessionNameResultsRoute
-  '/session/$name/scheme': typeof SessionNameSchemeRoute
+  '/exam/$name': typeof ExamNameRouteWithChildren
+  '/exam/$name/import': typeof ExamNameImportRoute
+  '/exam/$name/pdf': typeof ExamNamePdfRoute
+  '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/scheme': typeof ExamNameSchemeRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
     | '/new'
-    | '/session/$name'
-    | '/session/$name/import'
-    | '/session/$name/pdf'
-    | '/session/$name/results'
-    | '/session/$name/scheme'
+    | '/exam/$name'
+    | '/exam/$name/import'
+    | '/exam/$name/pdf'
+    | '/exam/$name/results'
+    | '/exam/$name/scheme'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/new'
-    | '/session/$name'
-    | '/session/$name/import'
-    | '/session/$name/pdf'
-    | '/session/$name/results'
-    | '/session/$name/scheme'
+    | '/exam/$name'
+    | '/exam/$name/import'
+    | '/exam/$name/pdf'
+    | '/exam/$name/results'
+    | '/exam/$name/scheme'
   id:
     | '__root__'
     | '/'
     | '/new'
-    | '/session/$name'
-    | '/session/$name/import'
-    | '/session/$name/pdf'
-    | '/session/$name/results'
-    | '/session/$name/scheme'
+    | '/exam/$name'
+    | '/exam/$name/import'
+    | '/exam/$name/pdf'
+    | '/exam/$name/results'
+    | '/exam/$name/scheme'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   NewRoute: typeof NewRoute
-  SessionNameRoute: typeof SessionNameRouteWithChildren
+  ExamNameRoute: typeof ExamNameRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -133,76 +133,67 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/session/$name': {
-      id: '/session/$name'
-      path: '/session/$name'
-      fullPath: '/session/$name'
-      preLoaderRoute: typeof SessionNameRouteImport
+    '/exam/$name': {
+      id: '/exam/$name'
+      path: '/exam/$name'
+      fullPath: '/exam/$name'
+      preLoaderRoute: typeof ExamNameRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/session/$name/scheme': {
-      id: '/session/$name/scheme'
+    '/exam/$name/scheme': {
+      id: '/exam/$name/scheme'
       path: '/scheme'
-      fullPath: '/session/$name/scheme'
-      preLoaderRoute: typeof SessionNameSchemeRouteImport
-      parentRoute: typeof SessionNameRoute
+      fullPath: '/exam/$name/scheme'
+      preLoaderRoute: typeof ExamNameSchemeRouteImport
+      parentRoute: typeof ExamNameRoute
     }
-    '/session/$name/results': {
-      id: '/session/$name/results'
+    '/exam/$name/results': {
+      id: '/exam/$name/results'
       path: '/results'
-      fullPath: '/session/$name/results'
-      preLoaderRoute: typeof SessionNameResultsRouteImport
-      parentRoute: typeof SessionNameRoute
+      fullPath: '/exam/$name/results'
+      preLoaderRoute: typeof ExamNameResultsRouteImport
+      parentRoute: typeof ExamNameRoute
     }
-    '/session/$name/pdf': {
-      id: '/session/$name/pdf'
+    '/exam/$name/pdf': {
+      id: '/exam/$name/pdf'
       path: '/pdf'
-      fullPath: '/session/$name/pdf'
-      preLoaderRoute: typeof SessionNamePdfRouteImport
-      parentRoute: typeof SessionNameRoute
+      fullPath: '/exam/$name/pdf'
+      preLoaderRoute: typeof ExamNamePdfRouteImport
+      parentRoute: typeof ExamNameRoute
     }
-    '/session/$name/import': {
-      id: '/session/$name/import'
+    '/exam/$name/import': {
+      id: '/exam/$name/import'
       path: '/import'
-      fullPath: '/session/$name/import'
-      preLoaderRoute: typeof SessionNameImportRouteImport
-      parentRoute: typeof SessionNameRoute
+      fullPath: '/exam/$name/import'
+      preLoaderRoute: typeof ExamNameImportRouteImport
+      parentRoute: typeof ExamNameRoute
     }
   }
 }
 
-interface SessionNameRouteChildren {
-  SessionNameImportRoute: typeof SessionNameImportRoute
-  SessionNamePdfRoute: typeof SessionNamePdfRoute
-  SessionNameResultsRoute: typeof SessionNameResultsRoute
-  SessionNameSchemeRoute: typeof SessionNameSchemeRoute
+interface ExamNameRouteChildren {
+  ExamNameImportRoute: typeof ExamNameImportRoute
+  ExamNamePdfRoute: typeof ExamNamePdfRoute
+  ExamNameResultsRoute: typeof ExamNameResultsRoute
+  ExamNameSchemeRoute: typeof ExamNameSchemeRoute
 }
 
-const SessionNameRouteChildren: SessionNameRouteChildren = {
-  SessionNameImportRoute: SessionNameImportRoute,
-  SessionNamePdfRoute: SessionNamePdfRoute,
-  SessionNameResultsRoute: SessionNameResultsRoute,
-  SessionNameSchemeRoute: SessionNameSchemeRoute,
+const ExamNameRouteChildren: ExamNameRouteChildren = {
+  ExamNameImportRoute: ExamNameImportRoute,
+  ExamNamePdfRoute: ExamNamePdfRoute,
+  ExamNameResultsRoute: ExamNameResultsRoute,
+  ExamNameSchemeRoute: ExamNameSchemeRoute,
 }
 
-const SessionNameRouteWithChildren = SessionNameRoute._addFileChildren(
-  SessionNameRouteChildren,
+const ExamNameRouteWithChildren = ExamNameRoute._addFileChildren(
+  ExamNameRouteChildren,
 )
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   NewRoute: NewRoute,
-  SessionNameRoute: SessionNameRouteWithChildren,
+  ExamNameRoute: ExamNameRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-  }
-}

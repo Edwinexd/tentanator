@@ -3,7 +3,7 @@ import { useEffect, useState, type ChangeEvent } from 'react'
 import { api } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
-export const Route = createFileRoute('/session/$name/pdf')({ component: PdfView })
+export const Route = createFileRoute('/exam/$name/pdf')({ component: PdfView })
 
 function PdfView() {
   const { name } = Route.useParams()

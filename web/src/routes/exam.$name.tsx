@@ -6,17 +6,18 @@ import {
   rowId,
   type AIGradeSuggestion,
   type Algorithm,
+  type Exam,
   type ExamRow,
   type QuestionStatus,
-  type Session,
+  type SessionSummary,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
-export const Route = createFileRoute('/session/$name')({ component: SessionView })
+export const Route = createFileRoute('/exam/$name')({ component: ExamView })
 
-function SessionView() {
+function ExamView() {
   const { name } = Route.useParams()
-  const [session, setSession] = useState<Session | null>(null)
+  const [exam, setExam] = useState<Exam | null>(null)
   const [rows, setRows] = useState<ExamRow[]>([])
   const [course, setCourse] = useState('')
   const [col, setCol] = useState('')
@@ -24,30 +25,50 @@ function SessionView() {
   const [gradeValue, setGradeValue] = useState('')
   const [suggestion, setSuggestion] = useState<AIGradeSuggestion | null>(null)
   const [status, setStatus] = useState<QuestionStatus | null>(null)
+  const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const [activeSession, setActiveSession] = useState('default')
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
+  function refreshSessions(select?: string) {
+    return api
+      .listSessions(name)
+      .then((list) => {
+        setSessions(list)
+        setActiveSession((cur) => {
+          if (select) return select
+          if (list.some((s) => s.name === cur)) return cur
+          if (list.some((s) => s.name === 'default')) return 'default'
+          return list[0]?.name ?? 'default'
+        })
+        return list
+      })
+      .catch(() => {})
+  }
+
   useEffect(() => {
     api
-      .getSession(name)
+      .getExam(name)
       .then((s) => {
-        setSession(s)
+        setExam(s)
         setCourse(s.course ?? '')
         setRows([])
         setCol(s.output_columns[0] ?? '')
-        return api.examRows(s.csv_file)
+        return api.examRows(s.exam_file)
       })
       .then(setRows)
       .catch((e: Error) => setError(e.message))
+    refreshSessions()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
-  const question = session && col ? session.questions[col] : undefined
+  const question = exam && col ? exam.questions[col] : undefined
   const inputCol = question?.input_column ?? ''
 
   const ungraded = useMemo(() => {
     if (!question) return [] as ExamRow[]
-    const idCols = session?.id_columns ?? []
+    const idCols = exam?.id_columns ?? []
     const gradedIds = new Set(question.graded_items.map((g) => g.row_id))
     const priority = new Set(question.sampling_result?.selected_ids ?? [])
     return rows
@@ -56,7 +77,7 @@ function SessionView() {
         (a, b) =>
           Number(!priority.has(rowId(a, idCols))) - Number(!priority.has(rowId(b, idCols))),
       )
-  }, [question, rows, session, inputCol])
+  }, [question, rows, exam, inputCol])
 
   const safeIndex = ungraded.length ? Math.min(index, ungraded.length - 1) : 0
   const current = ungraded[safeIndex]
@@ -69,7 +90,7 @@ function SessionView() {
 
   useEffect(() => {
     if (col) api.questionStatus(name, col).then(setStatus).catch(() => setStatus(null))
-  }, [name, col, session])
+  }, [name, col, exam])
 
   async function save() {
     if (!current || !col) return
@@ -78,8 +99,14 @@ function SessionView() {
     setError(null)
     setBusy(true)
     try {
-      const updated = await api.grade(name, col, rowId(current, session?.id_columns ?? []), grade)
-      setSession((s) => (s ? { ...s, questions: { ...s.questions, [col]: updated } } : s))
+      const updated = await api.grade(
+        name,
+        col,
+        rowId(current, exam?.id_columns ?? []),
+        grade,
+        activeSession,
+      )
+      setExam((s) => (s ? { ...s, questions: { ...s.questions, [col]: updated } } : s))
       setGradeValue('')
       setSuggestion(null)
     } catch (e) {
@@ -94,7 +121,7 @@ function SessionView() {
     setBusy(true)
     setError(null)
     try {
-      const s = await api.suggest(name, col, rowId(current, session?.id_columns ?? []))
+      const s = await api.suggest(name, col, rowId(current, exam?.id_columns ?? []))
       setSuggestion(s)
       setGradeValue(s.grade)
     } catch (e) {
@@ -111,8 +138,8 @@ function SessionView() {
     setError(null)
     try {
       const result = await api.sampling(name, col, algorithm)
-      const fresh = await api.getSession(name)
-      setSession(fresh)
+      const fresh = await api.getExam(name)
+      setExam(fresh)
       setInfo(`Selected ${result.num_samples} representative sample(s) via ${algorithm}`)
     } catch (e) {
       setError((e as Error).message)
@@ -121,21 +148,33 @@ function SessionView() {
     }
   }
 
-  async function saveCourse() {
-    if (!session) return
-    if ((session.course ?? '') === course.trim()) return
+  async function newSession() {
+    const newName = window.prompt('New session name')?.trim()
+    if (!newName) return
+    setError(null)
     try {
-      const updated = await api.updateSession(name, { course: course.trim() })
-      setSession((s) => (s ? { ...s, course: updated.course } : s))
+      const created = await api.createSession(name, newName)
+      await refreshSessions(created.name)
     } catch (e) {
       setError((e as Error).message)
     }
   }
 
-  async function exportSession() {
+  async function saveCourse() {
+    if (!exam) return
+    if ((exam.course ?? '') === course.trim()) return
+    try {
+      const updated = await api.updateExam(name, { course: course.trim() })
+      setExam((s) => (s ? { ...s, course: updated.course } : s))
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function exportExam() {
     setBusy(true)
     try {
-      const { path } = await api.exportSession(name)
+      const { path } = await api.exportExam(name)
       setInfo(`Exported to ${path}`)
     } catch (e) {
       setError((e as Error).message)
@@ -144,7 +183,7 @@ function SessionView() {
     }
   }
 
-  if (!session) {
+  if (!exam) {
     return (
       <div className="mx-auto max-w-3xl p-8">
         {error ? (
@@ -164,7 +203,7 @@ function SessionView() {
   return (
     <div className="mx-auto max-w-3xl space-y-4 p-8">
       <ExamNav name={name} active="grade" />
-      <h1 className="text-2xl font-bold">{session.session_name}</h1>
+      <h1 className="text-2xl font-bold">{exam.name}</h1>
 
       <label className="flex items-center gap-2 text-sm text-gray-600">
         Course:
@@ -180,13 +219,35 @@ function SessionView() {
         />
       </label>
 
+      <label className="flex items-center gap-2 text-sm text-gray-600">
+        Session:
+        <select
+          className="rounded border px-2 py-1"
+          value={activeSession}
+          onChange={(e) => setActiveSession(e.target.value)}
+        >
+          {sessions.length === 0 && <option value="default">default (0)</option>}
+          {sessions.map((s) => (
+            <option key={s.name} value={s.name}>
+              {s.name} ({s.graded_count})
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={newSession}
+          className="rounded border px-3 py-1 hover:bg-gray-50"
+        >
+          New session
+        </button>
+      </label>
+
       <div className="flex flex-wrap items-center gap-2">
         <select
           className="rounded border p-2"
           value={col}
           onChange={(e) => setCol(e.target.value)}
         >
-          {session.output_columns.map((c) => (
+          {exam.output_columns.map((c) => (
             <option key={c} value={c}>
               {c}
             </option>
@@ -208,7 +269,7 @@ function SessionView() {
         </button>
         <button
           disabled={busy}
-          onClick={exportSession}
+          onClick={exportExam}
           className="rounded border px-3 py-2 hover:bg-gray-50 disabled:opacity-50"
         >
           export
@@ -227,7 +288,7 @@ function SessionView() {
         <>
           <div className="text-sm text-gray-500">
             {safeIndex + 1}/{ungraded.length} ungraded · id:{' '}
-            {rowId(current, session.id_columns)}
+            {rowId(current, exam.id_columns)}
           </div>
           <div className="max-h-80 overflow-auto whitespace-pre-wrap rounded border bg-gray-50 p-4">
             {current[inputCol]}

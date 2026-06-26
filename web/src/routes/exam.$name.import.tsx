@@ -1,9 +1,9 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type ChangeEvent } from 'react'
-import { api, type GradeConflict, type ImportSummary, type Session } from '#/lib/api'
+import { api, type Exam, type GradeConflict, type ImportSummary } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
 
-export const Route = createFileRoute('/session/$name/import')({ component: ImportView })
+export const Route = createFileRoute('/exam/$name/import')({ component: ImportView })
 
 function Badge({ label, value }: { label: string; value: number }) {
   return (
@@ -15,7 +15,7 @@ function Badge({ label, value }: { label: string; value: number }) {
 
 function ImportView() {
   const { name } = Route.useParams()
-  const [session, setSession] = useState<Session | null>(null)
+  const [exam, setExam] = useState<Exam | null>(null)
   const [exams, setExams] = useState<string[]>([])
   const [file, setFile] = useState('')
   const [columns, setColumns] = useState<string[]>([])
@@ -31,8 +31,8 @@ function ImportView() {
   }
 
   useEffect(() => {
-    api.getSession(name).then(setSession).catch((e: Error) => setError(e.message))
-    api.listExams().then(setExams).catch(() => {})
+    api.getExam(name).then(setExam).catch((e: Error) => setError(e.message))
+    api.listExamFiles().then(setExams).catch(() => {})
     loadConflicts()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
@@ -62,7 +62,7 @@ function ImportView() {
     setError(null)
     try {
       await api.uploadFile('exams', f)
-      setExams(await api.listExams())
+      setExams(await api.listExamFiles())
       setFile(f.name)
     } catch (err) {
       setError((err as Error).message)
@@ -104,7 +104,7 @@ function ImportView() {
     }
   }
 
-  const outCols = session?.output_columns ?? []
+  const outCols = exam?.output_columns ?? []
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-8">
       <ExamNav name={name} active="import" />

@@ -87,62 +87,74 @@ def is_meaningful(text: str) -> bool:
     return t not in ("", "-", "N/A")
 
 
-class SessionListScreen(Screen):
-    """Landing screen: pick an existing session or start a new one."""
+class ExamListScreen(Screen):
+    """Landing screen: pick an existing exam or start a new one."""
 
     BINDINGS = [
-        ("n", "new_session", "New session"),
+        ("n", "new_exam", "New exam"),
         ("u", "upload", "Upload file"),
+        ("i", "import_legacy", "Import legacy"),
         ("r", "refresh", "Refresh"),
     ]
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
-        yield Label("Sessions", id="title")
-        yield ListView(id="sessions")
+        yield Label("Exams", id="title")
+        yield ListView(id="exams")
         with Horizontal(id="actions"):
-            yield Button("New session [n]", id="new", variant="primary")
+            yield Button("New exam [n]", id="new", variant="primary")
             yield Button("Refresh [r]", id="refresh")
         yield Footer()
 
     async def on_mount(self) -> None:
-        await self.refresh_sessions()
+        await self.refresh_exams()
 
-    async def refresh_sessions(self) -> None:
-        lv = self.query_one("#sessions", ListView)
+    async def refresh_exams(self) -> None:
+        lv = self.query_one("#exams", ListView)
         await lv.clear()
         try:
-            sessions = await self.app.api.list_sessions()  # type: ignore[attr-defined]
+            exams = await self.app.api.list_exams()  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
-        if not sessions:
-            await lv.append(ListItem(Label("(no sessions - press 'n' to create one)")))
+        if not exams:
+            await lv.append(ListItem(Label("(no exams - press 'n' to create one)")))
             return
-        for s in sessions:
-            course = f"  [{s['course']}]" if s.get("course") else ""
+        for e in exams:
+            course = f"  [{e['course']}]" if e.get("course") else ""
             label = (
-                f"{s['session_name']}{course}  -  {s['csv_file']}  "
-                f"({s['num_questions']} q, updated {s['last_updated'][:19]})"
+                f"{e['name']}{course}  -  {e['exam_file']}  "
+                f"({e['num_questions']} q, updated {e['last_updated'][:19]})"
             )
-            await lv.append(ListItem(Label(label), name=s["session_name"]))
+            await lv.append(ListItem(Label(label), name=e["name"]))
 
-    def action_new_session(self) -> None:
-        self.app.push_screen(NewSessionScreen())
+    def action_new_exam(self) -> None:
+        self.app.push_screen(NewExamScreen())
 
     def action_upload(self) -> None:
         self.app.push_screen(FilePickerScreen())
 
+    async def action_import_legacy(self) -> None:
+        """Import loose legacy `.tentanator_sessions/` exams into the new format."""
+        try:
+            result = await self.app.api.import_legacy_sessions()  # type: ignore[attr-defined]
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        imported = result.get("imported_exams", [])
+        self.notify(f"Imported {len(imported)} legacy exam(s)")
+        await self.refresh_exams()
+
     async def action_refresh(self) -> None:
-        await self.refresh_sessions()
+        await self.refresh_exams()
 
     @on(Button.Pressed, "#new")
     def _new(self) -> None:
-        self.action_new_session()
+        self.action_new_exam()
 
     @on(Button.Pressed, "#refresh")
     async def _refresh(self) -> None:
-        await self.refresh_sessions()
+        await self.refresh_exams()
 
     @on(ListView.Selected)
     def _open(self, event: ListView.Selected) -> None:
@@ -150,7 +162,7 @@ class SessionListScreen(Screen):
             self.app.push_screen(GradingScreen(event.item.name))
 
 
-class NewSessionScreen(Screen):
+class NewExamScreen(Screen):
     """Wizard: choose an exam file then the id / input / output columns."""
 
     BINDINGS = [("escape", "cancel", "Back")]
@@ -162,7 +174,7 @@ class NewSessionScreen(Screen):
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Label("New session", id="title")
+            yield Label("New exam", id="title")
             yield Label("Exam file:")
             yield Select([], id="examfile", prompt="Select an exam file")
             yield Label("ID columns (student identifier):")
@@ -173,8 +185,8 @@ class NewSessionScreen(Screen):
             yield SelectionList(id="outputcols")
             yield Label("Course (optional):")
             yield Input(placeholder="e.g. CS101", id="course")
-            yield Label("Session name (optional):")
-            yield Input(placeholder="auto-generated if blank", id="sessionname")
+            yield Label("Exam name (optional):")
+            yield Input(placeholder="auto-generated if blank", id="examname")
             with Horizontal(id="actions"):
                 yield Button("Create", id="create", variant="primary")
                 yield Button("Cancel [esc]", id="cancel")
@@ -182,11 +194,11 @@ class NewSessionScreen(Screen):
 
     async def on_mount(self) -> None:
         try:
-            exams = await self.app.api.list_exams()  # type: ignore[attr-defined]
+            files = await self.app.api.list_exam_files()  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
-        self.query_one("#examfile", Select).set_options([(e, e) for e in exams])
+        self.query_one("#examfile", Select).set_options([(e, e) for e in files])
 
     @on(Select.Changed, "#examfile")
     async def _exam_chosen(self, event: Select.Changed) -> None:
@@ -223,10 +235,10 @@ class NewSessionScreen(Screen):
         if not input_cols or not output_cols:
             self.notify("Select at least one input and one output column", severity="warning")
             return
-        name = self.query_one("#sessionname", Input).value.strip()
+        name = self.query_one("#examname", Input).value.strip()
         course = self.query_one("#course", Input).value.strip()
         payload: Dict[str, Any] = {
-            "csv_file": str(examfile),
+            "exam_file": str(examfile),
             "id_columns": id_cols,
             "input_columns": input_cols,
             "output_columns": output_cols,
@@ -236,12 +248,12 @@ class NewSessionScreen(Screen):
         if course:
             payload["course"] = course
         try:
-            session = await self.app.api.create_session(payload)  # type: ignore[attr-defined]
+            exam = await self.app.api.create_exam(payload)  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
         self.app.pop_screen()
-        self.app.push_screen(GradingScreen(session["session_name"]))
+        self.app.push_screen(GradingScreen(exam["name"]))
 
 
 class GradingScreen(Screen):
@@ -255,21 +267,24 @@ class GradingScreen(Screen):
         ("r", "results", "Results"),
     ]
 
-    def __init__(self, session_name: str) -> None:
+    def __init__(self, exam_name: str) -> None:
         super().__init__()
-        self.session_name = session_name
-        self.session: Dict[str, Any] = {}
+        self.exam_name = exam_name
+        self.exam: Dict[str, Any] = {}
         self.rows: List[Dict[str, str]] = []
         self.id_columns: List[str] = []
         self.current_col: Optional[str] = None
         self.ungraded: List[Dict[str, str]] = []
         self.index: int = 0
         self.suggestion: Optional[Dict[str, Any]] = None
+        self.active_session: str = "default"
 
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="topbar"):
             yield Select([], id="colselect", prompt="Question")
+            yield Select([], id="sessionselect", prompt="Session", allow_blank=False)
+            yield Button("session+", id="newsession")
             yield Button("random", id="samp-random")
             yield Button("maximin", id="samp-maximin")
             yield Button("export [e]", id="export")
@@ -286,13 +301,14 @@ class GradingScreen(Screen):
 
     async def on_mount(self) -> None:
         try:
-            self.session = await self.app.api.get_session(self.session_name)  # type: ignore[attr-defined]
-            self.rows = await self.app.api.exam_rows(self.session["csv_file"])  # type: ignore[attr-defined]
+            self.exam = await self.app.api.get_exam(self.exam_name)  # type: ignore[attr-defined]
+            self.rows = await self.app.api.exam_rows(self.exam["exam_file"])  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
-        self.id_columns = self.session.get("id_columns", [])
-        out_cols = self.session.get("output_columns", [])
+        self.id_columns = self.exam.get("id_columns", [])
+        await self.refresh_sessions()
+        out_cols = self.exam.get("output_columns", [])
         sel = self.query_one("#colselect", Select)
         sel.set_options([(c, c) for c in out_cols])
         if out_cols:
@@ -300,10 +316,41 @@ class GradingScreen(Screen):
             self.current_col = out_cols[0]
             await self.refresh_question()
 
+    async def refresh_sessions(self) -> None:
+        """Reload the session list and keep the active session valid."""
+        try:
+            sessions = await self.app.api.list_sessions(self.exam_name)  # type: ignore[attr-defined]
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        names = [s["name"] for s in sessions]
+        sel = self.query_one("#sessionselect", Select)
+        sel.set_options([(f"{s['name']} ({s['graded_count']})", s["name"]) for s in sessions])
+        if self.active_session not in names:
+            self.active_session = "default" if "default" in names else (names[0] if names else "default")
+        if names:
+            sel.value = self.active_session
+
+    @on(Select.Changed, "#sessionselect")
+    def _session_changed(self, event: Select.Changed) -> None:
+        if event.value is not Select.BLANK:
+            self.active_session = str(event.value)
+
+    @on(Button.Pressed, "#newsession")
+    async def _new_session(self) -> None:
+        try:
+            created = await self.app.api.create_session(self.exam_name)  # type: ignore[attr-defined]
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.active_session = created["name"]
+        await self.refresh_sessions()
+        self.notify(f"New session: {created['name']}")
+
     async def refresh_question(self) -> None:
         if not self.current_col:
             return
-        question = self.session.get("questions", {}).get(self.current_col, {})
+        question = self.exam.get("questions", {}).get(self.current_col, {})
         input_col = question.get("input_column", "")
         graded_ids = {gi["row_id"] for gi in question.get("graded_items", [])}
         sampling = question.get("sampling_result") or {}
@@ -322,12 +369,12 @@ class GradingScreen(Screen):
         await self.show_current()
 
     async def show_current(self) -> None:
-        question = self.session.get("questions", {}).get(self.current_col, {})
+        question = self.exam.get("questions", {}).get(self.current_col, {})
         input_col = question.get("input_column", "")
         total = len(self.rows)
         graded = len(question.get("graded_items", []))
         try:
-            status = await self.app.api.question_status(self.session_name, self.current_col)  # type: ignore[attr-defined]
+            status = await self.app.api.question_status(self.exam_name, self.current_col)  # type: ignore[attr-defined]
             icl = "yes" if status.get("icl_ready") else "no"
         except APIError:
             icl = "?"
@@ -370,7 +417,7 @@ class GradingScreen(Screen):
             return
         self.query_one("#aibox", Static).update("[dim]Asking the model...[/dim]")
         try:
-            self.suggestion = await self.app.api.suggest(self.session_name, self.current_col, rid)  # type: ignore[attr-defined]
+            self.suggestion = await self.app.api.suggest(self.exam_name, self.current_col, rid)  # type: ignore[attr-defined]
         except APIError as exc:
             self.query_one("#aibox", Static).update("")
             self.notify(str(exc), severity="error", timeout=8)
@@ -400,11 +447,13 @@ class GradingScreen(Screen):
             self.notify("Enter a grade (or press 'a' for an AI suggestion)", severity="warning")
             return
         try:
-            question = await self.app.api.grade(self.session_name, self.current_col, rid, grade)  # type: ignore[attr-defined]
+            question = await self.app.api.grade(  # type: ignore[attr-defined]
+                self.exam_name, self.current_col, rid, grade, self.active_session
+            )
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
-        self.session.setdefault("questions", {})[self.current_col] = question
+        self.exam.setdefault("questions", {})[self.current_col] = question
         # Drop the just-graded row from the queue and stay on the same index.
         del self.ungraded[self.index]
         if self.index >= len(self.ungraded):
@@ -434,8 +483,8 @@ class GradingScreen(Screen):
             return
         self.notify(f"Sampling ({algorithm})...", timeout=3)
         try:
-            result = await self.app.api.sampling(self.session_name, self.current_col, algorithm)  # type: ignore[attr-defined]
-            self.session = await self.app.api.get_session(self.session_name)  # type: ignore[attr-defined]
+            result = await self.app.api.sampling(self.exam_name, self.current_col, algorithm)  # type: ignore[attr-defined]
+            self.exam = await self.app.api.get_exam(self.exam_name)  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
@@ -445,7 +494,7 @@ class GradingScreen(Screen):
     @on(Button.Pressed, "#export")
     async def action_export(self) -> None:
         try:
-            result = await self.app.api.export(self.session_name)  # type: ignore[attr-defined]
+            result = await self.app.api.export(self.exam_name)  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
@@ -453,7 +502,7 @@ class GradingScreen(Screen):
 
     async def action_results(self) -> None:
         try:
-            data = await self.app.api.get_results(self.session_name)  # type: ignore[attr-defined]
+            data = await self.app.api.get_results(self.exam_name)  # type: ignore[attr-defined]
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
@@ -477,10 +526,11 @@ class TentanatorTUI(App):
 
     CSS = """
     #title { padding: 1 2; text-style: bold; }
-    #sessions { height: 1fr; border: round $primary; margin: 0 1; }
+    #exams { height: 1fr; border: round $primary; margin: 0 1; }
     #actions { height: auto; padding: 1 2; }
     #topbar { height: auto; padding: 1 1; }
-    #topbar Select { width: 40; }
+    #colselect { width: 32; }
+    #sessionselect { width: 24; }
     #progress { padding: 1 2; }
     #responsebox { height: 1fr; border: round $primary; margin: 0 1; padding: 1; }
     #aibox { padding: 1 2; height: auto; }
@@ -496,7 +546,7 @@ class TentanatorTUI(App):
         self.api = api or TentanatorAPI()
 
     def on_mount(self) -> None:
-        self.push_screen(SessionListScreen())
+        self.push_screen(ExamListScreen())
 
     async def on_unmount(self) -> None:
         await self.api.aclose()

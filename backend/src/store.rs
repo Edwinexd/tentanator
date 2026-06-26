@@ -1,6 +1,5 @@
-//! Persistence. Session state lives in the Turso database (`db.rs`); exam files
-//! and exported Excel stay on disk. Legacy `.tentanator_sessions/*.json`,
-//! caches, the single-file session and the graded pool are imported into the DB.
+//! Persistence. Exam state lives in the Turso database (`db.rs`); exam files and
+//! exported Excel stay on disk.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,7 +10,7 @@ use turso::Connection;
 
 use crate::config::Config;
 use crate::db;
-use crate::domain::{GradeConflict, GradedItem, QuestionGrades, Session, SessionSummary};
+use crate::domain::{Exam, ExamSummary, GradeConflict, GradedItem, QuestionGrades, Session, SessionSummary};
 use crate::error::{AppError, AppResult};
 
 // ---------------------------------------------------------------------------
@@ -88,16 +87,16 @@ pub fn list_pdf_files(config: &Config) -> Vec<String> {
     out
 }
 
-pub fn resolve_exam_path(config: &Config, csv_file: &str) -> Option<PathBuf> {
-    let direct = config.exams_dir().join(csv_file);
+pub fn resolve_exam_path(config: &Config, exam_file: &str) -> Option<PathBuf> {
+    let direct = config.exams_dir().join(exam_file);
     if direct.exists() {
         return Some(direct);
     }
-    let stem = Path::new(csv_file)
+    let stem = Path::new(exam_file)
         .file_stem()
         .and_then(|s| s.to_str())
-        .unwrap_or(csv_file);
-    for ext in ["xlsx", "csv"] {
+        .unwrap_or(exam_file);
+    for ext in ["xlsx", "xls", "csv"] {
         let alt = config.exams_dir().join(format!("{stem}.{ext}"));
         if alt.exists() {
             return Some(alt);
@@ -194,17 +193,17 @@ pub fn read_exam_data(path: &Path) -> AppResult<Vec<HashMap<String, String>>> {
 }
 
 // ---------------------------------------------------------------------------
-// Sessions (Turso)
+// Exams (Turso)
 // ---------------------------------------------------------------------------
 
-pub async fn session_exists(conn: &Connection, name: &str) -> AppResult<bool> {
-    let mut r = conn.query("SELECT 1 FROM sessions WHERE name = ?", (name,)).await?;
+pub async fn exam_exists(conn: &Connection, name: &str) -> AppResult<bool> {
+    let mut r = conn.query("SELECT 1 FROM exams WHERE name = ?", (name,)).await?;
     Ok(r.next().await?.is_some())
 }
 
-pub async fn insert_session(conn: &Connection, session: &Session) -> AppResult<()> {
+pub async fn insert_exam(conn: &Connection, exam: &Exam) -> AppResult<()> {
     conn.execute("BEGIN", ()).await?;
-    let res = insert_session_inner(conn, session).await;
+    let res = insert_exam_inner(conn, exam).await;
     if res.is_ok() {
         conn.execute("COMMIT", ()).await?;
     } else {
@@ -213,47 +212,50 @@ pub async fn insert_session(conn: &Connection, session: &Session) -> AppResult<(
     res
 }
 
-async fn insert_session_inner(conn: &Connection, s: &Session) -> AppResult<()> {
-    conn.execute("DELETE FROM sessions WHERE name = ?", (s.session_name.as_str(),)).await?;
-    let scheme = s
+async fn insert_exam_inner(conn: &Connection, e: &Exam) -> AppResult<()> {
+    conn.execute("DELETE FROM exams WHERE name = ?", (e.name.as_str(),)).await?;
+    let scheme = e
         .scheme
         .as_ref()
         .map(|sc| serde_json::to_string(sc).unwrap_or_default())
         .unwrap_or_default();
     conn.execute(
-        "INSERT INTO sessions \
-         (name, csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme, archived) \
+        "INSERT INTO exams \
+         (name, exam_file, id_columns, input_columns, output_columns, course, last_updated, scheme, archived) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)",
         (
-            s.session_name.as_str(),
-            s.csv_file.as_str(),
-            json_array(&s.id_columns),
-            json_array(&s.input_columns),
-            json_array(&s.output_columns),
-            s.course.clone().unwrap_or_default(),
-            s.last_updated.as_str(),
+            e.name.as_str(),
+            e.exam_file.as_str(),
+            json_array(&e.id_columns),
+            json_array(&e.input_columns),
+            json_array(&e.output_columns),
+            e.course.clone().unwrap_or_default(),
+            e.last_updated.as_str(),
             scheme,
         ),
     )
     .await?;
-    for (col, q) in &s.questions {
-        upsert_question_row(conn, &s.session_name, col, q).await?;
+    for (col, q) in &e.questions {
+        upsert_question_row(conn, &e.name, col, q).await?;
+        // Grades carried in on the Exam (legacy import) land in the default session.
         for item in &q.graded_items {
-            put_graded_item(conn, &s.session_name, col, item, "").await?;
+            put_graded_item(conn, &e.name, col, item, "", DEFAULT_SESSION).await?;
         }
     }
     Ok(())
 }
 
+const DEFAULT_SESSION: &str = "default";
+
 pub async fn upsert_question_row(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
     q: &QuestionGrades,
 ) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM questions WHERE session_name = ? AND output_col = ?",
-        (name, col),
+        "DELETE FROM questions WHERE exam = ? AND output_col = ?",
+        (exam, col),
     )
     .await?;
     let sr = q
@@ -263,10 +265,10 @@ pub async fn upsert_question_row(
         .unwrap_or_default();
     conn.execute(
         "INSERT INTO questions \
-         (session_name, output_col, question_name, input_column, exam_question, sample_answer, global_question_id, sampling_result, var, qgroup, qtype, max_points, position, estimate) \
+         (exam, output_col, question_name, input_column, exam_question, sample_answer, global_question_id, sampling_result, var, qgroup, qtype, max_points, position, estimate) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            name,
+            exam,
             col,
             q.question_name.as_str(),
             q.input_column.as_str(),
@@ -288,33 +290,35 @@ pub async fn upsert_question_row(
 
 pub async fn put_graded_item(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
     item: &GradedItem,
     source: &str,
+    session: &str,
 ) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM graded_items WHERE session_name = ? AND output_col = ? AND row_id = ?",
-        (name, col, item.row_id.as_str()),
+        "DELETE FROM graded_items WHERE exam = ? AND output_col = ? AND row_id = ?",
+        (exam, col, item.row_id.as_str()),
     )
     .await?;
     conn.execute(
-        "INSERT INTO graded_items (session_name, output_col, row_id, input_text, grade, timestamp, source) \
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO graded_items (exam, output_col, row_id, input_text, grade, timestamp, source, session) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            name,
+            exam,
             col,
             item.row_id.as_str(),
             item.input_text.as_str(),
             item.grade.as_str(),
             item.timestamp.as_str(),
             source,
+            session,
         ),
     )
     .await?;
-    // Mirror into the cross-session pool if the question is linked.
-    if let Some(gq) = question_gq_id(conn, name, col).await? {
-        sync_item_to_pool(conn, &gq, name, item).await?;
+    // Mirror into the cross-exam pool if the question is linked.
+    if let Some(gq) = question_gq_id(conn, exam, col).await? {
+        sync_item_to_pool(conn, &gq, exam, item).await?;
     }
     Ok(())
 }
@@ -322,15 +326,15 @@ pub async fn put_graded_item(
 /// Current (grade, source) for a cell, if graded.
 pub async fn get_graded(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
     row_id: &str,
 ) -> AppResult<Option<(String, String)>> {
     let mut r = conn
         .query(
             "SELECT grade, source FROM graded_items \
-             WHERE session_name = ? AND output_col = ? AND row_id = ?",
-            (name, col, row_id),
+             WHERE exam = ? AND output_col = ? AND row_id = ?",
+            (exam, col, row_id),
         )
         .await?;
     if let Some(row) = r.next().await? {
@@ -340,17 +344,17 @@ pub async fn get_graded(
     }
 }
 
-pub async fn add_conflict(conn: &Connection, name: &str, c: &GradeConflict) -> AppResult<()> {
+pub async fn add_conflict(conn: &Connection, exam: &str, c: &GradeConflict) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM grade_conflicts WHERE session_name = ? AND output_col = ? AND row_id = ? AND incoming_source = ?",
-        (name, c.output_col.as_str(), c.row_id.as_str(), c.incoming_source.as_str()),
+        "DELETE FROM grade_conflicts WHERE exam = ? AND output_col = ? AND row_id = ? AND incoming_source = ?",
+        (exam, c.output_col.as_str(), c.row_id.as_str(), c.incoming_source.as_str()),
     )
     .await?;
     conn.execute(
-        "INSERT INTO grade_conflicts (session_name, output_col, row_id, existing_grade, existing_source, incoming_grade, incoming_source, input_text, timestamp) \
+        "INSERT INTO grade_conflicts (exam, output_col, row_id, existing_grade, existing_source, incoming_grade, incoming_source, input_text, timestamp) \
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
-            name,
+            exam,
             c.output_col.as_str(),
             c.row_id.as_str(),
             c.existing_grade.as_str(),
@@ -365,13 +369,13 @@ pub async fn add_conflict(conn: &Connection, name: &str, c: &GradeConflict) -> A
     Ok(())
 }
 
-pub async fn list_conflicts(conn: &Connection, name: &str) -> AppResult<Vec<GradeConflict>> {
+pub async fn list_conflicts(conn: &Connection, exam: &str) -> AppResult<Vec<GradeConflict>> {
     let mut out = Vec::new();
     let mut r = conn
         .query(
             "SELECT output_col, row_id, existing_grade, existing_source, incoming_grade, incoming_source, input_text, timestamp \
-             FROM grade_conflicts WHERE session_name = ? ORDER BY output_col, row_id",
-            (name,),
+             FROM grade_conflicts WHERE exam = ? ORDER BY output_col, row_id",
+            (exam,),
         )
         .await?;
     while let Some(row) = r.next().await? {
@@ -389,22 +393,22 @@ pub async fn list_conflicts(conn: &Connection, name: &str) -> AppResult<Vec<Grad
     Ok(out)
 }
 
-pub async fn count_conflicts(conn: &Connection, name: &str) -> AppResult<usize> {
+pub async fn count_conflicts(conn: &Connection, exam: &str) -> AppResult<usize> {
     let mut c = conn
-        .query("SELECT COUNT(*) FROM grade_conflicts WHERE session_name = ?", (name,))
+        .query("SELECT COUNT(*) FROM grade_conflicts WHERE exam = ?", (exam,))
         .await?;
     Ok(c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize)
 }
 
 pub async fn clear_conflicts_for(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
     row_id: &str,
 ) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM grade_conflicts WHERE session_name = ? AND output_col = ? AND row_id = ?",
-        (name, col, row_id),
+        "DELETE FROM grade_conflicts WHERE exam = ? AND output_col = ? AND row_id = ?",
+        (exam, col, row_id),
     )
     .await?;
     Ok(())
@@ -412,23 +416,23 @@ pub async fn clear_conflicts_for(
 
 pub async fn delete_graded_item(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
     row_id: &str,
 ) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM graded_items WHERE session_name = ? AND output_col = ? AND row_id = ?",
-        (name, col, row_id),
+        "DELETE FROM graded_items WHERE exam = ? AND output_col = ? AND row_id = ?",
+        (exam, col, row_id),
     )
     .await?;
     Ok(())
 }
 
-async fn question_gq_id(conn: &Connection, name: &str, col: &str) -> AppResult<Option<String>> {
+async fn question_gq_id(conn: &Connection, exam: &str, col: &str) -> AppResult<Option<String>> {
     let mut r = conn
         .query(
-            "SELECT global_question_id FROM questions WHERE session_name = ? AND output_col = ?",
-            (name, col),
+            "SELECT global_question_id FROM questions WHERE exam = ? AND output_col = ?",
+            (exam, col),
         )
         .await?;
     if let Some(row) = r.next().await? {
@@ -438,57 +442,59 @@ async fn question_gq_id(conn: &Connection, name: &str, col: &str) -> AppResult<O
     }
 }
 
-pub async fn set_archived(conn: &Connection, name: &str, archived: bool) -> AppResult<bool> {
-    let existed = session_exists(conn, name).await?;
+pub async fn set_archived(conn: &Connection, exam: &str, archived: bool) -> AppResult<bool> {
+    let existed = exam_exists(conn, exam).await?;
     if existed {
         conn.execute(
-            "UPDATE sessions SET archived = ? WHERE name = ?",
-            (i64::from(archived), name),
+            "UPDATE exams SET archived = ? WHERE name = ?",
+            (i64::from(archived), exam),
         )
         .await?;
     }
     Ok(existed)
 }
 
-pub async fn set_course(conn: &Connection, name: &str, course: Option<&str>) -> AppResult<()> {
+pub async fn set_course(conn: &Connection, exam: &str, course: Option<&str>) -> AppResult<()> {
     conn.execute(
-        "UPDATE sessions SET course = ? WHERE name = ?",
-        (course.unwrap_or(""), name),
+        "UPDATE exams SET course = ? WHERE name = ?",
+        (course.unwrap_or(""), exam),
     )
     .await?;
     Ok(())
 }
 
-pub async fn touch(conn: &Connection, name: &str) -> AppResult<()> {
+/// Bump an exam's last-updated timestamp.
+pub async fn touch(conn: &Connection, exam: &str) -> AppResult<()> {
     conn.execute(
-        "UPDATE sessions SET last_updated = ? WHERE name = ?",
-        (now_iso(), name),
+        "UPDATE exams SET last_updated = ? WHERE name = ?",
+        (now_iso(), exam),
     )
     .await?;
     Ok(())
 }
 
-pub async fn delete_session(conn: &Connection, name: &str) -> AppResult<bool> {
-    let existed = session_exists(conn, name).await?;
+pub async fn delete_exam(conn: &Connection, name: &str) -> AppResult<bool> {
+    let existed = exam_exists(conn, name).await?;
     for sql in [
-        "DELETE FROM graded_items WHERE session_name = ?",
-        "DELETE FROM caches WHERE session_name = ?",
-        "DELETE FROM grade_conflicts WHERE session_name = ?",
-        "DELETE FROM questions WHERE session_name = ?",
-        "DELETE FROM sessions WHERE name = ?",
+        "DELETE FROM graded_items WHERE exam = ?",
+        "DELETE FROM caches WHERE exam = ?",
+        "DELETE FROM grade_conflicts WHERE exam = ?",
+        "DELETE FROM questions WHERE exam = ?",
+        "DELETE FROM sessions WHERE exam = ?",
+        "DELETE FROM exams WHERE name = ?",
     ] {
         conn.execute(sql, (name,)).await?;
     }
     Ok(existed)
 }
 
-async fn load_graded_items(conn: &Connection, name: &str, col: &str) -> AppResult<Vec<GradedItem>> {
+async fn load_graded_items(conn: &Connection, exam: &str, col: &str) -> AppResult<Vec<GradedItem>> {
     let mut items = Vec::new();
     let mut g = conn
         .query(
             "SELECT row_id, input_text, grade, timestamp FROM graded_items \
-             WHERE session_name = ? AND output_col = ? ORDER BY timestamp, row_id",
-            (name, col),
+             WHERE exam = ? AND output_col = ? ORDER BY timestamp, row_id",
+            (exam, col),
         )
         .await?;
     while let Some(row) = g.next().await? {
@@ -534,18 +540,18 @@ const Q_COLS: &str = "output_col, question_name, input_column, exam_question, \
      sample_answer, global_question_id, sampling_result, var, qgroup, qtype, \
      max_points, position, estimate";
 
-pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Session>> {
+pub async fn load_exam(conn: &Connection, name: &str) -> AppResult<Option<Exam>> {
     let meta = {
         let mut r = conn
             .query(
-                "SELECT csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme \
-                 FROM sessions WHERE name = ?",
+                "SELECT exam_file, id_columns, input_columns, output_columns, course, last_updated, scheme \
+                 FROM exams WHERE name = ?",
                 (name,),
             )
             .await?;
         match r.next().await? {
             Some(row) => {
-                let csv_file: String = row.get(0)?;
+                let exam_file: String = row.get(0)?;
                 let id_columns = parse_array(&row.get::<String>(1)?);
                 let input_columns = parse_array(&row.get::<String>(2)?);
                 let output_columns = parse_array(&row.get::<String>(3)?);
@@ -557,7 +563,7 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
                 } else {
                     serde_json::from_str(&scheme_s).ok()
                 };
-                (csv_file, id_columns, input_columns, output_columns, course, last_updated, scheme)
+                (exam_file, id_columns, input_columns, output_columns, course, last_updated, scheme)
             }
             None => return Ok(None),
         }
@@ -566,7 +572,7 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
     // Question skeletons first (drop the Rows before per-question queries).
     let mut questions: HashMap<String, QuestionGrades> = HashMap::new();
     {
-        let sql = format!("SELECT {Q_COLS} FROM questions WHERE session_name = ?");
+        let sql = format!("SELECT {Q_COLS} FROM questions WHERE exam = ?");
         let mut qr = conn.query(&sql, (name,)).await?;
         while let Some(row) = qr.next().await? {
             let (col, q) = question_from_row(&row)?;
@@ -579,9 +585,9 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
         hydrate_external(conn, q, Some(name)).await?;
     }
 
-    Ok(Some(Session {
-        session_name: name.to_string(),
-        csv_file: meta.0,
+    Ok(Some(Exam {
+        name: name.to_string(),
+        exam_file: meta.0,
         id_columns: meta.1,
         input_columns: meta.2,
         output_columns: meta.3,
@@ -595,39 +601,39 @@ pub async fn load_session(conn: &Connection, name: &str) -> AppResult<Option<Ses
 /// Persist (or clear) the examination grade scheme.
 pub async fn set_scheme(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     scheme: &Option<crate::scheme::GradeScheme>,
 ) -> AppResult<()> {
     let s = scheme
         .as_ref()
         .map(|x| serde_json::to_string(x).unwrap_or_default())
         .unwrap_or_default();
-    conn.execute("UPDATE sessions SET scheme = ? WHERE name = ?", (s, name)).await?;
+    conn.execute("UPDATE exams SET scheme = ? WHERE name = ?", (s, exam)).await?;
     Ok(())
 }
 
 pub async fn load_question(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     col: &str,
 ) -> AppResult<Option<QuestionGrades>> {
     let mut q = {
-        let sql = format!("SELECT {Q_COLS} FROM questions WHERE session_name = ? AND output_col = ?");
-        let mut r = conn.query(&sql, (name, col)).await?;
+        let sql = format!("SELECT {Q_COLS} FROM questions WHERE exam = ? AND output_col = ?");
+        let mut r = conn.query(&sql, (exam, col)).await?;
         match r.next().await? {
             Some(row) => question_from_row(&row)?.1,
             None => return Ok(None),
         }
     };
-    q.graded_items = load_graded_items(conn, name, col).await?;
-    hydrate_external(conn, &mut q, Some(name)).await?;
+    q.graded_items = load_graded_items(conn, exam, col).await?;
+    hydrate_external(conn, &mut q, Some(exam)).await?;
     Ok(Some(q))
 }
 
-pub async fn list_sessions(conn: &Connection, archived: bool) -> AppResult<Vec<SessionSummary>> {
+pub async fn list_exams(conn: &Connection, archived: bool) -> AppResult<Vec<ExamSummary>> {
     struct Row {
         name: String,
-        csv: String,
+        file: String,
         course: String,
         updated: String,
     }
@@ -635,7 +641,7 @@ pub async fn list_sessions(conn: &Connection, archived: bool) -> AppResult<Vec<S
     {
         let mut r = conn
             .query(
-                "SELECT name, csv_file, course, last_updated FROM sessions \
+                "SELECT name, exam_file, course, last_updated FROM exams \
                  WHERE archived = ? ORDER BY last_updated DESC",
                 (i64::from(archived),),
             )
@@ -643,7 +649,7 @@ pub async fn list_sessions(conn: &Connection, archived: bool) -> AppResult<Vec<S
         while let Some(row) = r.next().await? {
             tmp.push(Row {
                 name: row.get(0)?,
-                csv: row.get(1)?,
+                file: row.get(1)?,
                 course: row.get(2)?,
                 updated: row.get(3)?,
             });
@@ -654,19 +660,122 @@ pub async fn list_sessions(conn: &Connection, archived: bool) -> AppResult<Vec<S
         let num_questions = {
             let mut c = conn
                 .query(
-                    "SELECT COUNT(*) FROM questions WHERE session_name = ?",
+                    "SELECT COUNT(*) FROM questions WHERE exam = ?",
                     (t.name.as_str(),),
                 )
                 .await?;
             c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
         };
-        out.push(SessionSummary {
-            session_name: t.name,
-            csv_file: t.csv,
+        out.push(ExamSummary {
+            name: t.name,
+            exam_file: t.file,
             course: opt(t.course),
             last_updated: t.updated,
             num_questions,
             archived,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Sessions (lightweight grading passes under an exam)
+// ---------------------------------------------------------------------------
+
+pub async fn session_exists(conn: &Connection, exam: &str, name: &str) -> AppResult<bool> {
+    let mut r = conn
+        .query("SELECT 1 FROM sessions WHERE exam = ? AND name = ?", (exam, name))
+        .await?;
+    Ok(r.next().await?.is_some())
+}
+
+/// Create a session if it doesn't already exist; returns it either way.
+pub async fn create_session(conn: &Connection, exam: &str, name: &str) -> AppResult<Session> {
+    let now = now_iso();
+    if !session_exists(conn, exam, name).await? {
+        conn.execute(
+            "INSERT INTO sessions (exam, name, created_at, last_updated) VALUES (?, ?, ?, ?)",
+            (exam, name, now.as_str(), now.as_str()),
+        )
+        .await?;
+    }
+    let mut r = conn
+        .query(
+            "SELECT created_at, last_updated FROM sessions WHERE exam = ? AND name = ?",
+            (exam, name),
+        )
+        .await?;
+    let (created_at, last_updated) = match r.next().await? {
+        Some(row) => (row.get::<String>(0)?, row.get::<String>(1)?),
+        None => (now.clone(), now),
+    };
+    Ok(Session {
+        exam: exam.to_string(),
+        name: name.to_string(),
+        created_at,
+        last_updated,
+    })
+}
+
+pub async fn touch_session(conn: &Connection, exam: &str, name: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE sessions SET last_updated = ? WHERE exam = ? AND name = ?",
+        (now_iso(), exam, name),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn delete_session(conn: &Connection, exam: &str, name: &str) -> AppResult<bool> {
+    let existed = session_exists(conn, exam, name).await?;
+    conn.execute(
+        "DELETE FROM sessions WHERE exam = ? AND name = ?",
+        (exam, name),
+    )
+    .await?;
+    Ok(existed)
+}
+
+pub async fn list_sessions(conn: &Connection, exam: &str) -> AppResult<Vec<SessionSummary>> {
+    struct Row {
+        name: String,
+        created: String,
+        updated: String,
+    }
+    let mut tmp = Vec::new();
+    {
+        let mut r = conn
+            .query(
+                "SELECT name, created_at, last_updated FROM sessions \
+                 WHERE exam = ? ORDER BY created_at",
+                (exam,),
+            )
+            .await?;
+        while let Some(row) = r.next().await? {
+            tmp.push(Row {
+                name: row.get(0)?,
+                created: row.get(1)?,
+                updated: row.get(2)?,
+            });
+        }
+    }
+    let mut out = Vec::with_capacity(tmp.len());
+    for t in tmp {
+        let graded_count = {
+            let mut c = conn
+                .query(
+                    "SELECT COUNT(*) FROM graded_items WHERE exam = ? AND session = ?",
+                    (exam, t.name.as_str()),
+                )
+                .await?;
+            c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
+        };
+        out.push(SessionSummary {
+            exam: exam.to_string(),
+            name: t.name,
+            created_at: t.created,
+            last_updated: t.updated,
+            graded_count,
         });
     }
     Ok(out)
@@ -678,14 +787,14 @@ pub async fn list_sessions(conn: &Connection, archived: bool) -> AppResult<Vec<S
 
 pub async fn has_feature_vector(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     input_column: &str,
     row_id: &str,
 ) -> AppResult<bool> {
     let mut r = conn
         .query(
-            "SELECT 1 FROM caches WHERE session_name = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
-            (name, input_column, row_id),
+            "SELECT 1 FROM caches WHERE exam = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
+            (exam, input_column, row_id),
         )
         .await?;
     Ok(r.next().await?.is_some())
@@ -693,20 +802,20 @@ pub async fn has_feature_vector(
 
 pub async fn put_feature_vector(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     input_column: &str,
     row_id: &str,
     vector: &[f32],
 ) -> AppResult<()> {
     conn.execute(
-        "DELETE FROM caches WHERE session_name = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
-        (name, input_column, row_id),
+        "DELETE FROM caches WHERE exam = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
+        (exam, input_column, row_id),
     )
     .await?;
     conn.execute(
-        "INSERT INTO caches (session_name, kind, input_column, row_id, vector) \
+        "INSERT INTO caches (exam, kind, input_column, row_id, vector) \
          VALUES (?, 'features', ?, ?, ?)",
-        (name, input_column, row_id, db::f32s_to_blob(vector)),
+        (exam, input_column, row_id, db::f32s_to_blob(vector)),
     )
     .await?;
     Ok(())
@@ -714,14 +823,14 @@ pub async fn put_feature_vector(
 
 pub async fn load_feature_cache(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     input_column: &str,
 ) -> AppResult<HashMap<String, Vec<f32>>> {
     let mut out = HashMap::new();
     let mut r = conn
         .query(
-            "SELECT row_id, vector FROM caches WHERE session_name = ? AND kind = 'features' AND input_column = ?",
-            (name, input_column),
+            "SELECT row_id, vector FROM caches WHERE exam = ? AND kind = 'features' AND input_column = ?",
+            (exam, input_column),
         )
         .await?;
     while let Some(row) = r.next().await? {
@@ -733,24 +842,24 @@ pub async fn load_feature_cache(
 }
 
 // ---------------------------------------------------------------------------
-// Cross-session graded pool (Turso)
+// Cross-exam graded pool (Turso)
 // ---------------------------------------------------------------------------
 
 pub async fn hydrate_external(
     conn: &Connection,
     question: &mut QuestionGrades,
-    current_session: Option<&str>,
+    current_exam: Option<&str>,
 ) -> AppResult<()> {
     let Some(gq) = question.global_question_id.clone() else {
         question.external_graded_items = Vec::new();
         return Ok(());
     };
-    let current = current_session.unwrap_or("");
+    let current = current_exam.unwrap_or("");
     let mut items = Vec::new();
     let mut r = conn
         .query(
-            "SELECT source_session, row_id, input_text, grade, timestamp FROM graded_pool \
-             WHERE global_question_id = ? AND source_session <> ?",
+            "SELECT source_exam, row_id, input_text, grade, timestamp FROM graded_pool \
+             WHERE global_question_id = ? AND source_exam <> ?",
             (gq.as_str(), current),
         )
         .await?;
@@ -771,14 +880,14 @@ pub async fn hydrate_external(
 async fn sync_item_to_pool(
     conn: &Connection,
     gq_id: &str,
-    source_session: &str,
+    source_exam: &str,
     item: &GradedItem,
 ) -> AppResult<()> {
     let exists = {
         let mut r = conn
             .query(
-                "SELECT 1 FROM graded_pool WHERE global_question_id = ? AND source_session = ? AND row_id = ?",
-                (gq_id, source_session, item.row_id.as_str()),
+                "SELECT 1 FROM graded_pool WHERE global_question_id = ? AND source_exam = ? AND row_id = ?",
+                (gq_id, source_exam, item.row_id.as_str()),
             )
             .await?;
         r.next().await?.is_some()
@@ -787,11 +896,11 @@ async fn sync_item_to_pool(
         return Ok(());
     }
     conn.execute(
-        "INSERT INTO graded_pool (global_question_id, source_session, row_id, input_text, grade, timestamp) \
+        "INSERT INTO graded_pool (global_question_id, source_exam, row_id, input_text, grade, timestamp) \
          VALUES (?, ?, ?, ?, ?, ?)",
         (
             gq_id,
-            source_session,
+            source_exam,
             item.row_id.as_str(),
             item.input_text.as_str(),
             item.grade.as_str(),
@@ -803,83 +912,104 @@ async fn sync_item_to_pool(
 }
 
 // ---------------------------------------------------------------------------
-// Legacy file import (JSON / jsonl -> Turso)
+// Legacy import (old Python-app JSON -> new exam-centric DB, on demand)
 // ---------------------------------------------------------------------------
 
-/// How to handle a session whose name already exists in the DB.
-pub enum OnCollision<'a> {
-    /// Idempotent startup import: skip if already present.
-    Skip,
-    /// Workspace import: keep both by suffixing with the workspace name.
-    Suffix(&'a str),
+/// The pre-Rust on-disk session shape. Field names differ from `Exam`
+/// (`session_name`/`csv_file`), so it is read into this struct then mapped.
+/// `QuestionGrades` is unchanged, so old `questions` deserialize directly;
+/// unknown legacy fields (e.g. a per-item `embedding`) are ignored.
+#[derive(serde::Deserialize, Default)]
+struct LegacySession {
+    #[serde(default)]
+    session_name: String,
+    #[serde(default)]
+    csv_file: String,
+    #[serde(default)]
+    id_columns: Vec<String>,
+    #[serde(default)]
+    input_columns: Vec<String>,
+    #[serde(default)]
+    output_columns: Vec<String>,
+    #[serde(default)]
+    course: Option<String>,
+    #[serde(default)]
+    last_updated: String,
+    #[serde(default)]
+    questions: HashMap<String, QuestionGrades>,
+    #[serde(default)]
+    scheme: Option<crate::scheme::GradeScheme>,
 }
 
-/// Import one legacy session JSON value into the DB. Returns the stored name, or
-/// `None` if skipped. `caches_dir`/`stem` locate the side-car `*.cache.json`.
-pub async fn import_session_value(
-    conn: &Connection,
-    value: &Value,
-    stem: &str,
-    caches_dir: &Path,
-    archived: bool,
-    course_override: Option<&str>,
-    collision: OnCollision<'_>,
-) -> AppResult<Option<String>> {
-    let orig = value
-        .get("session_name")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| stem.to_string());
-
-    let name = if session_exists(conn, &orig).await? {
-        match collision {
-            OnCollision::Skip => return Ok(None),
-            OnCollision::Suffix(ws) => unique_name(conn, &orig, ws).await?,
-        }
-    } else {
-        orig.clone()
-    };
-
-    let mut session: Session = serde_json::from_value(value.clone())?;
-    session.session_name = name.clone();
-    if let Some(c) = course_override {
-        session.course = Some(c.to_string());
-    }
-    if session.last_updated.is_empty() {
-        session.last_updated = now_iso();
-    }
-    insert_session(conn, &session).await?;
-    if archived {
-        set_archived(conn, &name, true).await?;
-    }
-
-    import_caches(conn, &name, stem, caches_dir, value).await?;
-    Ok(Some(name))
-}
-
-async fn unique_name(conn: &Connection, orig: &str, ws: &str) -> AppResult<String> {
-    let base = format!("{orig}_{ws}");
-    if !session_exists(conn, &base).await? {
+async fn unique_exam_name(conn: &Connection, orig: &str, suffix: &str) -> AppResult<String> {
+    let base = format!("{orig}_{suffix}");
+    if !exam_exists(conn, &base).await? {
         return Ok(base);
     }
     let mut i = 2;
     loop {
         let candidate = format!("{base}_{i}");
-        if !session_exists(conn, &candidate).await? {
+        if !exam_exists(conn, &candidate).await? {
             return Ok(candidate);
         }
         i += 1;
     }
 }
 
+/// Import one legacy session JSON value as an exam (+ a `default` session) in the
+/// new format. Returns the stored exam name. On name collision the exam is
+/// suffixed with `suffix` rather than overwriting. `caches_dir`/`stem` locate the
+/// side-car `<stem>.cache.json`.
+pub async fn import_legacy_session(
+    conn: &Connection,
+    value: &Value,
+    stem: &str,
+    caches_dir: &Path,
+    course_override: Option<&str>,
+    suffix: &str,
+) -> AppResult<String> {
+    let legacy: LegacySession = serde_json::from_value(value.clone()).unwrap_or_default();
+    let orig = if legacy.session_name.is_empty() {
+        stem.to_string()
+    } else {
+        legacy.session_name.clone()
+    };
+    let name = if exam_exists(conn, &orig).await? {
+        unique_exam_name(conn, &orig, suffix).await?
+    } else {
+        orig
+    };
+
+    let exam = Exam {
+        name: name.clone(),
+        exam_file: legacy.csv_file,
+        id_columns: legacy.id_columns,
+        input_columns: legacy.input_columns,
+        output_columns: legacy.output_columns,
+        course: course_override.map(str::to_string).or(legacy.course),
+        last_updated: if legacy.last_updated.is_empty() {
+            now_iso()
+        } else {
+            legacy.last_updated
+        },
+        questions: legacy.questions,
+        scheme: legacy.scheme,
+    };
+    insert_exam(conn, &exam).await?;
+    create_session(conn, &name, DEFAULT_SESSION).await?;
+    import_caches(conn, &name, stem, caches_dir, value).await?;
+    Ok(name)
+}
+
+/// Import a legacy session's feature-vector cache (side-car `<stem>.cache.json`
+/// preferred, else embedded `features_cache`) into the new `caches` table.
 async fn import_caches(
     conn: &Connection,
-    name: &str,
+    exam: &str,
     stem: &str,
     caches_dir: &Path,
     value: &Value,
 ) -> AppResult<()> {
-    // Prefer the side-car cache file; fall back to caches embedded in the main file.
     let side = caches_dir.join(format!("{stem}.cache.json"));
     let features: Option<Value> = if side.exists() {
         std::fs::read_to_string(&side)
@@ -898,13 +1028,61 @@ async fn import_caches(
             let Some(a) = arr.as_array() else { continue };
             let v: Vec<f32> = a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect();
             if !v.is_empty() {
-                put_feature_vector(conn, name, input_col, rid, &v).await?;
+                put_feature_vector(conn, exam, input_col, rid, &v).await?;
             }
         }
     }
     Ok(())
 }
 
+/// Count importable legacy session JSON files in a directory.
+pub fn count_session_files(dir: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().to_string();
+            n.ends_with(".json") && !n.ends_with(".cache.json")
+        })
+        .count()
+}
+
+/// Import every legacy session `*.json` in a directory as an exam in the new
+/// format. `archived` marks the created exams as archived (for `archive/`).
+/// Returns the stored exam names.
+pub async fn import_session_dir(
+    conn: &Connection,
+    dir: &Path,
+    archived: bool,
+) -> AppResult<Vec<String>> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(out);
+    };
+    for e in entries.flatten() {
+        let fname = e.file_name().to_string_lossy().to_string();
+        if !fname.ends_with(".json") || fname.ends_with(".cache.json") {
+            continue;
+        }
+        let stem = fname.trim_end_matches(".json");
+        let Ok(raw) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        let name = import_legacy_session(conn, &value, stem, dir, None, "import").await?;
+        if archived {
+            set_archived(conn, &name, true).await?;
+        }
+        out.push(name);
+    }
+    Ok(out)
+}
+
+/// Merge a legacy `graded_pool/<gq_id>.jsonl` directory into the cross-exam pool.
 pub async fn import_pool_dir(conn: &Connection, dir: &Path) -> AppResult<()> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(());
@@ -926,7 +1104,12 @@ pub async fn import_pool_dir(conn: &Connection, dir: &Path) -> AppResult<()> {
             let Ok(rec) = serde_json::from_str::<Value>(line) else {
                 continue;
             };
-            let src = rec.get("source_session").and_then(|v| v.as_str()).unwrap_or("");
+            // Legacy jsonl tags the source with `source_session`.
+            let src = rec
+                .get("source_session")
+                .or_else(|| rec.get("source_exam"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if src.is_empty() {
                 continue;
             }
@@ -942,91 +1125,20 @@ pub async fn import_pool_dir(conn: &Connection, dir: &Path) -> AppResult<()> {
     Ok(())
 }
 
-/// One-time, idempotent import of any legacy on-disk data into the DB.
-pub async fn import_legacy_on_startup(conn: &Connection, config: &Config) -> AppResult<()> {
-    // Oldest single-file session.
-    let single = config.data_dir.join(".tentanator_session.json");
-    if single.exists() {
-        if let Ok(raw) = std::fs::read_to_string(&single) {
-            if let Ok(value) = serde_json::from_str::<Value>(&raw) {
-                let stem = single_file_name(&value);
-                let _ = import_session_value(
-                    conn,
-                    &value,
-                    &stem,
-                    &config.sessions_dir(),
-                    false,
-                    None,
-                    OnCollision::Skip,
-                )
-                .await?;
-                let _ = std::fs::rename(
-                    &single,
-                    config.data_dir.join(".tentanator_session.json.backup"),
-                );
-            }
-        }
-    }
-
-    import_session_dir(conn, &config.sessions_dir(), false).await?;
-    import_session_dir(conn, &config.archive_dir(), true).await?;
-    import_pool_dir(conn, &config.graded_pool_dir()).await?;
-    Ok(())
-}
-
-fn single_file_name(value: &Value) -> String {
-    let csv_base = value
-        .get("csv_file")
-        .and_then(|v| v.as_str())
-        .and_then(|s| Path::new(s).file_stem().and_then(|x| x.to_str()))
-        .unwrap_or("unknown");
-    let ts: String = value
-        .get("last_updated")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .chars()
-        .take(19)
-        .collect::<String>()
-        .replace([':', '-'], "")
-        .replace('T', "_");
-    sanitize_name(&format!("{csv_base}_migrated_{ts}"))
-}
-
-pub async fn import_session_dir(conn: &Connection, dir: &Path, archived: bool) -> AppResult<()> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Ok(());
-    };
-    for e in entries.flatten() {
-        let fname = e.file_name().to_string_lossy().to_string();
-        if !fname.ends_with(".json") || fname.ends_with(".cache.json") {
-            continue;
-        }
-        let stem = fname.trim_end_matches(".json");
-        let Ok(raw) = std::fs::read_to_string(e.path()) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&raw) else {
-            continue;
-        };
-        import_session_value(conn, &value, stem, dir, archived, None, OnCollision::Skip).await?;
-    }
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Excel export (on disk)
 // ---------------------------------------------------------------------------
 
 pub fn export_to_excel(
     config: &Config,
-    session: &Session,
+    exam: &Exam,
     exam_rows: &[HashMap<String, String>],
     columns: &[String],
 ) -> AppResult<String> {
     use rust_xlsxwriter::Workbook;
 
     std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&session.csv_file)
+    let base = Path::new(&exam.exam_file)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("graded")
@@ -1034,7 +1146,7 @@ pub fn export_to_excel(
     let out_path = config.graded_dir().join(format!("{base}.xlsx"));
 
     let mut grades_by_row: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for (col, q) in &session.questions {
+    for (col, q) in &exam.questions {
         for item in &q.graded_items {
             let cell = match crate::grade::evaluate_grade(&item.grade) {
                 Some(total) => format_total(total),
@@ -1055,7 +1167,7 @@ pub fn export_to_excel(
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
     }
     for (r, row) in exam_rows.iter().enumerate() {
-        let rid = crate::domain::row_id(row, &session.id_columns);
+        let rid = crate::domain::row_id(row, &exam.id_columns);
         let overrides = grades_by_row.get(&rid);
         for (c, col) in columns.iter().enumerate() {
             let value = overrides
@@ -1086,12 +1198,12 @@ fn format_total(total: f64) -> String {
 /// one row per student sorted by id (matches SU's Daisy import format).
 pub fn export_daisy(
     config: &Config,
-    session: &Session,
+    exam: &Exam,
     results: &[crate::scheme::StudentResult],
 ) -> AppResult<String> {
     use rust_xlsxwriter::Workbook;
     std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&session.csv_file)
+    let base = Path::new(&exam.exam_file)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("exam")
@@ -1120,12 +1232,12 @@ pub fn export_daisy(
 /// Per-question CSV: id columns, each question's points, total and final grade.
 pub fn export_per_question_csv(
     config: &Config,
-    session: &Session,
+    exam: &Exam,
     exam_rows: &[HashMap<String, String>],
     results: &[crate::scheme::StudentResult],
 ) -> AppResult<String> {
     std::fs::create_dir_all(config.graded_dir())?;
-    let base = Path::new(&session.csv_file)
+    let base = Path::new(&exam.exam_file)
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("exam")
@@ -1136,21 +1248,21 @@ pub fn export_per_question_csv(
         results.iter().map(|r| (r.id.as_str(), r)).collect();
 
     let mut w = csv::Writer::from_path(&out_path)?;
-    let mut header: Vec<String> = session.id_columns.clone();
-    header.extend(session.output_columns.iter().cloned());
+    let mut header: Vec<String> = exam.id_columns.clone();
+    header.extend(exam.output_columns.iter().cloned());
     header.push("total".to_string());
     header.push("grade".to_string());
     w.write_record(&header)?;
 
     for row in exam_rows {
-        let rid = crate::domain::row_id(row, &session.id_columns);
-        let mut rec: Vec<String> = session
+        let rid = crate::domain::row_id(row, &exam.id_columns);
+        let mut rec: Vec<String> = exam
             .id_columns
             .iter()
             .map(|c| row.get(c).cloned().unwrap_or_default())
             .collect();
-        for col in &session.output_columns {
-            let cell = session
+        for col in &exam.output_columns {
+            let cell = exam
                 .questions
                 .get(col)
                 .and_then(|q| q.graded_items.iter().find(|gi| gi.row_id == rid))
@@ -1189,12 +1301,10 @@ mod tests {
         conn
     }
 
-    #[tokio::test]
-    async fn create_grade_load_roundtrip() {
-        let conn = mem_conn().await;
-        let mut session = Session {
-            session_name: "s1".into(),
-            csv_file: "e.csv".into(),
+    fn sample_exam(name: &str) -> Exam {
+        Exam {
+            name: name.into(),
+            exam_file: "e.xlsx".into(),
             id_columns: vec!["id".into()],
             input_columns: vec!["ans".into()],
             output_columns: vec!["g".into()],
@@ -1202,9 +1312,15 @@ mod tests {
             last_updated: now_iso(),
             questions: HashMap::new(),
             scheme: None,
-        };
-        session.ensure_question("g");
-        insert_session(&conn, &session).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn create_grade_load_roundtrip() {
+        let conn = mem_conn().await;
+        let mut exam = sample_exam("s1");
+        exam.ensure_question("g");
+        insert_exam(&conn, &exam).await.unwrap();
 
         let item = GradedItem {
             row_id: "r1".into(),
@@ -1212,39 +1328,56 @@ mod tests {
             grade: "2+1.5".into(),
             timestamp: now_iso(),
         };
-        put_graded_item(&conn, "s1", "g", &item, "manual").await.unwrap();
+        put_graded_item(&conn, "s1", "g", &item, "manual", "default").await.unwrap();
 
-        let loaded = load_session(&conn, "s1").await.unwrap().unwrap();
+        let loaded = load_exam(&conn, "s1").await.unwrap().unwrap();
         assert_eq!(loaded.course.as_deref(), Some("CS101"));
         let q = loaded.questions.get("g").unwrap();
         assert_eq!(q.graded_items.len(), 1);
         assert_eq!(q.graded_items[0].grade, "2+1.5");
 
         // archive flips listing.
-        assert!(list_sessions(&conn, false).await.unwrap().iter().any(|s| s.session_name == "s1"));
+        assert!(list_exams(&conn, false).await.unwrap().iter().any(|s| s.name == "s1"));
         set_archived(&conn, "s1", true).await.unwrap();
-        assert!(list_sessions(&conn, false).await.unwrap().is_empty());
-        assert_eq!(list_sessions(&conn, true).await.unwrap().len(), 1);
+        assert!(list_exams(&conn, false).await.unwrap().is_empty());
+        assert_eq!(list_exams(&conn, true).await.unwrap().len(), 1);
     }
 
     #[tokio::test]
-    async fn pool_hydrates_across_sessions() {
+    async fn sessions_track_graded_counts() {
+        let conn = mem_conn().await;
+        let mut exam = sample_exam("ex");
+        exam.ensure_question("g");
+        insert_exam(&conn, &exam).await.unwrap();
+
+        create_session(&conn, "ex", "default").await.unwrap();
+        create_session(&conn, "ex", "second").await.unwrap();
+
+        let item = GradedItem {
+            row_id: "r1".into(),
+            input_text: "x".into(),
+            grade: "5".into(),
+            timestamp: now_iso(),
+        };
+        put_graded_item(&conn, "ex", "g", &item, "manual", "second").await.unwrap();
+
+        let sessions = list_sessions(&conn, "ex").await.unwrap();
+        assert_eq!(sessions.len(), 2);
+        let second = sessions.iter().find(|s| s.name == "second").unwrap();
+        assert_eq!(second.graded_count, 1);
+        let default = sessions.iter().find(|s| s.name == "default").unwrap();
+        assert_eq!(default.graded_count, 0);
+    }
+
+    #[tokio::test]
+    async fn pool_hydrates_across_exams() {
         let conn = mem_conn().await;
         for name in ["sa", "sb"] {
-            let mut s = Session {
-                session_name: name.into(),
-                csv_file: "e.csv".into(),
-                id_columns: vec!["id".into()],
-                input_columns: vec!["ans".into()],
-                output_columns: vec!["g".into()],
-                course: None,
-                last_updated: now_iso(),
-                questions: HashMap::new(),
-                scheme: None,
-            };
-            let q = s.ensure_question("g");
+            let mut e = sample_exam(name);
+            e.course = None;
+            let q = e.ensure_question("g");
             q.global_question_id = Some("gq7".into());
-            insert_session(&conn, &s).await.unwrap();
+            insert_exam(&conn, &e).await.unwrap();
         }
         // Grade in sa -> should appear as external for sb.
         put_graded_item(
@@ -1253,6 +1386,7 @@ mod tests {
             "g",
             &GradedItem { row_id: "r1".into(), input_text: "x".into(), grade: "5".into(), timestamp: now_iso() },
             "manual",
+            "default",
         )
         .await
         .unwrap();
