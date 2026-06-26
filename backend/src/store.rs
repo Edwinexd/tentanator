@@ -122,74 +122,137 @@ fn cell_to_string(c: &Data) -> String {
     }
 }
 
-fn is_xlsx(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|e| e.to_str()).map(|s| s.to_lowercase()),
-        Some(ref e) if e == "xlsx" || e == "xls"
-    )
+enum SheetFmt {
+    /// xlsx / xls(binary OLE) / ods - handled by calamine.
+    Calamine,
+    /// SpreadsheetML 2003 XML (`.xls` that is really `<?mso-application?>` XML,
+    /// as produced by Daisy/Excel "XML Spreadsheet" export). calamine can't read
+    /// this, so it has its own parser.
+    SpreadsheetXml,
+    /// Plain CSV / TSV.
+    Csv,
+}
+
+/// Pick the parser from the file's actual content, not its extension - exports
+/// named `.xls` are often XML or CSV rather than the binary OLE format.
+fn sniff_format(path: &Path) -> SheetFmt {
+    use std::io::Read;
+    let mut buf = [0u8; 4096];
+    let n = std::fs::File::open(path)
+        .and_then(|mut f| f.read(&mut buf))
+        .unwrap_or(0);
+    let head = &buf[..n];
+    if head.starts_with(b"PK\x03\x04") || head.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return SheetFmt::Calamine;
+    }
+    let text = String::from_utf8_lossy(head);
+    if text.contains("urn:schemas-microsoft-com:office:spreadsheet")
+        || text.contains("mso-application")
+    {
+        return SheetFmt::SpreadsheetXml;
+    }
+    SheetFmt::Csv
+}
+
+/// Parse a SpreadsheetML 2003 XML workbook into rows of strings (first row =
+/// headers). Honours `ss:Index` for sparse cells; entities are decoded by the
+/// XML parser.
+fn parse_spreadsheet_xml(text: &str) -> AppResult<Vec<Vec<String>>> {
+    let doc = roxmltree::Document::parse(text)
+        .map_err(|e| AppError::BadRequest(format!("cannot parse XML spreadsheet: {e}")))?;
+    let Some(table) = doc.descendants().find(|n| n.tag_name().name() == "Table") else {
+        return Ok(Vec::new());
+    };
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    let mut maxcols = 0usize;
+    for row in table.children().filter(|n| n.tag_name().name() == "Row") {
+        let mut cells: Vec<String> = Vec::new();
+        let mut col = 0usize; // next 0-based column to write
+        for cell in row.children().filter(|n| n.tag_name().name() == "Cell") {
+            if let Some(idx) = cell
+                .attributes()
+                .find(|a| a.name() == "Index")
+                .and_then(|a| a.value().parse::<usize>().ok())
+            {
+                col = idx.saturating_sub(1);
+            }
+            while cells.len() < col {
+                cells.push(String::new());
+            }
+            let val = cell
+                .children()
+                .find(|n| n.tag_name().name() == "Data")
+                .and_then(|d| d.text())
+                .unwrap_or("")
+                .to_string();
+            if cells.len() == col {
+                cells.push(val);
+            } else {
+                cells[col] = val;
+            }
+            col += 1;
+        }
+        maxcols = maxcols.max(cells.len());
+        rows.push(cells);
+    }
+    for r in &mut rows {
+        while r.len() < maxcols {
+            r.push(String::new());
+        }
+    }
+    Ok(rows)
+}
+
+fn calamine_rows(path: &Path) -> AppResult<Vec<Vec<String>>> {
+    let mut wb = open_workbook_auto(path)
+        .map_err(|e| AppError::BadRequest(format!("cannot open workbook: {e}")))?;
+    let range = wb
+        .worksheet_range_at(0)
+        .ok_or_else(|| AppError::BadRequest("workbook has no sheets".into()))?
+        .map_err(|e| AppError::BadRequest(format!("cannot read sheet: {e}")))?;
+    Ok(range
+        .rows()
+        .map(|r| r.iter().map(cell_to_string).collect())
+        .collect())
+}
+
+fn csv_rows(path: &Path) -> AppResult<Vec<Vec<String>>> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(false)
+        .flexible(true)
+        .from_path(path)?;
+    let mut out = Vec::new();
+    for rec in rdr.records() {
+        out.push(rec?.iter().map(|s| s.to_string()).collect());
+    }
+    Ok(out)
+}
+
+/// All rows (header + data) of an exam file, format auto-detected.
+fn sheet_rows(path: &Path) -> AppResult<Vec<Vec<String>>> {
+    match sniff_format(path) {
+        SheetFmt::Calamine => calamine_rows(path),
+        SheetFmt::SpreadsheetXml => parse_spreadsheet_xml(&std::fs::read_to_string(path)?),
+        SheetFmt::Csv => csv_rows(path),
+    }
 }
 
 pub fn get_exam_columns(path: &Path) -> AppResult<Vec<String>> {
-    if is_xlsx(path) {
-        let mut wb = open_workbook_auto(path)
-            .map_err(|e| AppError::BadRequest(format!("cannot open workbook: {e}")))?;
-        let range = wb
-            .worksheet_range_at(0)
-            .ok_or_else(|| AppError::BadRequest("workbook has no sheets".into()))?
-            .map_err(|e| AppError::BadRequest(format!("cannot read sheet: {e}")))?;
-        Ok(range
-            .rows()
-            .next()
-            .map(|r| r.iter().map(cell_to_string).collect())
-            .unwrap_or_default())
-    } else {
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .flexible(true)
-            .from_path(path)?;
-        Ok(rdr.headers()?.iter().map(|s| s.to_string()).collect())
-    }
+    Ok(sheet_rows(path)?.into_iter().next().unwrap_or_default())
 }
 
 pub fn read_exam_data(path: &Path) -> AppResult<Vec<HashMap<String, String>>> {
-    if is_xlsx(path) {
-        let mut wb = open_workbook_auto(path)
-            .map_err(|e| AppError::BadRequest(format!("cannot open workbook: {e}")))?;
-        let range = wb
-            .worksheet_range_at(0)
-            .ok_or_else(|| AppError::BadRequest("workbook has no sheets".into()))?
-            .map_err(|e| AppError::BadRequest(format!("cannot read sheet: {e}")))?;
-        let mut rows = range.rows();
-        let headers: Vec<String> = rows
-            .next()
-            .map(|r| r.iter().map(cell_to_string).collect())
-            .unwrap_or_default();
-        let mut out = Vec::new();
-        for r in rows {
-            let mut map = HashMap::new();
-            for (j, h) in headers.iter().enumerate() {
-                map.insert(h.clone(), r.get(j).map(cell_to_string).unwrap_or_default());
-            }
-            out.push(map);
+    let mut rows = sheet_rows(path)?.into_iter();
+    let headers = rows.next().unwrap_or_default();
+    let mut out = Vec::new();
+    for rec in rows {
+        let mut map = HashMap::new();
+        for (j, h) in headers.iter().enumerate() {
+            map.insert(h.clone(), rec.get(j).cloned().unwrap_or_default());
         }
-        Ok(out)
-    } else {
-        let mut rdr = csv::ReaderBuilder::new()
-            .has_headers(true)
-            .flexible(true)
-            .from_path(path)?;
-        let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
-        let mut out = Vec::new();
-        for rec in rdr.records() {
-            let rec = rec?;
-            let mut map = HashMap::new();
-            for (j, h) in headers.iter().enumerate() {
-                map.insert(h.clone(), rec.get(j).unwrap_or("").to_string());
-            }
-            out.push(map);
-        }
-        Ok(out)
+        out.push(map);
     }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -1442,6 +1505,25 @@ mod tests {
         let qb = load_question(&conn, "sb", "g").await.unwrap().unwrap();
         assert_eq!(qb.external_graded_items.len(), 1);
         assert_eq!(qb.external_graded_items[0].row_id, "sa::r1");
+    }
+
+    #[test]
+    fn spreadsheet_xml_parses_with_types_and_entities() {
+        let xml = r#"<?xml version="1.0"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet" xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet">
+ <Worksheet ss:Name="Q38 grades">
+  <Table>
+   <Row><Cell><Data ss:Type="String">daisy_id</Data></Cell><Cell><Data ss:Type="String">pts</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="Number">183271</Data></Cell><Cell><Data ss:Type="Number">5.5</Data></Cell></Row>
+   <Row><Cell><Data ss:Type="String">A &amp; B</Data></Cell><Cell><Data ss:Type="Number">4.5</Data></Cell></Row>
+  </Table>
+ </Worksheet>
+</Workbook>"#;
+        let rows = parse_spreadsheet_xml(xml).unwrap();
+        assert_eq!(rows[0], vec!["daisy_id", "pts"]);
+        assert_eq!(rows[1], vec!["183271", "5.5"]);
+        assert_eq!(rows[2], vec!["A & B", "4.5"]);
     }
 
     #[tokio::test]

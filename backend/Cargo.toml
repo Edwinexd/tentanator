@@ -24,6 +24,7 @@ rust_xlsxwriter = "0.79"
 csv = "1"
 turso = "0.4"
 evalexpr = "12"
+roxmltree = "0.20"
 
 [profile.dev]
 opt-level = 0
