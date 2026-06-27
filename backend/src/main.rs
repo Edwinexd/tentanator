@@ -68,9 +68,15 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("CEREBRAS_API_KEY is empty - AI grade suggestions will fail");
     }
 
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("failed to build HTTP client");
+
     let state = AppState {
         config: Arc::new(config),
-        http: reqwest::Client::new(),
+        http,
         db: Arc::new(database),
         conn: Arc::new(tokio::sync::Mutex::new(conn)),
     };

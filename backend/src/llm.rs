@@ -1,6 +1,8 @@
 //! LLM provider clients: OpenAI embeddings (for maximin sampling) and Cerebras
 //! chat completions (for in-context-learning grade suggestions).
 
+use std::time::Duration;
+
 use serde_json::{json, Value};
 
 use crate::config::Config;
@@ -11,9 +13,19 @@ use crate::grade::evaluate_grade;
 pub const MIN_ICL_EXAMPLES: usize = 5;
 pub const MAX_ICL_EXAMPLES: usize = 25;
 
+/// Longest student answer text fed into the prompt (examples and the target).
+const MAX_ANSWER_CHARS: usize = 1000;
+
+/// Retry budget for transient upstream failures (429 / 5xx / connect errors).
+const MAX_RETRIES: u32 = 4;
+
+/// Cap on concurrent embedding requests so a large reindex can't exhaust the
+/// connection pool or trip rate limits.
+const EMBED_CONCURRENCY: usize = 8;
+
 const BASE_SYSTEM_PROMPT: &str = "You are an experienced teacher assistant helping grade student exam responses.
 Your task is to evaluate the student's answer to the following question and provide a grade.
-Be consistent, fair, and objective in your grading. All respones will be reviewed by a human teacher.
+Be consistent, fair, and objective in your grading. All responses will be reviewed by a human teacher.
 
 Exam Question: {exam_question}
 
@@ -21,7 +33,70 @@ Grading Criteria:
 - Correctness of the answer
 - Completeness of the response
 
-Provide only the grade value as your response.";
+Provide only the grade value as your response: a number, or a signed sum of subpart \
+scores (e.g. 5, 7.5, 2+1.5+2.5). Output nothing but the grade.";
+
+/// Backoff delay before retry `attempt` (0-based): 0.5s, 1s, 2s, 4s.
+fn backoff(attempt: u32) -> Duration {
+    Duration::from_millis(500u64 << attempt.min(5))
+}
+
+/// Parse a `Retry-After` header given in whole seconds.
+fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(Duration::from_secs)
+}
+
+/// POST a JSON body with bounded retry on 429/5xx and transient connect errors.
+/// `label` only tags log/error messages.
+async fn post_json_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    api_key: &str,
+    body: &Value,
+    label: &str,
+) -> AppResult<Value> {
+    let mut attempt = 0u32;
+    loop {
+        match client.post(url).bearer_auth(api_key).json(body).send().await {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return resp.json::<Value>().await.map_err(|e| AppError::Upstream(e.to_string()));
+                }
+                let retryable =
+                    status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error();
+                let wait = retry_after(resp.headers());
+                let detail = resp.text().await.unwrap_or_default();
+                if retryable && attempt < MAX_RETRIES {
+                    let delay = wait.unwrap_or_else(|| backoff(attempt));
+                    tracing::warn!("{label} {status} (attempt {attempt}), retrying in {delay:?}");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(AppError::Upstream(format!("{label} {status}: {detail}")));
+            }
+            Err(e) => {
+                let transient = e.is_timeout() || e.is_connect() || e.is_request();
+                if transient && attempt < MAX_RETRIES {
+                    let delay = backoff(attempt);
+                    tracing::warn!("{label} request error (attempt {attempt}), retrying in {delay:?}: {e}");
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                    continue;
+                }
+                return Err(AppError::Upstream(e.to_string()));
+            }
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Embeddings
@@ -30,19 +105,8 @@ Provide only the grade value as your response.";
 pub async fn embed(config: &Config, client: &reqwest::Client, text: &str) -> AppResult<Vec<f32>> {
     let cleaned = text.replace('\n', " ");
     let url = format!("{}/embeddings", config.openai_base_url.trim_end_matches('/'));
-    let resp = client
-        .post(&url)
-        .bearer_auth(&config.openai_api_key)
-        .json(&json!({ "input": cleaned, "model": config.embedding_model }))
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Upstream(format!("embeddings {status}: {body}")));
-    }
-    let v: Value = resp.json().await.map_err(|e| AppError::Upstream(e.to_string()))?;
+    let body = json!({ "input": cleaned, "model": config.embedding_model });
+    let v = post_json_with_retry(client, &url, &config.openai_api_key, &body, "embeddings").await?;
     let arr = v
         .pointer("/data/0/embedding")
         .and_then(|e| e.as_array())
@@ -50,18 +114,28 @@ pub async fn embed(config: &Config, client: &reqwest::Client, text: &str) -> App
     Ok(arr.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
 }
 
-/// Embed many texts concurrently. Returns `None` for any that failed.
+/// Embed many texts with bounded concurrency. Returns `None` for any that
+/// failed; results stay aligned with the input order.
 pub async fn embed_many(
     config: &Config,
     client: &reqwest::Client,
     texts: &[String],
 ) -> Vec<Option<Vec<f32>>> {
-    let futs = texts.iter().map(|t| embed(config, client, t));
-    futures::future::join_all(futs)
-        .await
-        .into_iter()
-        .map(|r| r.ok())
-        .collect()
+    use futures::stream::StreamExt;
+    let futs = texts
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(i, t)| async move { (i, embed(config, client, &t).await.ok()) });
+    let mut out: Vec<Option<Vec<f32>>> = vec![None; texts.len()];
+    let results = futures::stream::iter(futs)
+        .buffer_unordered(EMBED_CONCURRENCY)
+        .collect::<Vec<_>>()
+        .await;
+    for (i, r) in results {
+        out[i] = r;
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -82,29 +156,39 @@ fn build_icl_messages(question: &QuestionGrades, response_text: &str) -> Vec<Val
         .filter(|i| is_meaningful(&i.input_text))
         .collect();
 
-    // Evenly sample across the grade range when over the cap.
+    // Evenly sample across the grade range when over the cap. Sort by grade with
+    // a stable row_id tiebreak so the selection is deterministic across loads,
+    // and span the full range inclusively so the top grade isn't dropped.
     if examples.len() > MAX_ICL_EXAMPLES {
         examples.sort_by(|a, b| {
             let ga = evaluate_grade(&a.grade).unwrap_or(0.0);
             let gb = evaluate_grade(&b.grade).unwrap_or(0.0);
-            ga.partial_cmp(&gb).unwrap_or(std::cmp::Ordering::Equal)
+            ga.partial_cmp(&gb)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.row_id.cmp(&b.row_id))
         });
-        let step = examples.len() as f64 / MAX_ICL_EXAMPLES as f64;
+        let last = examples.len() - 1;
         examples = (0..MAX_ICL_EXAMPLES)
-            .map(|i| examples[(i as f64 * step) as usize])
+            .map(|i| examples[i * last / (MAX_ICL_EXAMPLES - 1)])
             .collect();
     }
 
     for item in examples {
-        let mut text = item.input_text.clone();
-        if text.chars().count() > 1000 {
-            text = text.chars().take(1000).collect::<String>() + "...";
-        }
-        messages.push(json!({ "role": "user", "content": text }));
+        messages.push(json!({ "role": "user", "content": truncate_answer(&item.input_text) }));
         messages.push(json!({ "role": "assistant", "content": item.grade }));
     }
-    messages.push(json!({ "role": "user", "content": response_text }));
+    messages.push(json!({ "role": "user", "content": truncate_answer(response_text) }));
     messages
+}
+
+/// Cap an answer at [`MAX_ANSWER_CHARS`] so one long response can't blow the
+/// model's context window.
+fn truncate_answer(text: &str) -> String {
+    if text.chars().count() > MAX_ANSWER_CHARS {
+        text.chars().take(MAX_ANSWER_CHARS).collect::<String>() + "..."
+    } else {
+        text.to_string()
+    }
 }
 
 /// True if (own + pooled) meaningful examples reach the ICL minimum.
@@ -128,29 +212,20 @@ pub async fn suggest_grade(
         "{}/chat/completions",
         config.cerebras_base_url.trim_end_matches('/')
     );
-    let resp = client
-        .post(&url)
-        .bearer_auth(&config.cerebras_api_key)
-        .json(&json!({
-            "model": config.cerebras_model,
-            "messages": messages,
-            "max_tokens": 4096,
-            "temperature": 0.0,
-            "reasoning_effort": config.cerebras_reasoning_effort,
-        }))
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Upstream(format!("chat {status}: {body}")));
-    }
-    let v: Value = resp.json().await.map_err(|e| AppError::Upstream(e.to_string()))?;
+    let body = json!({
+        "model": config.cerebras_model,
+        "messages": messages,
+        "max_tokens": 4096,
+        "temperature": 0.0,
+        "reasoning_effort": config.cerebras_reasoning_effort,
+    });
+    let v = post_json_with_retry(client, &url, &config.cerebras_api_key, &body, "chat").await?;
     let message = v.pointer("/choices/0/message").cloned().unwrap_or(Value::Null);
 
     let (reasoning, answer) = extract_reasoning(&message);
-    let grade = extract_grade_from_answer(&answer);
+    // Fail safe: an unparseable model reply yields an empty suggestion (no
+    // prefill) rather than free text masquerading as a grade.
+    let grade = extract_grade_from_answer(&answer).unwrap_or_default();
     let reasoning_summary = if reasoning.trim().is_empty() {
         None
     } else {
@@ -270,24 +345,20 @@ fn strip_think_blocks(text: &str) -> String {
     out.trim().to_string()
 }
 
-fn extract_grade_from_answer(answer: &str) -> String {
+/// Extract a parseable grade from the model's answer, or `None` if nothing in
+/// the reply parses as a grade (so the caller can fail safe rather than emit
+/// free text as a grade).
+fn extract_grade_from_answer(answer: &str) -> Option<String> {
     let text = answer.trim();
     if evaluate_grade(text).is_some() {
-        return text.to_string();
+        return Some(text.to_string());
     }
     let last_line = text.lines().last().unwrap_or("").trim();
     if !last_line.is_empty() && evaluate_grade(last_line).is_some() {
-        return last_line.to_string();
+        return Some(last_line.to_string());
     }
     let hay = if last_line.is_empty() { text } else { last_line };
-    if let Some(g) = trailing_grade(hay) {
-        return g;
-    }
-    if last_line.is_empty() {
-        text.to_string()
-    } else {
-        last_line.to_string()
-    }
+    trailing_grade(hay)
 }
 
 /// Longest trailing substring that parses as a grade, whitespace removed.
@@ -316,13 +387,19 @@ mod tests {
 
     #[test]
     fn grade_from_plain() {
-        assert_eq!(extract_grade_from_answer("7.5"), "7.5");
+        assert_eq!(extract_grade_from_answer("7.5").as_deref(), Some("7.5"));
     }
 
     #[test]
     fn grade_from_trailing() {
-        assert_eq!(extract_grade_from_answer("The grade is 2+3"), "2+3");
-        assert_eq!(extract_grade_from_answer("Final score:\n8"), "8");
+        assert_eq!(extract_grade_from_answer("The grade is 2+3").as_deref(), Some("2+3"));
+        assert_eq!(extract_grade_from_answer("Final score:\n8").as_deref(), Some("8"));
+    }
+
+    #[test]
+    fn unparseable_is_none() {
+        assert_eq!(extract_grade_from_answer("I cannot grade this answer."), None);
+        assert_eq!(extract_grade_from_answer(""), None);
     }
 
     #[test]
