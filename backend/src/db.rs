@@ -110,6 +110,38 @@ pub async fn init_schema(conn: &turso::Connection) -> turso::Result<()> {
     )
     .await?;
 
+    // The app-wide global question bank: reference questions managed in-app
+    // (imported from CSV). Not scoped to any exam or course - the bank is global.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS global_bank_questions (
+            bank TEXT NOT NULL,
+            qid TEXT NOT NULL,
+            q_se TEXT NOT NULL DEFAULT '',
+            q_en TEXT NOT NULL DEFAULT '',
+            ans_se TEXT NOT NULL DEFAULT '',
+            ans_en TEXT NOT NULL DEFAULT '',
+            chapter TEXT NOT NULL DEFAULT '',
+            subject TEXT NOT NULL DEFAULT '',
+            qtype TEXT NOT NULL DEFAULT '',
+            PRIMARY KEY (bank, qid)
+        )",
+        (),
+    )
+    .await?;
+
+    // Embeddings of the bank questions (one vector per question per language).
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS global_bank_vectors (
+            bank TEXT NOT NULL,
+            qid TEXT NOT NULL,
+            lang TEXT NOT NULL,
+            vector BLOB NOT NULL,
+            PRIMARY KEY (bank, qid, lang)
+        )",
+        (),
+    )
+    .await?;
+
     conn.execute(
         "CREATE TABLE IF NOT EXISTS grade_conflicts (
             exam TEXT NOT NULL,

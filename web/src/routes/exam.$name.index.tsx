@@ -9,6 +9,7 @@ import {
   type DetectedColumns,
   type Exam,
   type ExamRow,
+  type GlobalBankMatch,
   type QuestionStatus,
   type SessionSummary,
 } from '#/lib/api'
@@ -46,6 +47,8 @@ import {
   Save,
   Brain,
   X,
+  Database,
+  Loader2,
 } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/')({ component: ExamView })
@@ -69,6 +72,8 @@ function ExamView() {
   const [qGlobalId, setQGlobalId] = useState('')
   const [qExamText, setQExamText] = useState('')
   const [qSample, setQSample] = useState('')
+  const [bankMatches, setBankMatches] = useState<GlobalBankMatch[]>([])
+  const [matching, setMatching] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -159,6 +164,7 @@ function ExamView() {
     setQGlobalId(q?.global_question_id ?? '')
     setQExamText(q?.exam_question ?? '')
     setQSample(q?.sample_answer ?? '')
+    setBankMatches([])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [col])
 
@@ -316,6 +322,31 @@ function ExamView() {
     } catch (e) {
       setError((e as Error).message)
     }
+  }
+
+  async function autoMatch() {
+    if (!col) return
+    setError(null)
+    setMatching(true)
+    try {
+      const res = await api.autoMatch(name, col)
+      setBankMatches(res.matches)
+      if (res.matches.length === 0) setInfo('No matching questions found in the bank')
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setMatching(false)
+    }
+  }
+
+  // Fill (but do not save) the question fields from a chosen bank match; the
+  // user reviews and clicks "Save question settings" to persist via putQuestion.
+  function applyMatch(m: GlobalBankMatch) {
+    setQExamText(m.q_en || m.q_se)
+    setQSample(m.ans_en || m.ans_se)
+    setQGlobalId(m.qid)
+    setBankMatches([])
+    setInfo('Filled from bank match — review and save question settings to persist')
   }
 
   async function exportExam() {
@@ -516,9 +547,41 @@ function ExamView() {
                 onChange={(e) => setQSample(e.target.value)}
               />
             </div>
-            <Button onClick={saveQuestion} variant="outline" size="sm">
-              Save question settings
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button onClick={saveQuestion} variant="outline" size="sm">
+                Save question settings
+              </Button>
+              <Button onClick={autoMatch} disabled={matching} variant="outline" size="sm">
+                {matching ? (
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                ) : (
+                  <Database className="mr-1 h-3 w-3" />
+                )}
+                Auto-match from bank
+              </Button>
+            </div>
+
+            {bankMatches.length > 0 && (
+              <div className="space-y-1 rounded-md border p-2">
+                <div className="text-xs text-muted-foreground">
+                  Top matches — choose one to fill the fields above (review before saving)
+                </div>
+                {bankMatches.map((m) => (
+                  <button
+                    key={`${m.bank}::${m.qid}`}
+                    type="button"
+                    onClick={() => applyMatch(m)}
+                    className="flex w-full items-start gap-2 rounded-md px-2 py-1 text-left text-sm hover:bg-accent"
+                  >
+                    <span className="font-mono text-xs text-muted-foreground">
+                      {m.score.toFixed(3)}
+                    </span>
+                    <span className="font-mono text-xs text-muted-foreground">{m.qid}</span>
+                    <span className="flex-1 truncate">{m.q_en || m.q_se || '—'}</span>
+                  </button>
+                ))}
+              </div>
+            )}
           </AccordionContent>
         </AccordionItem>
       </Accordion>

@@ -26,7 +26,7 @@ use crate::error::{AppError, AppResult};
 use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
 use crate::scheme::{self, GradeScheme, StudentResult};
-use crate::{detect, llm, scheme_text, store, workspace, AppState};
+use crate::{detect, global_bank, llm, moodle, scheme_text, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
 const DEFAULT_SESSION: &str = "default";
@@ -60,11 +60,16 @@ pub fn router(state: AppState) -> Router {
             "/api/files/{kind}/{filename}",
             put(upload_file).layer(DefaultBodyLimit::max(512 * 1024 * 1024)),
         )
+        .route("/api/exam-files/combine-moodle", post(combine_moodle))
         .route("/api/exam-files/{file}/columns", get(exam_columns))
         .route("/api/exam-files/{file}/rows", get(exam_rows))
         .route("/api/exam-files/{file}/detect", get(detect_columns))
         .route("/api/scheme/parse", post(scheme_parse))
         .route("/api/scheme/emit", post(scheme_emit))
+        .route("/api/global-bank", get(global_bank_status))
+        .route("/api/global-bank/import", post(global_bank_import))
+        .route("/api/global-bank/reindex", post(global_bank_reindex))
+        .route("/api/global-bank/search", post(global_bank_search))
         .route("/api/exams", get(list_exams).post(create_exam))
         .route(
             "/api/exams/{name}",
@@ -86,6 +91,10 @@ pub fn router(state: AppState) -> Router {
             delete(ungrade_item),
         )
         .route("/api/exams/{name}/questions/{col}/suggest", post(suggest))
+        .route(
+            "/api/exams/{name}/questions/{col}/auto-match",
+            post(auto_match),
+        )
         .route("/api/exams/{name}/questions/{col}/status", get(question_status))
         .route("/api/exams/{name}/scheme", put(put_scheme))
         .route("/api/exams/{name}/questions-config", put(put_questions_config))
@@ -189,6 +198,21 @@ async fn load_exam_or_404(s: &AppState, name: &str) -> AppResult<Exam> {
         .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))
 }
 
+/// Seed prefilled/auto-zero grades for every output column, then reload so the
+/// caller sees the seeded grades. Idempotent; run before results/export so
+/// unanswered responses always carry a `0`.
+async fn seed_and_reload(
+    s: &AppState,
+    exam: &Exam,
+    rows: &[HashMap<String, String>],
+) -> AppResult<Exam> {
+    {
+        let conn = s.db().await;
+        store::seed_prefilled_grades(&conn, exam, rows, &exam.output_columns).await?;
+    }
+    load_exam_or_404(s, &exam.name).await
+}
+
 fn no_question(col: &str) -> AppError {
     AppError::NotFound(format!("question '{col}' not found"))
 }
@@ -255,7 +279,12 @@ async fn upload_file(
     let dir = match kind.as_str() {
         "exams" => s.config.exams_dir(),
         "scans" => s.config.data_dir.join("scans"),
-        _ => return Err(AppError::BadRequest("kind must be 'exams' or 'scans'".into())),
+        "raw" => s.config.raw_dir(),
+        _ => {
+            return Err(AppError::BadRequest(
+                "kind must be 'exams', 'scans' or 'raw'".into(),
+            ))
+        }
     };
     let fname = std::path::Path::new(&filename)
         .file_name()
@@ -299,6 +328,83 @@ async fn detect_columns(
 }
 
 #[derive(Deserialize)]
+struct CombineMoodleReq {
+    grades_file: String,
+    responses_file: String,
+    #[serde(default)]
+    output_name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct CombineMoodleResp {
+    filename: String,
+    students: usize,
+    questions: usize,
+    dropped_columns: Vec<String>,
+}
+
+/// Combine two raw Moodle exports (a grades file + a responses file) into one
+/// compiled exam sheet under `exams/`, ready to create an exam from. Inputs are
+/// looked up in `exams_in_raw/` then `exams/`; upload them with
+/// `PUT /api/files/raw/{filename}` first. The output pairs `Response N` /
+/// `Points N` columns, joined on `Daisy ID`.
+async fn combine_moodle(
+    State(s): State<AppState>,
+    Json(req): Json<CombineMoodleReq>,
+) -> AppResult<Json<CombineMoodleResp>> {
+    let resolve = |name: &str| -> AppResult<std::path::PathBuf> {
+        let base = std::path::Path::new(name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(name);
+        for dir in [s.config.raw_dir(), s.config.exams_dir()] {
+            let p = dir.join(base);
+            if p.exists() {
+                return Ok(p);
+            }
+        }
+        Err(AppError::NotFound(format!(
+            "file '{name}' not found in exams_in_raw/ or exams/"
+        )))
+    };
+    let grades = resolve(&req.grades_file)?;
+    let responses = resolve(&req.responses_file)?;
+
+    let result = moodle::combine(&grades, &responses)?;
+
+    // Output name: explicit, else derived from the grades filename (strip the
+    // -grades marker), else "combined".
+    let stem = std::path::Path::new(&req.grades_file)
+        .file_stem()
+        .and_then(|x| x.to_str())
+        .unwrap_or("combined");
+    let derived = stem
+        .replace("-grades", "")
+        .replace("_grades", "")
+        .replace("grades", "");
+    let derived = derived.trim_matches(|c| c == '-' || c == '_' || c == ' ');
+    let base = req
+        .output_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .unwrap_or(if derived.is_empty() { "combined" } else { derived });
+    let filename = format!("{}.xlsx", store::sanitize_name(base));
+    store::write_xlsx(
+        &s.config.exams_dir().join(&filename),
+        &result.headers,
+        &result.rows,
+    )?;
+
+    Ok(Json(CombineMoodleResp {
+        filename,
+        students: result.students,
+        questions: result.questions,
+        dropped_columns: result.dropped_columns,
+    }))
+}
+
+#[derive(Deserialize)]
 struct SchemeTextReq {
     #[serde(default)]
     text: String,
@@ -320,6 +426,201 @@ async fn scheme_parse(Json(req): Json<SchemeTextReq>) -> AppResult<Json<GradeSch
 /// Emit a `GradeScheme` back to the readable DSL (exact inverse of parse).
 async fn scheme_emit(Json(scheme): Json<GradeScheme>) -> Json<SchemeTextResp> {
     Json(SchemeTextResp { text: scheme_text::emit_scheme(&scheme) })
+}
+
+// ---------------------------------------------------------------------------
+// Global question bank (app-wide; not exam/course-scoped)
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SearchReq {
+    query: String,
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct AutoMatchReq {
+    #[serde(default)]
+    language: Option<String>,
+    #[serde(default)]
+    top_k: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct BankImportReq {
+    file: String,
+    #[serde(default)]
+    bank: Option<String>,
+}
+
+/// All bank questions from the DB.
+async fn load_banks(s: &AppState) -> AppResult<Vec<domain::BankQuestion>> {
+    let conn = s.db().await;
+    store::load_bank_questions(&conn).await
+}
+
+/// Embed and cache any bank question that has text in `lang` but no cached
+/// vector yet. Returns (vectors-for-lang, newly_embedded). The DB lock is
+/// released across the embedding calls, per the concurrency discipline.
+async fn index_bank_lang(
+    s: &AppState,
+    banks: &[domain::BankQuestion],
+    lang: &str,
+) -> AppResult<(HashMap<(String, String), Vec<f32>>, usize)> {
+    let mut cache = {
+        let conn = s.db().await;
+        store::load_bank_vectors(&conn, lang).await?
+    };
+    let todo: Vec<&domain::BankQuestion> = banks
+        .iter()
+        .filter(|q| {
+            !q.text(lang).is_empty() && !cache.contains_key(&(q.bank.clone(), q.qid.clone()))
+        })
+        .collect();
+    let mut embedded = 0usize;
+    if !todo.is_empty() {
+        let texts: Vec<String> = todo.iter().map(|q| q.text(lang).to_string()).collect();
+        let embs = llm::embed_many(&s.config, &s.http, &texts).await;
+        let conn = s.db().await;
+        for (q, emb) in todo.iter().zip(embs) {
+            if let Some(v) = emb {
+                store::put_bank_vector(&conn, &q.bank, &q.qid, lang, &v).await?;
+                cache.insert((q.bank.clone(), q.qid.clone()), v);
+                embedded += 1;
+            }
+        }
+    }
+    Ok((cache, embedded))
+}
+
+/// Bank overview: per-bank question counts plus how many vectors are indexed.
+async fn global_bank_status(State(s): State<AppState>) -> AppResult<Json<Value>> {
+    let conn = s.db().await;
+    let counts = store::bank_counts(&conn).await?;
+    let total: usize = counts.iter().map(|(_, n)| n).sum();
+    let bank_list: Vec<Value> = counts
+        .into_iter()
+        .map(|(name, questions)| json!({ "name": name, "questions": questions }))
+        .collect();
+    let indexed = store::count_bank_vectors(&conn).await?;
+    Ok(Json(json!({
+        "banks": bank_list,
+        "total_questions": total,
+        "indexed_vectors": indexed,
+    })))
+}
+
+/// Import a bank CSV into the DB, fully replacing that bank. The file is looked
+/// up in `exams_in_raw/` then `exams/` (upload it with `PUT /api/files/raw/...`).
+/// `bank` defaults to the file stem.
+async fn global_bank_import(
+    State(s): State<AppState>,
+    Json(req): Json<BankImportReq>,
+) -> AppResult<Json<Value>> {
+    let base = std::path::Path::new(&req.file)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(req.file.as_str());
+    let path = [s.config.raw_dir(), s.config.exams_dir()]
+        .into_iter()
+        .map(|d| d.join(base))
+        .find(|p| p.exists())
+        .ok_or_else(|| {
+            AppError::NotFound(format!("file '{}' not found in exams_in_raw/ or exams/", req.file))
+        })?;
+    let bank = req
+        .bank
+        .as_deref()
+        .map(str::trim)
+        .filter(|b| !b.is_empty())
+        .map(store::sanitize_name)
+        .unwrap_or_else(|| {
+            store::sanitize_name(
+                path.file_stem().and_then(|x| x.to_str()).unwrap_or("bank"),
+            )
+        });
+
+    let questions = global_bank::parse_bank_csv(&path, &bank)?;
+    let imported = {
+        let conn = s.db().await;
+        store::delete_bank(&conn, &bank).await?;
+        for q in &questions {
+            store::upsert_bank_question(&conn, q).await?;
+        }
+        questions.len()
+    };
+    Ok(Json(json!({ "bank": bank, "imported": imported })))
+}
+
+/// (Re)embed all bank questions in both languages.
+async fn global_bank_reindex(State(s): State<AppState>) -> AppResult<Json<Value>> {
+    let banks = load_banks(&s).await?;
+    let (_, en) = index_bank_lang(&s, &banks, "en").await?;
+    let (_, se) = index_bank_lang(&s, &banks, "se").await?;
+    Ok(Json(json!({ "embedded": en + se, "total_questions": banks.len() })))
+}
+
+/// Semantic search over the bank: detect (or take) the query language, embed it,
+/// rank the bank by cosine similarity, return the top matches.
+async fn global_bank_search(
+    State(s): State<AppState>,
+    Json(req): Json<SearchReq>,
+) -> AppResult<Json<Value>> {
+    if req.query.trim().is_empty() {
+        return Err(AppError::BadRequest("query is required".into()));
+    }
+    let banks = load_banks(&s).await?;
+    let lang = match req.language.as_deref() {
+        Some(l) if !l.trim().is_empty() => global_bank::norm_lang(Some(l)),
+        _ => global_bank::detect_language(&req.query),
+    };
+    let (vectors, _) = index_bank_lang(&s, &banks, lang).await?;
+    let qvec = llm::embed(&s.config, &s.http, &req.query).await?;
+    let k = req.top_k.unwrap_or(5).clamp(1, 50);
+    let matches = global_bank::rank(&qvec, &banks, &vectors, k);
+    Ok(Json(json!({ "language": lang, "matches": matches })))
+}
+
+/// Auto-match a question against the bank: embed up to 10 of this column's
+/// student answers, take their centroid, and rank the bank by cosine. The client
+/// applies a chosen match via `PUT .../questions/{col}`.
+async fn auto_match(
+    State(s): State<AppState>,
+    Path((name, col)): Path<(String, String)>,
+    Json(req): Json<AutoMatchReq>,
+) -> AppResult<Json<Value>> {
+    let exam = load_exam_or_404(&s, &name).await?;
+    let question = exam.questions.get(&col).ok_or_else(|| no_question(&col))?;
+    let input_column = question.input_column.clone();
+    let lang = global_bank::norm_lang(req.language.as_deref());
+
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let samples: Vec<String> = rows
+        .iter()
+        .filter_map(|r| {
+            let t = r.get(&input_column).cloned().unwrap_or_default();
+            domain::is_meaningful(&t).then_some(t)
+        })
+        .take(10)
+        .collect();
+
+    let banks = load_banks(&s).await?;
+    if samples.is_empty() || banks.is_empty() {
+        return Ok(Json(json!({ "language": lang, "matches": [] })));
+    }
+    let (vectors, _) = index_bank_lang(&s, &banks, lang).await?;
+    let embs = llm::embed_many(&s.config, &s.http, &samples).await;
+    let vecs: Vec<Vec<f32>> = embs.into_iter().flatten().collect();
+    if vecs.is_empty() {
+        return Ok(Json(json!({ "language": lang, "matches": [] })));
+    }
+    let centroid = global_bank::centroid(&vecs);
+    let k = req.top_k.unwrap_or(3).clamp(1, 20);
+    let matches = global_bank::rank(&centroid, &banks, &vectors, k);
+    Ok(Json(json!({ "language": lang, "matches": matches })))
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +1111,7 @@ async fn export(
 ) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, cols) = exam_data(&s.config, &exam)?;
+    let exam = seed_and_reload(&s, &exam, &rows).await?;
     let (filename, bytes) = store::build_graded_xlsx(&exam, &rows, &cols)?;
     Ok(download(&filename, XLSX_MIME, bytes))
 }
@@ -1231,6 +1533,7 @@ async fn export_daisy_route(
 ) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
+    let exam = seed_and_reload(&s, &exam, &rows).await?;
     let scheme = exam
         .scheme
         .as_ref()
@@ -1246,6 +1549,7 @@ async fn export_csv_route(
 ) -> AppResult<Response> {
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
+    let exam = seed_and_reload(&s, &exam, &rows).await?;
     let results = exam
         .scheme
         .as_ref()

@@ -40,10 +40,21 @@ import" below).
 - **Sampling is reduced to two embedding-based strategies**: `random` and
   `maximin` (max-spread / farthest-first). KMeans, IsolationForest+GMM, PCA and
   GPTSort are not ported.
+- **Moodle combine, blank auto-zero and the global question bank are ported.**
+  The two-file Moodle dump combine (`combine_moodle_dumps.py`) is now
+  `POST /api/exam-files/combine-moodle`; unanswered responses are auto-zeroed so
+  every student exports with a grade (was an in-grading sweep); the global
+  question bank (search + auto-match) is back, but as a single **app-wide**
+  resource managed in-app and stored in the DB (`/api/global-bank`, populated by
+  CSV import) rather than the old per-workspace folder or remote URL. The legacy
+  embedding-pre-compute scripts (`process_global.py`) are replaced by on-demand
+  `reindex`; the gpt-4o-mini language detector is replaced by a Swedish-letter
+  heuristic (overridable).
 
 ## LLM providers
 
-- **Embeddings**: OpenAI `text-embedding-3-large` (for `maximin` sampling).
+- **Embeddings**: OpenAI `text-embedding-3-large` (for `maximin` sampling and the
+  global question bank / auto-match).
 - **Grading**: Cerebras `gpt-oss-120b` (OpenAI-compatible chat API,
   `reasoning_effort=high`), plus a low-effort summary pass to condense the
   reasoning chain. Keys come from `OPENAI_API_KEY` / `CEREBRAS_API_KEY`.
@@ -116,7 +127,8 @@ status.
 | POST | `/api/legacy-sessions/import` | — | `{ imported_exams[] }` |
 | GET | `/api/exam-files` | — | `string[]` filenames in `exams/` |
 | GET | `/api/scans` | — | `string[]` scanned PDF filenames in `scans/` |
-| PUT | `/api/files/{kind}/{filename}` | raw bytes | `{ filename }` (`kind` ∈ `exams`/`scans`) |
+| PUT | `/api/files/{kind}/{filename}` | raw bytes | `{ filename }` (`kind` ∈ `exams`/`scans`/`raw`) |
+| POST | `/api/exam-files/combine-moodle` | `{ grades_file, responses_file, output_name? }` | `{ filename, students, questions, dropped_columns[] }` |
 | GET | `/api/exam-files/{file}/columns` | — | `string[]` header names |
 | GET | `/api/exam-files/{file}/rows` | — | `{ rows: object[] }` (cells as strings) |
 | GET | `/api/exam-files/{file}/detect` | — | `DetectedColumns` (`Response N`/`Points N` pairing + id guess) |
@@ -148,6 +160,7 @@ status.
 | POST | `/api/exams/{name}/questions/{col}/grade` | `{ row_id, grade, session? }` | `Question` |
 | DELETE | `/api/exams/{name}/questions/{col}/grade/{row_id}` | — | `Question` |
 | POST | `/api/exams/{name}/questions/{col}/suggest` | `{ row_id }` | `AIGradeSuggestion` |
+| POST | `/api/exams/{name}/questions/{col}/auto-match` | `{ language?, top_k? }` | `{ language, matches: GlobalBankMatch[] }` (bank match for this question) |
 | GET | `/api/exams/{name}/questions/{col}/status` | — | `QuestionStatus` (graded counts, ICL readiness) |
 | POST | `/api/exams/{name}/export` | — | graded `.xlsx` file (attachment, not JSON) |
 
@@ -183,6 +196,29 @@ the evaluated numeric total (for export).
 
 `ImportReq = { file, id_column, mappings: [{ column, output_col }], label? }`
 `ResolveReq = { output_col, row_id, choose }` (`choose ∈ existing | incoming`).
+
+### Global question bank (app-wide; not exam/course-scoped)
+
+| Method | Path | Body | Returns |
+|---|---|---|---|
+| GET | `/api/global-bank` | — | `{ banks: [{ name, questions }], total_questions, indexed_vectors }` |
+| POST | `/api/global-bank/import` | `{ file, bank? }` | `{ bank, imported }` (load a bank CSV into the DB, replacing that bank) |
+| POST | `/api/global-bank/reindex` | — | `{ embedded, total_questions }` (embed all bank questions) |
+| POST | `/api/global-bank/search` | `{ query, language?, top_k? }` | `{ language, matches: GlobalBankMatch[] }` |
+
+The bank is a single app-wide library of reference questions, managed in-app and
+stored in the database (`global_bank_questions`) - not fetched from any remote
+URL. Populate it by uploading a CSV (`PUT /api/files/raw/{name}`, columns `id`,
+`q_se`, `q_en`, `ans_se`, `ans_en`, `chapter`, `subject`, `type`) then
+`POST /api/global-bank/import { file }`; re-importing a bank replaces it.
+Questions are embedded with the sampling model and cached in
+`global_bank_vectors` (`reindex` eagerly; `search`/`auto-match` lazily). `search`
+detects the query language (Swedish-letter heuristic; overridable) and ranks by
+cosine similarity; `auto-match` embeds up to ten of a question's student answers,
+takes their centroid and ranks the bank, so a graded column's text / sample
+answer / `global_question_id` can be filled from a match (applied via
+`PUT .../questions/{col}`). Linking by the bank's `id` is what wires cross-exam
+ICL (the graded pool). `GlobalBankMatch` is a ts-rs DTO.
 
 ## Examination engine (v2)
 

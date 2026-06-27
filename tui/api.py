@@ -100,6 +100,14 @@ class TentanatorAPI:
     async def list_scans(self) -> List[str]:
         return await self._request("GET", "/api/scans")
 
+    async def combine_moodle(self, grades_file: str, responses_file: str,
+                             output_name: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("POST", "/api/exam-files/combine-moodle", json={
+            "grades_file": grades_file,
+            "responses_file": responses_file,
+            "output_name": output_name,
+        })
+
     # -- exams (the central entity) ---------------------------------------
     async def list_exams(self, archived: bool = False) -> List[Dict[str, Any]]:
         return await self._request("GET", "/api/exams", params={"archived": str(archived).lower()})
@@ -175,8 +183,33 @@ class TentanatorAPI:
             json={"row_id": row_id},
         )
 
+    async def auto_match(self, name: str, col: str, language: Optional[str] = None,
+                         top_k: Optional[int] = None) -> Dict[str, Any]:
+        return await self._request(
+            "POST", f"/api/exams/{name}/questions/{col}/auto-match",
+            json={"language": language, "top_k": top_k},
+        )
+
     async def question_status(self, name: str, col: str) -> Dict[str, Any]:
         return await self._request("GET", f"/api/exams/{name}/questions/{col}/status")
+
+    # -- global question bank (app-wide; not exam/course-scoped) ----------
+    async def global_bank_status(self) -> Dict[str, Any]:
+        return await self._request("GET", "/api/global-bank")
+
+    async def global_bank_reindex(self) -> Dict[str, Any]:
+        return await self._request("POST", "/api/global-bank/reindex")
+
+    async def global_bank_import(self, file: str,
+                                 bank: Optional[str] = None) -> Dict[str, Any]:
+        return await self._request("POST", "/api/global-bank/import",
+                                   json={"file": file, "bank": bank})
+
+    async def global_bank_search(self, query: str, language: Optional[str] = None,
+                                 top_k: Optional[int] = None) -> Dict[str, Any]:
+        return await self._request("POST", "/api/global-bank/search", json={
+            "query": query, "language": language, "top_k": top_k,
+        })
 
     async def export(self, name: str) -> Dict[str, str]:
         return await self._download("POST", f"/api/exams/{name}/export")

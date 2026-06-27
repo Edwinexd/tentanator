@@ -65,6 +65,24 @@ def sanitize_ident(s: str) -> str:
     return out.lower()
 
 
+def match_question(match: Dict[str, Any], language: Optional[str]) -> str:
+    """Pick a GlobalBankMatch's question text for the (detected) language."""
+    if language == "se":
+        return match.get("q_se") or match.get("q_en") or ""
+    if language == "en":
+        return match.get("q_en") or match.get("q_se") or ""
+    return match.get("q_en") or match.get("q_se") or ""
+
+
+def match_answer(match: Dict[str, Any], language: Optional[str]) -> str:
+    """Pick a GlobalBankMatch's sample answer for the (detected) language."""
+    if language == "se":
+        return match.get("ans_se") or match.get("ans_en") or ""
+    if language == "en":
+        return match.get("ans_en") or match.get("ans_se") or ""
+    return match.get("ans_en") or match.get("ans_se") or ""
+
+
 class TentanatorScreen(Screen):
     """Base screen exposing the shared backend client with a precise type."""
 
@@ -111,31 +129,46 @@ class TextPromptScreen(ModalScreen[Optional[str]]):
 
 
 class FilePickerScreen(TentanatorScreen):
-    """Browse the local filesystem and upload a file into exams/ or scans/."""
+    """Browse the local filesystem and upload a file into exams/, scans/ or raw."""
 
     BINDINGS = [("escape", "cancel", "Back")]
 
-    def __init__(self, default_kind: str = "exams") -> None:
+    _KIND_LABELS = [
+        ("exam / grades file (exams/)", "exams"),
+        ("scanned exam PDF (scans/)", "scans"),
+        ("raw Moodle export (exams_in_raw/)", "raw"),
+    ]
+
+    def __init__(
+        self, default_kind: str = "exams", kinds: Optional[List[str]] = None
+    ) -> None:
         super().__init__()
         self.default_kind = default_kind
+        # When ``kinds`` is given, lock the picker to that single upload target
+        # (no kind selector); otherwise offer the full set.
+        self.kinds = kinds
 
     def compose(self) -> ComposeResult:
         yield Header()
         yield Label("Pick a file to upload (Enter on a file)")
-        with Horizontal(id="fpbar"):
-            yield Label("Upload as: ")
-            yield Select(
-                [("exam / grades file (exams/)", "exams"), ("scanned exam PDF (scans/)", "scans")],
-                value=self.default_kind,
-                allow_blank=False,
-                id="fpkind",
-            )
+        if self.kinds is None:
+            with Horizontal(id="fpbar"):
+                yield Label("Upload as: ")
+                yield Select(
+                    self._KIND_LABELS,
+                    value=self.default_kind,
+                    allow_blank=False,
+                    id="fpkind",
+                )
         yield DirectoryTree(str(Path.home()), id="fptree")
         yield Footer()
 
     @on(DirectoryTree.FileSelected)
     async def _selected(self, event: DirectoryTree.FileSelected) -> None:
-        kind = str(self.query_one("#fpkind", Select).value)
+        if self.kinds is not None:
+            kind = self.kinds[0]
+        else:
+            kind = str(self.query_one("#fpkind", Select).value)
         path = str(event.path)
         self.notify(f"Uploading {Path(path).name}…", timeout=3)
         try:
@@ -161,6 +194,8 @@ class ExamListScreen(TentanatorScreen):
     BINDINGS = [
         ("n", "new_exam", "New exam"),
         ("u", "upload", "Upload file"),
+        ("c", "combine_moodle", "Combine Moodle"),
+        ("b", "global_bank", "Global bank"),
         ("w", "import_workspace", "Import workspace"),
         ("i", "import_legacy", "Import sessions"),
         ("h", "toggle_archived", "Show archived"),
@@ -179,6 +214,8 @@ class ExamListScreen(TentanatorScreen):
         with Horizontal(id="actions"):
             yield Button("New [n]", id="new", variant="primary")
             yield Button("Upload [u]", id="upload")
+            yield Button("Combine Moodle [c]", id="combine")
+            yield Button("Global bank [b]", id="globalbank")
             yield Button("Import workspace [w]", id="impworkspace")
             yield Button("Show archived [h]", id="togglearch")
             yield Button("Refresh [r]", id="refresh")
@@ -221,6 +258,14 @@ class ExamListScreen(TentanatorScreen):
 
     def action_upload(self) -> None:
         self.app.push_screen(FilePickerScreen())
+
+    def action_combine_moodle(self) -> None:
+        self.app.push_screen(
+            CombineMoodleScreen(), lambda _r: self.run_worker(self.refresh_exams())
+        )
+
+    def action_global_bank(self) -> None:
+        self.app.push_screen(GlobalBankScreen())
 
     def action_import_workspace(self) -> None:
         self.app.push_screen(
@@ -273,6 +318,14 @@ class ExamListScreen(TentanatorScreen):
     @on(Button.Pressed, "#upload")
     def _upload(self) -> None:
         self.action_upload()
+
+    @on(Button.Pressed, "#combine")
+    def _combine(self) -> None:
+        self.action_combine_moodle()
+
+    @on(Button.Pressed, "#globalbank")
+    def _globalbank(self) -> None:
+        self.action_global_bank()
 
     @on(Button.Pressed, "#impworkspace")
     def _impworkspace(self) -> None:
@@ -334,6 +387,229 @@ class WorkspaceImportScreen(TentanatorScreen):
         imported = result.get("imported_exams", [])
         self.notify(f"Imported {len(imported)} exam(s) from '{name}'")
         self.dismiss(None)
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
+class CombineMoodleScreen(TentanatorScreen):
+    """Combine two raw Moodle exports (grades + responses) into one exam file.
+
+    The two files are uploaded as ``raw`` (into ``exams_in_raw/``) via the shared
+    file picker; the backend pairs them and writes the compiled file into
+    ``exams/`` where it appears in the new-exam picker.
+    """
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.grades_file: Optional[str] = None
+        self.responses_file: Optional[str] = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            yield Label("Combine Moodle dumps", id="title")
+            yield Static(
+                "[dim]Pick the two raw Moodle exports; the backend compiles them "
+                "into one exam file under exams/.[/dim]"
+            )
+            with Horizontal(id="cm-grades"):
+                yield Button("Pick grades file", id="pickgrades")
+                yield Label("(none selected)", id="gradeslabel")
+            with Horizontal(id="cm-responses"):
+                yield Button("Pick responses file", id="pickresponses")
+                yield Label("(none selected)", id="responseslabel")
+            yield Label("Output name (optional):")
+            yield Input(placeholder="auto-generated if blank", id="outputname")
+            with Horizontal(id="cm-actions"):
+                yield Button("Combine", id="combine", variant="primary")
+                yield Button("Back [esc]", id="back")
+            yield Static("", id="cmstatus")
+        yield Footer()
+
+    @on(Button.Pressed, "#pickgrades")
+    def _pick_grades(self) -> None:
+        self.app.push_screen(FilePickerScreen(kinds=["raw"]), self._grades_picked)
+
+    def _grades_picked(self, filename: Optional[str]) -> None:
+        if filename:
+            self.grades_file = filename
+            self.query_one("#gradeslabel", Label).update(filename)
+
+    @on(Button.Pressed, "#pickresponses")
+    def _pick_responses(self) -> None:
+        self.app.push_screen(FilePickerScreen(kinds=["raw"]), self._responses_picked)
+
+    def _responses_picked(self, filename: Optional[str]) -> None:
+        if filename:
+            self.responses_file = filename
+            self.query_one("#responseslabel", Label).update(filename)
+
+    @on(Button.Pressed, "#combine")
+    async def _combine(self) -> None:
+        if not self.grades_file or not self.responses_file:
+            self.notify("Pick both a grades and a responses file", severity="warning")
+            return
+        output_name = self.query_one("#outputname", Input).value.strip() or None
+        self.query_one("#cmstatus", Static).update("[dim]Combining...[/dim]")
+        try:
+            result = await self.api.combine_moodle(
+                self.grades_file, self.responses_file, output_name
+            )
+        except APIError as exc:
+            self.query_one("#cmstatus", Static).update("")
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        dropped = result.get("dropped_columns", [])
+        dropped_str = ", ".join(dropped) if dropped else "none"
+        self.query_one("#cmstatus", Static).update(
+            f"[b]Combined into {result.get('filename', '?')}[/b]  "
+            f"{result.get('students', 0)} students, {result.get('questions', 0)} questions.\n"
+            f"[dim]Dropped columns: {dropped_str}[/dim]\n"
+            "[dim]Now available in the new-exam picker.[/dim]"
+        )
+        self.notify(f"Combined into {result.get('filename', '?')}", timeout=8)
+
+    @on(Button.Pressed, "#back")
+    def _back(self) -> None:
+        self.action_back()
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
+class GlobalBankScreen(TentanatorScreen):
+    """App-wide reference question bank: status, import, reindex, semantic search."""
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            yield Label("Global question bank", id="title")
+            yield Static("", id="bankstatus")
+            with Horizontal(id="gb-actions"):
+                yield Button("Import CSV", id="import")
+                yield Button("Reindex", id="reindex")
+            yield Label("Search the bank:")
+            with Horizontal(id="gb-searchbar"):
+                yield Input(placeholder="search query", id="searchquery")
+                yield Select(
+                    [("auto", "auto"), ("Swedish (se)", "se"), ("English (en)", "en")],
+                    value="auto",
+                    allow_blank=False,
+                    id="searchlang",
+                )
+                yield Button("Search", id="search", variant="primary")
+            yield Static("", id="searchstatus")
+            yield DataTable(id="banktable")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        self.query_one("#banktable", DataTable).add_columns(
+            "Score", "QID", "Bank", "Question", "Answer"
+        )
+        await self._load_status()
+
+    async def _load_status(self) -> None:
+        try:
+            status = await self.api.global_bank_status()
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        banks = status.get("banks", [])
+        bank_str = ", ".join(f"{b['name']} ({b['questions']})" for b in banks) or "none"
+        self.query_one("#bankstatus", Static).update(
+            f"[b]Banks:[/b] {bank_str}\n"
+            f"{status.get('total_questions', 0)} questions, "
+            f"{status.get('indexed_vectors', 0)} indexed vectors"
+        )
+
+    @on(Button.Pressed, "#reindex")
+    def _reindex_btn(self) -> None:
+        self._reindex()
+
+    @work
+    async def _reindex(self) -> None:
+        self.query_one("#searchstatus", Static).update("[dim]Reindexing...[/dim]")
+        try:
+            result = await self.api.global_bank_reindex()
+        except APIError as exc:
+            self.query_one("#searchstatus", Static).update("")
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.query_one("#searchstatus", Static).update("")
+        self.notify(
+            f"Embedded {result.get('embedded', 0)} of "
+            f"{result.get('total_questions', 0)} questions"
+        )
+        await self._load_status()
+
+    @on(Button.Pressed, "#import")
+    def _import_btn(self) -> None:
+        self.app.push_screen(FilePickerScreen(kinds=["raw"]), self._bank_file_picked)
+
+    def _bank_file_picked(self, filename: Optional[str]) -> None:
+        if filename:
+            self._import_bank(filename)
+
+    @work
+    async def _import_bank(self, filename: str) -> None:
+        self.query_one("#searchstatus", Static).update("[dim]Importing...[/dim]")
+        try:
+            result = await self.api.global_bank_import(filename)
+        except APIError as exc:
+            self.query_one("#searchstatus", Static).update("")
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.query_one("#searchstatus", Static).update("")
+        self.notify(
+            f"Imported {result.get('imported', 0)} questions into bank "
+            f"'{result.get('bank', '?')}'. Run Reindex to embed."
+        )
+        await self._load_status()
+
+    @on(Button.Pressed, "#search")
+    @on(Input.Submitted, "#searchquery")
+    def _search_btn(self) -> None:
+        self._search()
+
+    @work
+    async def _search(self) -> None:
+        query = self.query_one("#searchquery", Input).value.strip()
+        if not query:
+            self.notify("Enter a search query", severity="warning")
+            return
+        lang_val = str(self.query_one("#searchlang", Select).value)
+        language = None if lang_val == "auto" else lang_val
+        self.query_one("#searchstatus", Static).update("[dim]Searching...[/dim]")
+        try:
+            result = await self.api.global_bank_search(query, language)
+        except APIError as exc:
+            self.query_one("#searchstatus", Static).update("")
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        detected = result.get("language")
+        matches = result.get("matches", [])
+        table = self.query_one("#banktable", DataTable)
+        table.clear()
+        for m in matches:
+            table.add_row(
+                f"{m.get('score', 0.0):.3f}",
+                m.get("qid", ""),
+                m.get("bank", ""),
+                match_question(m, detected),
+                match_answer(m, detected),
+            )
+        self.query_one("#searchstatus", Static).update(
+            f"[dim]{len(matches)} match(es)  |  language: {detected or '?'}[/dim]"
+        )
+
+    @on(Button.Pressed, "#back")
+    def _back(self) -> None:
+        self.action_back()
 
     def action_back(self) -> None:
         self.dismiss(None)
@@ -834,10 +1110,50 @@ class GradingScreen(TentanatorScreen):
         self.dismiss(None)
 
 
+class MatchPickerScreen(ModalScreen[Optional[Dict[str, Any]]]):
+    """Modal list of GlobalBankMatch results; dismisses with the chosen match."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, matches: List[Dict[str, Any]], language: Optional[str]) -> None:
+        super().__init__()
+        self.matches = matches
+        self.language = language
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="matchbox"):
+            yield Label("Pick a bank match (Enter to apply)")
+            yield ListView(id="matches")
+            yield Button("Cancel [esc]", id="cancel")
+
+    async def on_mount(self) -> None:
+        lv = self.query_one("#matches", ListView)
+        for i, m in enumerate(self.matches):
+            question = match_question(m, self.language)
+            label = f"{m.get('score', 0.0):.3f}  {m.get('qid', '')}  -  {question}"
+            await lv.append(ListItem(Label(label), name=str(i)))
+        lv.focus()
+
+    @on(ListView.Selected)
+    def _selected(self, event: ListView.Selected) -> None:
+        if event.item is not None and event.item.name is not None:
+            self.dismiss(self.matches[int(event.item.name)])
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class QuestionSettingsScreen(TentanatorScreen):
     """Edit a question's global-id link, exam text and sample answer."""
 
-    BINDINGS = [("escape", "back", "Back")]
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("a", "auto_match", "Auto-match"),
+    ]
 
     def __init__(self, exam_name: str, col: str) -> None:
         super().__init__()
@@ -851,6 +1167,14 @@ class QuestionSettingsScreen(TentanatorScreen):
             yield Static(
                 "[dim]Link the same question across exams to share graded examples.[/dim]"
             )
+            with Horizontal(id="qs-match"):
+                yield Button("Auto-match from bank [a]", id="automatch")
+                yield Select(
+                    [("auto", "auto"), ("Swedish (se)", "se"), ("English (en)", "en")],
+                    value="auto",
+                    allow_blank=False,
+                    id="matchlang",
+                )
             yield Label("Global question id:")
             yield Input(placeholder="e.g. pvt_q37_version_control", id="globalid")
             yield Label("Exam question text:")
@@ -873,8 +1197,38 @@ class QuestionSettingsScreen(TentanatorScreen):
         self.query_one("#examtext", TextArea).text = q.get("exam_question", "")
         self.query_one("#sampleanswer", TextArea).text = q.get("sample_answer", "")
 
-    @on(Button.Pressed, "#save")
-    async def _save(self) -> None:
+    @on(Button.Pressed, "#automatch")
+    def _automatch_btn(self) -> None:
+        self.action_auto_match()
+
+    @work
+    async def action_auto_match(self) -> None:
+        """Embed the question's answers, rank the bank and fill from a chosen match."""
+        lang_val = str(self.query_one("#matchlang", Select).value)
+        language = None if lang_val == "auto" else lang_val
+        self.notify("Matching against the global bank...", timeout=3)
+        try:
+            result = await self.api.auto_match(self.exam_name, self.col, language)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        detected = result.get("language")
+        matches = result.get("matches", [])
+        if not matches:
+            self.notify("No bank matches found", severity="warning")
+            return
+        chosen = await self.app.push_screen_wait(MatchPickerScreen(matches, detected))
+        if chosen is None:
+            return
+        # Fill the fields; the user can still edit before saving.
+        self.query_one("#globalid", Input).value = chosen.get("qid") or ""
+        self.query_one("#examtext", TextArea).text = match_question(chosen, detected)
+        self.query_one("#sampleanswer", TextArea).text = match_answer(chosen, detected)
+        await self._persist()
+        self.notify("Filled and saved from bank match")
+
+    async def _persist(self) -> bool:
+        """Save the current field values via put_question; returns success."""
         meta = {
             "global_question_id": self.query_one("#globalid", Input).value.strip(),
             "exam_question": self.query_one("#examtext", TextArea).text,
@@ -884,9 +1238,14 @@ class QuestionSettingsScreen(TentanatorScreen):
             await self.api.put_question(self.exam_name, self.col, meta)
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
-            return
-        self.notify("Question settings saved")
-        self.dismiss(None)
+            return False
+        return True
+
+    @on(Button.Pressed, "#save")
+    async def _save(self) -> None:
+        if await self._persist():
+            self.notify("Question settings saved")
+            self.dismiss(None)
 
     @on(Button.Pressed, "#back")
     def _back(self) -> None:
@@ -1471,6 +1830,15 @@ class TentanatorTUI(App):
     .conflictrow { height: auto; padding: 0 1; }
     .conflictlabel { width: 1fr; padding: 1 0; }
     #resultstable { height: 1fr; margin: 0 1; }
+    #banktable { height: 1fr; margin: 0 1; }
+    #searchquery { width: 1fr; }
+    #searchlang, #matchlang { width: 22; }
+    #gradeslabel, #responseslabel { padding: 1 1; }
+    #matchbox {
+        width: 90%; height: 80%; padding: 1 2;
+        border: thick $primary; background: $surface;
+    }
+    #matches { height: 1fr; border: round $primary; margin: 1 0; }
     TextArea { height: 10; margin: 0 1; }
     """
 

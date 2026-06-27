@@ -59,6 +59,12 @@ impl Config {
         self.data_dir.join("exams")
     }
 
+    /// Raw uploads awaiting processing (e.g. the two Moodle dumps before they are
+    /// combined). Kept out of `exams/` so they don't show as selectable exams.
+    pub fn raw_dir(&self) -> PathBuf {
+        self.data_dir.join("exams_in_raw")
+    }
+
     pub fn graded_dir(&self) -> PathBuf {
         self.data_dir.join("graded_exams")
     }

@@ -15,6 +15,7 @@ import type { ExamSummary } from './generated/ExamSummary'
 import type { GradeConflict } from './generated/GradeConflict'
 import type { GradeRule } from './generated/GradeRule'
 import type { GradeScheme } from './generated/GradeScheme'
+import type { GlobalBankMatch } from './generated/GlobalBankMatch'
 import type { GradedItem } from './generated/GradedItem'
 import type { ImportResult } from './generated/ImportResult'
 import type { QuestionGrades } from './generated/QuestionGrades'
@@ -33,6 +34,7 @@ export type {
   GradeConflict,
   GradeRule,
   GradeScheme,
+  GlobalBankMatch,
   GradedItem,
   ImportResult,
   QuestionGrades,
@@ -133,6 +135,31 @@ export interface DetectedColumns {
 
 export interface SchemeText {
   text: string
+}
+
+export interface CombineMoodleResp {
+  filename: string
+  students: number
+  questions: number
+  dropped_columns: string[]
+}
+
+export interface GlobalBankInfo {
+  name: string
+  questions: number
+}
+export interface GlobalBankStatus {
+  banks: GlobalBankInfo[]
+  total_questions: number
+  indexed_vectors: number
+}
+export interface GlobalBankReindexResp {
+  embedded: number
+  total_questions: number
+}
+export interface GlobalBankMatches {
+  language: string
+  matches: GlobalBankMatch[]
 }
 
 // ---------------------------------------------------------------------------
@@ -256,7 +283,7 @@ async function triggerDownload(method: string, path: string): Promise<void> {
 }
 
 async function uploadBinary(
-  kind: 'exams' | 'scans',
+  kind: 'exams' | 'scans' | 'raw',
   file: File,
 ): Promise<{ filename: string }> {
   const res = await fetch(`${API_BASE}/api/files/${kind}/${enc(file.name)}`, {
@@ -291,6 +318,14 @@ export const api = {
     req<DetectedColumns>('GET', `/api/exam-files/${enc(file)}/detect`),
   uploadExamFile: (file: File) => uploadBinary('exams', file),
   uploadScan: (file: File) => uploadBinary('scans', file),
+  uploadRawFile: (file: File) => uploadBinary('raw', file),
+  // Combine two raw Moodle dumps (grades + responses) into one exam file.
+  combineMoodle: (gradesFile: string, responsesFile: string, outputName?: string) =>
+    req<CombineMoodleResp>('POST', '/api/exam-files/combine-moodle', {
+      grades_file: gradesFile,
+      responses_file: responsesFile,
+      output_name: outputName,
+    }),
 
   // --- exams (the central entity) ---
   listExams: (opts: { archived?: boolean; course?: string } = {}) => {
@@ -353,6 +388,28 @@ export const api = {
     } satisfies SuggestReq),
   questionStatus: (name: string, col: string) =>
     req<QuestionStatus>('GET', `/api/exams/${enc(name)}/questions/${enc(col)}/status`),
+  autoMatch: (name: string, col: string, language?: string, topK?: number) =>
+    req<GlobalBankMatches>(
+      'POST',
+      `/api/exams/${enc(name)}/questions/${enc(col)}/auto-match`,
+      { language: language ?? null, top_k: topK ?? null },
+    ),
+
+  // --- global question bank (app-wide; not exam/course-scoped) ---
+  globalBankStatus: () => req<GlobalBankStatus>('GET', '/api/global-bank'),
+  globalBankReindex: () => req<GlobalBankReindexResp>('POST', '/api/global-bank/reindex'),
+  // Import a bank CSV (already uploaded via uploadRawFile) into the DB.
+  globalBankImport: (file: string, bank?: string) =>
+    req<{ bank: string; imported: number }>('POST', '/api/global-bank/import', {
+      file,
+      bank: bank ?? null,
+    }),
+  globalBankSearch: (query: string, language?: string, topK?: number) =>
+    req<GlobalBankMatches>('POST', '/api/global-bank/search', {
+      query,
+      language: language ?? null,
+      top_k: topK ?? null,
+    }),
 
   // --- scheme, config & results ---
   // The readable scheme DSL grammar lives in the backend; clients round-trip

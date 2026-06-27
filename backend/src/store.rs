@@ -10,7 +10,10 @@ use turso::Connection;
 
 use crate::config::Config;
 use crate::db;
-use crate::domain::{Exam, ExamSummary, GradeConflict, GradedItem, QuestionGrades, Session, SessionSummary};
+use crate::domain::{
+    BankQuestion, Exam, ExamSummary, GradeConflict, GradedItem, QuestionGrades, Session,
+    SessionSummary,
+};
 use crate::error::{AppError, AppResult};
 
 // ---------------------------------------------------------------------------
@@ -398,9 +401,32 @@ fn prefilled_grade(cell: &str) -> Option<String> {
     crate::grade::evaluate_grade(t).map(|_| t.to_string())
 }
 
-/// Seed grades from values already present in the sheet's output columns. Used on
-/// exam create and column-expand so auto-scored questions are not re-graded by
-/// hand. Returns the number of grades seeded.
+/// Row ids that already have a grade for `(exam, col)`.
+pub async fn graded_row_ids(
+    conn: &Connection,
+    exam: &str,
+    col: &str,
+) -> AppResult<std::collections::HashSet<String>> {
+    let mut out = std::collections::HashSet::new();
+    let mut r = conn
+        .query(
+            "SELECT row_id FROM graded_items WHERE exam = ? AND output_col = ?",
+            (exam, col),
+        )
+        .await?;
+    while let Some(row) = r.next().await? {
+        out.insert(row.get::<String>(0)?);
+    }
+    Ok(out)
+}
+
+/// Seed grades already implied by the sheet, for the given output columns. Per
+/// row, in priority order: a `prefilled` value in the output cell (numeric, or
+/// `-` => 0); else, for a blank/`-`/`N/A` *response* with no grade yet, an
+/// `auto-zero` `0` so unanswered students still export with a grade (matching the
+/// legacy auto-zero sweep). Rows already graded are never clobbered. Run on exam
+/// create, column-expand and before results/export; idempotent. Returns the
+/// number of grades seeded.
 pub async fn seed_prefilled_grades(
     conn: &Connection,
     exam: &Exam,
@@ -411,17 +437,25 @@ pub async fn seed_prefilled_grades(
     for col in cols {
         let Some(q) = exam.questions.get(col) else { continue };
         let input_col = q.input_column.clone();
+        let already = graded_row_ids(conn, &exam.name, col).await?;
         for row in rows {
-            let Some(grade) = prefilled_grade(&row.get(col).cloned().unwrap_or_default()) else {
-                continue;
-            };
+            let row_id = crate::domain::row_id(row, &exam.id_columns);
+            let input_text = row.get(&input_col).cloned().unwrap_or_default();
+            let (grade, source) =
+                if let Some(g) = prefilled_grade(&row.get(col).cloned().unwrap_or_default()) {
+                    (g, "prefilled")
+                } else if !crate::domain::is_meaningful(&input_text) && !already.contains(&row_id) {
+                    ("0".to_string(), "auto-zero")
+                } else {
+                    continue;
+                };
             let item = GradedItem {
-                row_id: crate::domain::row_id(row, &exam.id_columns),
-                input_text: row.get(&input_col).cloned().unwrap_or_default(),
+                row_id,
+                input_text,
                 grade,
                 timestamp: now_iso(),
             };
-            put_graded_item(conn, &exam.name, col, &item, "prefilled", DEFAULT_SESSION).await?;
+            put_graded_item(conn, &exam.name, col, &item, source, DEFAULT_SESSION).await?;
             seeded += 1;
         }
     }
@@ -980,6 +1014,132 @@ pub async fn load_feature_cache(
 }
 
 // ---------------------------------------------------------------------------
+// Global question bank embeddings (Turso) - app-wide, not exam-scoped
+// ---------------------------------------------------------------------------
+
+pub async fn put_bank_vector(
+    conn: &Connection,
+    bank: &str,
+    qid: &str,
+    lang: &str,
+    vector: &[f32],
+) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM global_bank_vectors WHERE bank = ? AND qid = ? AND lang = ?",
+        (bank, qid, lang),
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO global_bank_vectors (bank, qid, lang, vector) VALUES (?, ?, ?, ?)",
+        (bank, qid, lang, db::f32s_to_blob(vector)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// All cached bank vectors for `lang`, keyed by `(bank, qid)`.
+pub async fn load_bank_vectors(
+    conn: &Connection,
+    lang: &str,
+) -> AppResult<HashMap<(String, String), Vec<f32>>> {
+    let mut out = HashMap::new();
+    let mut r = conn
+        .query(
+            "SELECT bank, qid, vector FROM global_bank_vectors WHERE lang = ?",
+            (lang,),
+        )
+        .await?;
+    while let Some(row) = r.next().await? {
+        let bank: String = row.get(0)?;
+        let qid: String = row.get(1)?;
+        let blob: Vec<u8> = row.get(2)?;
+        out.insert((bank, qid), db::blob_to_f32s(&blob));
+    }
+    Ok(out)
+}
+
+/// Number of cached bank vectors (across all languages).
+pub async fn count_bank_vectors(conn: &Connection) -> AppResult<usize> {
+    let mut r = conn.query("SELECT COUNT(*) FROM global_bank_vectors", ()).await?;
+    Ok(r.next().await?.map(|row| row.get::<i64>(0)).transpose()?.unwrap_or(0) as usize)
+}
+
+/// Remove every question (and its vectors) for a bank - used to fully replace a
+/// bank on re-import.
+pub async fn delete_bank(conn: &Connection, bank: &str) -> AppResult<()> {
+    conn.execute("DELETE FROM global_bank_questions WHERE bank = ?", (bank,)).await?;
+    conn.execute("DELETE FROM global_bank_vectors WHERE bank = ?", (bank,)).await?;
+    Ok(())
+}
+
+pub async fn upsert_bank_question(conn: &Connection, q: &BankQuestion) -> AppResult<()> {
+    conn.execute(
+        "DELETE FROM global_bank_questions WHERE bank = ? AND qid = ?",
+        (q.bank.as_str(), q.qid.as_str()),
+    )
+    .await?;
+    conn.execute(
+        "INSERT INTO global_bank_questions \
+         (bank, qid, q_se, q_en, ans_se, ans_en, chapter, subject, qtype) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (
+            q.bank.as_str(),
+            q.qid.as_str(),
+            q.q_se.as_str(),
+            q.q_en.as_str(),
+            q.ans_se.as_str(),
+            q.ans_en.as_str(),
+            q.chapter.as_str(),
+            q.subject.as_str(),
+            q.qtype.as_str(),
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// All bank questions, ordered by bank then qid.
+pub async fn load_bank_questions(conn: &Connection) -> AppResult<Vec<BankQuestion>> {
+    let mut out = Vec::new();
+    let mut r = conn
+        .query(
+            "SELECT bank, qid, q_se, q_en, ans_se, ans_en, chapter, subject, qtype \
+             FROM global_bank_questions ORDER BY bank, qid",
+            (),
+        )
+        .await?;
+    while let Some(row) = r.next().await? {
+        out.push(BankQuestion {
+            bank: row.get(0)?,
+            qid: row.get(1)?,
+            q_se: row.get(2)?,
+            q_en: row.get(3)?,
+            ans_se: row.get(4)?,
+            ans_en: row.get(5)?,
+            chapter: row.get(6)?,
+            subject: row.get(7)?,
+            qtype: row.get(8)?,
+        });
+    }
+    Ok(out)
+}
+
+/// Per-bank question counts, ordered by bank.
+pub async fn bank_counts(conn: &Connection) -> AppResult<Vec<(String, usize)>> {
+    let mut out = Vec::new();
+    let mut r = conn
+        .query(
+            "SELECT bank, COUNT(*) FROM global_bank_questions GROUP BY bank ORDER BY bank",
+            (),
+        )
+        .await?;
+    while let Some(row) = r.next().await? {
+        out.push((row.get::<String>(0)?, row.get::<i64>(1)? as usize));
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------------
 // Cross-exam graded pool (Turso)
 // ---------------------------------------------------------------------------
 
@@ -1284,6 +1444,34 @@ pub async fn import_pool_dir(conn: &Connection, dir: &Path) -> AppResult<()> {
 // Excel export (on disk)
 // ---------------------------------------------------------------------------
 
+/// Write a simple sheet (header row + string data rows) to an xlsx file on disk.
+/// Used to materialise derived exam files (e.g. the combined Moodle dump).
+pub fn write_xlsx(path: &Path, headers: &[String], rows: &[Vec<String>]) -> AppResult<()> {
+    use rust_xlsxwriter::Workbook;
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_worksheet();
+    for (c, h) in headers.iter().enumerate() {
+        sheet
+            .write_string(0, c as u16, h)
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+    }
+    for (r, row) in rows.iter().enumerate() {
+        for (c, val) in row.iter().enumerate() {
+            sheet
+                .write_string((r + 1) as u32, c as u16, val)
+                .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+        }
+    }
+    let bytes = workbook
+        .save_to_buffer()
+        .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
 /// Stem of an exam's file, for naming downloads.
 fn exam_file_stem(exam: &Exam) -> String {
     Path::new(&exam.exam_file)
@@ -1541,6 +1729,56 @@ mod tests {
         let qb = load_question(&conn, "sb", "g").await.unwrap().unwrap();
         assert_eq!(qb.external_graded_items.len(), 1);
         assert_eq!(qb.external_graded_items[0].row_id, "sa::r1");
+    }
+
+    #[tokio::test]
+    async fn seeds_auto_zero_for_blank_responses() {
+        let conn = mem_conn().await;
+        let mut exam = sample_exam("az");
+        exam.ensure_question("g");
+        insert_exam(&conn, &exam).await.unwrap();
+
+        let row = |id: &str, ans: &str| {
+            HashMap::from([
+                ("id".to_string(), id.to_string()),
+                ("ans".to_string(), ans.to_string()),
+                ("g".to_string(), String::new()),
+            ])
+        };
+        // r1 answered (must stay ungraded), r2 empty + r3 dash (auto-zeroed).
+        let rows = vec![row("r1", "hello"), row("r2", ""), row("r3", "-")];
+        // A pre-existing grade on a blank row must not be clobbered.
+        put_graded_item(
+            &conn,
+            "az",
+            "g",
+            &GradedItem { row_id: "r4".into(), input_text: "".into(), grade: "3".into(), timestamp: now_iso() },
+            "imported",
+            "default",
+        )
+        .await
+        .unwrap();
+        let rows = {
+            let mut rows = rows;
+            rows.push(row("r4", ""));
+            rows
+        };
+
+        let seeded = seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await.unwrap();
+        assert_eq!(seeded, 2, "only the two unanswered, ungraded rows are zeroed");
+
+        let q = load_question(&conn, "az", "g").await.unwrap().unwrap();
+        let grade = |rid: &str| q.graded_items.iter().find(|i| i.row_id == rid).map(|i| i.grade.clone());
+        assert_eq!(grade("r1"), None, "answered response is left for grading");
+        assert_eq!(grade("r2").as_deref(), Some("0"));
+        assert_eq!(grade("r3").as_deref(), Some("0"));
+        assert_eq!(grade("r4").as_deref(), Some("3"), "existing grade preserved");
+        // Auto-zeroed rows are blank, so they never count toward ICL.
+        assert_eq!(q.valid_graded_count(), 0);
+
+        // Idempotent: a second pass seeds nothing new.
+        let again = seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await.unwrap();
+        assert_eq!(again, 0);
     }
 
     #[test]

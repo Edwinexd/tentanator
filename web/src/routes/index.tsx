@@ -1,4 +1,4 @@
-import { Plus, Archive, ArchiveRestore, FileText } from 'lucide-react'
+import { Plus, Archive, ArchiveRestore, FileText, Database, Combine } from 'lucide-react'
 import { createFileRoute, Link } from '@tanstack/react-router'
 import { useCallback, useEffect, useState, type MouseEvent } from 'react'
 import { api, type ExamSummary, type WorkspaceInfo } from '#/lib/api'
@@ -190,12 +190,26 @@ function Home() {
     <div className="mx-auto max-w-3xl p-8">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight">Tentanator</h1>
-        <Link to="/new">
-          <Button>
-            <Plus className="mr-1 h-4 w-4" />
-            New exam
-          </Button>
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link to="/combine">
+            <Button variant="outline">
+              <Combine className="mr-1 h-4 w-4" />
+              Combine Moodle
+            </Button>
+          </Link>
+          <Link to="/global-bank">
+            <Button variant="outline">
+              <Database className="mr-1 h-4 w-4" />
+              Question bank
+            </Button>
+          </Link>
+          <Link to="/new">
+            <Button>
+              <Plus className="mr-1 h-4 w-4" />
+              New exam
+            </Button>
+          </Link>
+        </div>
       </div>
 
       <div className="mt-8 mb-3 flex items-center justify-between">

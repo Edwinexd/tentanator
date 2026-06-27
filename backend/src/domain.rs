@@ -212,6 +212,33 @@ pub struct GradeConflict {
     pub timestamp: String,
 }
 
+/// One reference question in the app-wide global question bank. `bank` is the
+/// import source (CSV stem); `qid` is the question's `id` and becomes the
+/// `global_question_id` when a column links to it.
+#[derive(Clone, Debug, Default)]
+pub struct BankQuestion {
+    pub bank: String,
+    pub qid: String,
+    pub q_se: String,
+    pub q_en: String,
+    pub ans_se: String,
+    pub ans_en: String,
+    pub chapter: String,
+    pub subject: String,
+    pub qtype: String,
+}
+
+impl BankQuestion {
+    /// Question text in the requested language (`en` or `se`).
+    pub fn text(&self, lang: &str) -> &str {
+        if lang == "en" {
+            &self.q_en
+        } else {
+            &self.q_se
+        }
+    }
+}
+
 /// Blank / dash / N/A responses are auto-zeroed and never count toward ICL.
 pub fn is_meaningful(text: &str) -> bool {
     let t = text.trim();

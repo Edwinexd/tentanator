@@ -10,6 +10,8 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as NewRouteImport } from './routes/new'
+import { Route as GlobalBankRouteImport } from './routes/global-bank'
+import { Route as CombineRouteImport } from './routes/combine'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ExamNameRouteImport } from './routes/exam.$name'
 import { Route as ExamNameIndexRouteImport } from './routes/exam.$name.index'
@@ -21,6 +23,16 @@ import { Route as ExamNameImportRouteImport } from './routes/exam.$name.import'
 const NewRoute = NewRouteImport.update({
   id: '/new',
   path: '/new',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const GlobalBankRoute = GlobalBankRouteImport.update({
+  id: '/global-bank',
+  path: '/global-bank',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CombineRoute = CombineRouteImport.update({
+  id: '/combine',
+  path: '/combine',
   getParentRoute: () => rootRouteImport,
 } as any)
 const IndexRoute = IndexRouteImport.update({
@@ -61,6 +73,8 @@ const ExamNameImportRoute = ExamNameImportRouteImport.update({
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/combine': typeof CombineRoute
+  '/global-bank': typeof GlobalBankRoute
   '/new': typeof NewRoute
   '/exam/$name': typeof ExamNameRouteWithChildren
   '/exam/$name/import': typeof ExamNameImportRoute
@@ -71,6 +85,8 @@ export interface FileRoutesByFullPath {
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/combine': typeof CombineRoute
+  '/global-bank': typeof GlobalBankRoute
   '/new': typeof NewRoute
   '/exam/$name/import': typeof ExamNameImportRoute
   '/exam/$name/pdf': typeof ExamNamePdfRoute
@@ -81,6 +97,8 @@ export interface FileRoutesByTo {
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/combine': typeof CombineRoute
+  '/global-bank': typeof GlobalBankRoute
   '/new': typeof NewRoute
   '/exam/$name': typeof ExamNameRouteWithChildren
   '/exam/$name/import': typeof ExamNameImportRoute
@@ -93,6 +111,8 @@ export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
     | '/'
+    | '/combine'
+    | '/global-bank'
     | '/new'
     | '/exam/$name'
     | '/exam/$name/import'
@@ -103,6 +123,8 @@ export interface FileRouteTypes {
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
+    | '/combine'
+    | '/global-bank'
     | '/new'
     | '/exam/$name/import'
     | '/exam/$name/pdf'
@@ -112,6 +134,8 @@ export interface FileRouteTypes {
   id:
     | '__root__'
     | '/'
+    | '/combine'
+    | '/global-bank'
     | '/new'
     | '/exam/$name'
     | '/exam/$name/import'
@@ -123,6 +147,8 @@ export interface FileRouteTypes {
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  CombineRoute: typeof CombineRoute
+  GlobalBankRoute: typeof GlobalBankRoute
   NewRoute: typeof NewRoute
   ExamNameRoute: typeof ExamNameRouteWithChildren
 }
@@ -134,6 +160,20 @@ declare module '@tanstack/react-router' {
       path: '/new'
       fullPath: '/new'
       preLoaderRoute: typeof NewRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/global-bank': {
+      id: '/global-bank'
+      path: '/global-bank'
+      fullPath: '/global-bank'
+      preLoaderRoute: typeof GlobalBankRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/combine': {
+      id: '/combine'
+      path: '/combine'
+      fullPath: '/combine'
+      preLoaderRoute: typeof CombineRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/': {
@@ -210,18 +250,11 @@ const ExamNameRouteWithChildren = ExamNameRoute._addFileChildren(
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  CombineRoute: CombineRoute,
+  GlobalBankRoute: GlobalBankRoute,
   NewRoute: NewRoute,
   ExamNameRoute: ExamNameRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
   ._addFileTypes<FileRouteTypes>()
-
-import type { getRouter } from './router.tsx'
-import type { createStart } from '@tanstack/react-start'
-declare module '@tanstack/react-start' {
-  interface Register {
-    ssr: true
-    router: Awaited<ReturnType<typeof getRouter>>
-  }
-}
