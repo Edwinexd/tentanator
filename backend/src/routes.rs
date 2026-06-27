@@ -546,10 +546,16 @@ async fn global_bank_import(
     let questions = global_bank::parse_bank_csv(&path, &bank)?;
     let imported = {
         let conn = s.db().await;
-        store::delete_bank(&conn, &bank).await?;
-        for q in &questions {
-            store::upsert_bank_question(&conn, q).await?;
-        }
+        // Replace the bank atomically: a failure mid-repopulate must not leave
+        // the bank deleted-but-empty.
+        store::transaction(&conn, async {
+            store::delete_bank(&conn, &bank).await?;
+            for q in &questions {
+                store::upsert_bank_question(&conn, q).await?;
+            }
+            Ok::<_, AppError>(())
+        })
+        .await?;
         questions.len()
     };
     Ok(Json(json!({ "bank": bank, "imported": imported })))
@@ -874,7 +880,12 @@ async fn put_question(
     Path((name, col)): Path<(String, String)>,
     Json(req): Json<QuestionMeta>,
 ) -> AppResult<Json<QuestionGrades>> {
-    let mut exam = load_exam_or_404(&s, &name).await?;
+    // Hold the lock across load-modify-write so a concurrent metadata edit to the
+    // same question can't clobber this one (lost update). Pure DB work, no I/O.
+    let conn = s.db().await;
+    let mut exam = store::load_exam(&conn, &name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
     {
         let q = exam.ensure_question(&col);
         if let Some(x) = req.exam_question {
@@ -888,11 +899,14 @@ async fn put_question(
         }
     }
     let q = exam.questions.get(&col).cloned().ok_or_else(|| no_question(&col))?;
-    let conn = s.db().await;
-    store::upsert_question_row(&conn, &name, &col, &q).await?;
-    // Linking to a global question id makes prior grades sharable as ICL examples.
-    store::sync_question_grades_to_pool(&conn, &name, &col).await?;
-    store::touch(&conn, &name).await?;
+    store::transaction(&conn, async {
+        store::upsert_question_row(&conn, &name, &col, &q).await?;
+        // Linking to a global question id makes prior grades sharable as ICL examples.
+        store::sync_question_grades_to_pool(&conn, &name, &col).await?;
+        store::touch(&conn, &name).await?;
+        Ok::<_, AppError>(())
+    })
+    .await?;
     store::load_question(&conn, &name, &col)
         .await?
         .map(Json)
@@ -1141,6 +1155,7 @@ struct QuestionConfigUpdate {
 struct ResultsResponse {
     results: Vec<StudentResult>,
     distribution: HashMap<String, usize>,
+    stats: Option<scheme::GradeStats>,
     total_students: usize,
     complete: usize,
     has_scheme: bool,
@@ -1206,11 +1221,13 @@ fn compute_results(
     }
 
     let distribution = scheme::distribution(&results);
+    let stats = scheme::stats(&results);
     let complete = results.iter().filter(|r| r.complete).count();
     let total_students = results.len();
     ResultsResponse {
         results,
         distribution,
+        stats,
         total_students,
         complete,
         has_scheme: true,
@@ -1245,7 +1262,12 @@ async fn put_questions_config(
     Path(name): Path<String>,
     Json(updates): Json<Vec<QuestionConfigUpdate>>,
 ) -> AppResult<Json<Exam>> {
-    let mut exam = load_exam_or_404(&s, &name).await?;
+    // Hold the lock across load-modify-write (pure DB, no I/O) and write all
+    // question rows in one transaction so the config update is atomic.
+    let conn = s.db().await;
+    let mut exam = store::load_exam(&conn, &name)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
     for u in &updates {
         let q = exam.ensure_question(&u.col);
         q.var = u.var.clone();
@@ -1268,8 +1290,7 @@ async fn put_questions_config(
             }
         }
     }
-    {
-        let conn = s.db().await;
+    store::transaction(&conn, async {
         for u in &updates {
             let qc = exam
                 .questions
@@ -1279,8 +1300,13 @@ async fn put_questions_config(
             store::upsert_question_row(&conn, &name, &u.col, &qc).await?;
         }
         store::touch(&conn, &name).await?;
-    }
-    Ok(Json(load_exam_or_404(&s, &name).await?))
+        Ok::<_, AppError>(())
+    })
+    .await?;
+    store::load_exam(&conn, &name)
+        .await?
+        .map(Json)
+        .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))
 }
 
 async fn get_results(
@@ -1302,6 +1328,7 @@ async fn get_results(
         None => ResultsResponse {
             results: Vec::new(),
             distribution: HashMap::new(),
+            stats: None,
             total_students: rows.len(),
             complete: 0,
             has_scheme: false,
@@ -1464,66 +1491,73 @@ async fn import_apply(
     );
 
     let mut summary = ImportSummary::default();
-    for irow in &irows {
-        let id = irow.get(&req.id_column).cloned().unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        if !roster_ids.contains(&id) {
-            summary.unknown_ids += 1;
-            continue;
-        }
-        for m in &req.mappings {
-            let incoming = irow.get(&m.column).cloned().unwrap_or_default();
-            if !domain::is_meaningful(&incoming) {
-                summary.skipped += 1;
+    // One transaction for the whole apply: a mid-loop failure rolls back rather
+    // than leaving a half-applied import.
+    store::transaction(&conn, async {
+        for irow in &irows {
+            let id = irow.get(&req.id_column).cloned().unwrap_or_default();
+            if id.is_empty() {
                 continue;
             }
-            let input_text = exam
-                .questions
-                .get(&m.output_col)
-                .and_then(|q| roster_by_id.get(&id).and_then(|r| r.get(&q.input_column)))
-                .cloned()
-                .unwrap_or_default();
-            match store::get_graded(&conn, &name, &m.output_col, &id).await? {
-                Some((existing, existing_source)) if !grades_equal(&existing, &incoming) => {
-                    summary.conflict += 1;
-                    store::add_conflict(
-                        &conn,
-                        &name,
-                        &domain::GradeConflict {
-                            output_col: m.output_col.clone(),
-                            row_id: id.clone(),
-                            existing_grade: existing,
-                            existing_source,
-                            incoming_grade: incoming.clone(),
-                            incoming_source: label.clone(),
-                            input_text,
-                            timestamp: store::now_iso(),
-                        },
-                    )
-                    .await?;
+            if !roster_ids.contains(&id) {
+                summary.unknown_ids += 1;
+                continue;
+            }
+            for m in &req.mappings {
+                let incoming = irow.get(&m.column).cloned().unwrap_or_default();
+                if !domain::is_meaningful(&incoming) {
+                    summary.skipped += 1;
+                    continue;
                 }
-                other => {
-                    if other.is_some() {
-                        // Identical grade already present: leave it (and its
-                        // source provenance) untouched.
-                        summary.same += 1;
-                    } else {
-                        summary.new += 1;
-                        let item = GradedItem {
-                            row_id: id.clone(),
-                            input_text,
-                            grade: incoming.clone(),
-                            timestamp: store::now_iso(),
-                        };
-                        store::put_graded_item(&conn, &name, &m.output_col, &item, &label, "").await?;
+                let input_text = exam
+                    .questions
+                    .get(&m.output_col)
+                    .and_then(|q| roster_by_id.get(&id).and_then(|r| r.get(&q.input_column)))
+                    .cloned()
+                    .unwrap_or_default();
+                match store::get_graded(&conn, &name, &m.output_col, &id).await? {
+                    Some((existing, existing_source)) if !grades_equal(&existing, &incoming) => {
+                        summary.conflict += 1;
+                        store::add_conflict(
+                            &conn,
+                            &name,
+                            &domain::GradeConflict {
+                                output_col: m.output_col.clone(),
+                                row_id: id.clone(),
+                                existing_grade: existing,
+                                existing_source,
+                                incoming_grade: incoming.clone(),
+                                incoming_source: label.clone(),
+                                input_text,
+                                timestamp: store::now_iso(),
+                            },
+                        )
+                        .await?;
+                    }
+                    other => {
+                        if other.is_some() {
+                            // Identical grade already present: leave it (and its
+                            // source provenance) untouched.
+                            summary.same += 1;
+                        } else {
+                            summary.new += 1;
+                            let item = GradedItem {
+                                row_id: id.clone(),
+                                input_text,
+                                grade: incoming.clone(),
+                                timestamp: store::now_iso(),
+                            };
+                            store::put_graded_item(&conn, &name, &m.output_col, &item, &label, "")
+                                .await?;
+                        }
                     }
                 }
             }
         }
-    }
-    store::touch(&conn, &name).await?;
+        store::touch(&conn, &name).await?;
+        Ok::<_, AppError>(())
+    })
+    .await?;
     Ok(Json(summary))
 }
 

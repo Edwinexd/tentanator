@@ -88,6 +88,11 @@ pub struct StudentResult {
     pub complete: bool,
 }
 
+/// Round to 2 decimals (banker-free, half-away-from-zero via `f64::round`).
+fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 fn install_groupsum(
     ctx: &mut HashMapContext,
     questions: &[QuestionConfig],
@@ -159,10 +164,12 @@ pub fn compute_student(
         install_groupsum(&mut ctx, questions, &var_points);
     }
 
-    // Named aggregate vars, in order.
+    // Named aggregate vars, in order. Round each to 2 decimals before it feeds
+    // later vars and the rule guards, so binary-float noise can't drop a value
+    // below a band threshold (mirrors the legacy `round(total, 2)`).
     let mut vars_out: HashMap<String, f64> = HashMap::new();
     for sv in &scheme.vars {
-        let v = eval_number_with_context(&sv.expr, &ctx).unwrap_or(0.0);
+        let v = round2(eval_number_with_context(&sv.expr, &ctx).unwrap_or(0.0));
         let _ = ctx.set_value(sv.name.clone(), Value::Float(v));
         vars_out.insert(sv.name.clone(), v);
     }
@@ -172,11 +179,13 @@ pub fn compute_student(
     } else {
         scheme.total_var.as_str()
     };
-    let total = vars_out
-        .get(total_var)
-        .copied()
-        .or_else(|| eval_number_with_context(total_var, &ctx).ok())
-        .unwrap_or(0.0);
+    let total = round2(
+        vars_out
+            .get(total_var)
+            .copied()
+            .or_else(|| eval_number_with_context(total_var, &ctx).ok())
+            .unwrap_or(0.0),
+    );
 
     // Guarded rules, first match wins.
     let mut grade = if scheme.default_grade.is_empty() {
@@ -240,6 +249,42 @@ pub fn distribution(results: &[StudentResult]) -> HashMap<String, usize> {
         *d.entry(r.grade.clone()).or_insert(0) += 1;
     }
     d
+}
+
+/// Summary statistics over student total points.
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
+pub struct GradeStats {
+    pub mean: f64,
+    pub median: f64,
+    pub min: f64,
+    pub max: f64,
+    pub stdev: f64,
+}
+
+/// Summary statistics over student totals. `None` when there are no results.
+pub fn stats(results: &[StudentResult]) -> Option<GradeStats> {
+    if results.is_empty() {
+        return None;
+    }
+    let mut totals: Vec<f64> = results.iter().map(|r| r.total).collect();
+    totals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let n = totals.len();
+    let sum: f64 = totals.iter().sum();
+    let mean = sum / n as f64;
+    let median = if n % 2 == 1 {
+        totals[n / 2]
+    } else {
+        (totals[n / 2 - 1] + totals[n / 2]) / 2.0
+    };
+    let variance = totals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    Some(GradeStats {
+        mean: round2(mean),
+        median: round2(median),
+        min: totals[0],
+        max: totals[n - 1],
+        stdev: round2(variance.sqrt()),
+    })
 }
 
 #[cfg(test)]

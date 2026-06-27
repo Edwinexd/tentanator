@@ -85,7 +85,7 @@ pub fn maximin_sample(data: &[(String, Vec<f32>)], n: usize) -> Vec<String> {
         .min_by(|&a, &b| {
             dist(&x[a], &centroid)
                 .partial_cmp(&dist(&x[b], &centroid))
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .unwrap();
 

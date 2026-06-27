@@ -267,6 +267,26 @@ pub async fn exam_exists(conn: &Connection, name: &str) -> AppResult<bool> {
     Ok(r.next().await?.is_some())
 }
 
+/// Run `body` inside a BEGIN/COMMIT, rolling back on error. `body` must use the
+/// same connection and must not open its own transaction (the single shared
+/// connection means nested BEGIN would error).
+pub async fn transaction<Fut, T>(conn: &Connection, body: Fut) -> AppResult<T>
+where
+    Fut: std::future::Future<Output = AppResult<T>>,
+{
+    conn.execute("BEGIN", ()).await?;
+    match body.await {
+        Ok(v) => {
+            conn.execute("COMMIT", ()).await?;
+            Ok(v)
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", ()).await;
+            Err(e)
+        }
+    }
+}
+
 pub async fn insert_exam(conn: &Connection, exam: &Exam) -> AppResult<()> {
     conn.execute("BEGIN", ()).await?;
     let res = insert_exam_inner(conn, exam).await;
@@ -362,14 +382,17 @@ pub async fn put_graded_item(
     source: &str,
     session: &str,
 ) -> AppResult<()> {
-    conn.execute(
-        "DELETE FROM graded_items WHERE exam = ? AND output_col = ? AND row_id = ?",
-        (exam, col, item.row_id.as_str()),
-    )
-    .await?;
+    // Single-statement upsert so the write is atomic (avoids a DELETE/INSERT
+    // window) and safe to call inside an outer transaction.
     conn.execute(
         "INSERT INTO graded_items (exam, output_col, row_id, input_text, grade, timestamp, source, session) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+         ON CONFLICT(exam, output_col, row_id) DO UPDATE SET \
+            input_text = excluded.input_text, \
+            grade = excluded.grade, \
+            timestamp = excluded.timestamp, \
+            source = excluded.source, \
+            session = excluded.session",
         (
             exam,
             col,
@@ -390,15 +413,17 @@ pub async fn put_graded_item(
 }
 
 /// Interpret a pre-filled output-cell value as a grade. A numeric value is taken
-/// as-is; a dash (`-`) means no points awarded and is treated as `0` (so
-/// comment/feedback questions count as graded). Anything else - empty,
-/// `Requires grading`, `N/A` - is left ungraded (`None`).
+/// as-is (comma decimals like `3,5` are normalized to `3.5`); a dash (`-`) means
+/// no points awarded and is treated as `0` (so comment/feedback questions count
+/// as graded). Anything else - empty, `Requires grading`, `N/A` - is left
+/// ungraded (`None`).
 fn prefilled_grade(cell: &str) -> Option<String> {
     let t = cell.trim();
     if t == "-" {
         return Some("0".to_string());
     }
-    crate::grade::evaluate_grade(t).map(|_| t.to_string())
+    let normalized = t.replace(',', ".");
+    crate::grade::evaluate_grade(&normalized).map(|_| normalized)
 }
 
 /// Row ids that already have a grade for `(exam, col)`.
