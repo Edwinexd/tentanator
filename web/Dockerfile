@@ -15,6 +15,11 @@ WORKDIR /app
 # assets), so no node_modules or source are needed at runtime.
 COPY --from=builder /app/.output ./.output
 
+# Run as the non-root user that ships with the node image. The Nitro server
+# needs no host-writable mounts, so dropping root is safe; the COPY'd .output
+# is world-readable.
+USER node
+
 EXPOSE 3000
 ENV NODE_ENV=production
 ENV PORT=3000

@@ -38,7 +38,7 @@ def latex_escape(s):
 
 def make_barcode(value, barcode_dir):
     os.makedirs(barcode_dir, exist_ok=True)
-    out = os.path.join(barcode_dir, re.sub(r"[^A-Za-z0-9_-]", "_", str(value)))
+    out = os.path.join(barcode_dir, _safe_name(value))
     png = out + ".png"
     if not os.path.exists(png):
         barcode.Code128(str(value), writer=ImageWriter()).save(
@@ -46,6 +46,11 @@ def make_barcode(value, barcode_dir):
             options={"write_text": False, "module_height": 6.0, "module_width": 0.22, "quiet_zone": 2},
         )
     return png
+
+
+def _safe_name(value):
+    """Sanitise a value for use as a single path segment (no traversal)."""
+    return re.sub(r"[^A-Za-z0-9_-]", "_", str(value))
 
 
 def _fmt_pts(p):
@@ -189,13 +194,16 @@ def detect_covers(pdf_path, id_regex=r"^(\d+)-(\d+)$"):
 
 
 _COVER_IDS_CACHE = {}
+_COVER_IDS_CACHE_MAX = 128
 
 
 def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
     """Distinct student ids whose cover page can be decoded from the scan.
 
     Rasterising + barcode decoding is expensive, so results are cached by
-    (path, mtime, size): repeated calls for an untouched file are free.
+    (path, mtime, size): repeated calls for an untouched file are free. The
+    cache is bounded to _COVER_IDS_CACHE_MAX entries, evicting the oldest
+    inserted key (FIFO via dict insertion order) when it would overflow.
     """
     try:
         stat = os.stat(scan_path)
@@ -205,6 +213,9 @@ def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
     cached = _COVER_IDS_CACHE.get(key)
     if cached is None:
         cached = sorted(detect_covers(scan_path, id_regex).keys())
+        if len(_COVER_IDS_CACHE) >= _COVER_IDS_CACHE_MAX:
+            oldest = next(iter(_COVER_IDS_CACHE))
+            del _COVER_IDS_CACHE[oldest]
         _COVER_IDS_CACHE[key] = cached
     return cached
 
@@ -226,7 +237,13 @@ def render_results(render_data, scanned_pdf_path, out_path, id_regex=r"^(\d+)-(\
                 out.pages.append(original.pages[covers[sid]])
             elif original is not None:
                 missing.append(sid)
-            pdf = compile_tex(build_tex_for_student(st, bdir), os.path.join(tmp, f"w_{sid}"))
+            # sid is sanitised for the work-dir name only; it must not contain
+            # path separators or ".." or it could escape the temp dir. The raw
+            # sid is still used as the barcode payload (build_tex_for_student).
+            pdf = compile_tex(
+                build_tex_for_student(st, bdir),
+                os.path.join(tmp, f"w_{_safe_name(sid)}"),
+            )
             with pikepdf.open(pdf) as sp:
                 out.pages.extend(sp.pages)
 

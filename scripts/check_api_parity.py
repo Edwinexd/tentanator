@@ -50,13 +50,38 @@ def normalize(path: str) -> str:
 
 
 def backend_routes() -> Set[Route]:
-    """Extract (method, path) pairs from the Axum router in routes.rs."""
+    """Extract (method, path) pairs from the Axum router in routes.rs.
+
+    Only a single flat ``Router::new()...with_state()`` span is parsed. If
+    routes are ever registered outside that span - via ``.nest(...)``,
+    ``.merge(...)``, or a second router - they would be invisible to every
+    surface and parity would pass while real routes are uncovered (a
+    false-pass, the worst failure for a parity gate). Two guards prevent that:
+    reject any ``.nest(``/``.merge(`` outright, and assert the number of
+    ``.route(`` occurrences in the whole file equals the number parsed here.
+    """
     src = ROUTES_RS.read_text(encoding="utf-8")
+    for combinator in (".nest(", ".merge("):
+        if combinator in src:
+            sys.exit(
+                f"{ROUTES_RS} uses '{combinator}'; this script only parses a single flat "
+                "Router::new()...with_state() span and would silently miss those routes. "
+                "Update backend_routes() to handle nested/merged routers before relying on it."
+            )
     body = re.search(r"Router::new\(\)(.*?)\.with_state\(", src, re.DOTALL)
     if not body:
         sys.exit(f"could not locate Router::new()..with_state() in {ROUTES_RS}")
+    chunks = body.group(1).split(".route(")[1:]
+    parsed = len(chunks)
+    total = src.count(".route(")
+    if parsed != total:
+        sys.exit(
+            f"{ROUTES_RS} has {total} '.route(' occurrence(s) but only {parsed} fall inside the "
+            "parsed Router::new()...with_state() span; routes are registered elsewhere and would "
+            "be missed. Update backend_routes() to cover them."
+        )
     routes: Set[Route] = set()
-    for chunk in body.group(1).split(".route(")[1:]:
+    for chunk in chunks:
         path_m = re.search(r'"([^"]+)"', chunk)
         if not path_m:
             continue
