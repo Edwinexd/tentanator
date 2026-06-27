@@ -15,6 +15,7 @@ import type { ExamSummary } from './generated/ExamSummary'
 import type { GradeConflict } from './generated/GradeConflict'
 import type { GradeRule } from './generated/GradeRule'
 import type { GradeScheme } from './generated/GradeScheme'
+import type { GradeStats } from './generated/GradeStats'
 import type { GlobalBankMatch } from './generated/GlobalBankMatch'
 import type { GradedItem } from './generated/GradedItem'
 import type { ImportResult } from './generated/ImportResult'
@@ -34,6 +35,7 @@ export type {
   GradeConflict,
   GradeRule,
   GradeScheme,
+  GradeStats,
   GlobalBankMatch,
   GradedItem,
   ImportResult,
@@ -57,6 +59,7 @@ const API_BASE: string =
 export interface ResultsResponse {
   results: StudentResult[]
   distribution: Record<string, number>
+  stats: GradeStats | null
   total_students: number
   complete: number
   has_scheme: boolean

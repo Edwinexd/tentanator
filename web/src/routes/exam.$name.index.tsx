@@ -95,23 +95,26 @@ function ExamView() {
   }
 
   useEffect(() => {
+    let active = true
     didInitCol.current = false
     api
       .getExam(name)
       .then((s) => {
+        if (!active) return [] as ExamRow[]
         setExam(s)
         setCourse(s.course ?? '')
         setRows([])
         setDetected(null)
         api
           .detectColumns(s.exam_file)
-          .then(setDetected)
-          .catch(() => setDetected(null))
+          .then((d) => { if (active) setDetected(d) })
+          .catch(() => { if (active) setDetected(null) })
         return api.examRows(s.exam_file)
       })
-      .then(setRows)
-      .catch((e: Error) => setError(e.message))
+      .then((r) => { if (active) setRows(r) })
+      .catch((e: Error) => { if (active) setError(e.message) })
     refreshSessions()
+    return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 

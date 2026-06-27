@@ -39,8 +39,10 @@ function PdfView() {
   )
 
   useEffect(() => {
-    void loadScans()
-  }, [loadScans])
+    let active = true
+    api.listExamScans(name).then((s) => { if (active) setScans(s) }).catch(() => {})
+    return () => { active = false }
+  }, [name])
 
   // Only scans whose decodable front-page count equals the student count may
   // supply cover pages; the rest are reported but not selectable.

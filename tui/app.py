@@ -31,6 +31,7 @@ from textual.widgets import (
     Select,
     SelectionList,
     Static,
+    Switch,
     TextArea,
 )
 from textual.widgets.selection_list import Selection
@@ -67,19 +68,17 @@ def sanitize_ident(s: str) -> str:
 
 def match_question(match: Dict[str, Any], language: Optional[str]) -> str:
     """Pick a GlobalBankMatch's question text for the (detected) language."""
+    # Swedish prefers q_se; English (and the default) prefers q_en.
     if language == "se":
         return match.get("q_se") or match.get("q_en") or ""
-    if language == "en":
-        return match.get("q_en") or match.get("q_se") or ""
     return match.get("q_en") or match.get("q_se") or ""
 
 
 def match_answer(match: Dict[str, Any], language: Optional[str]) -> str:
     """Pick a GlobalBankMatch's sample answer for the (detected) language."""
+    # Swedish prefers ans_se; English (and the default) prefers ans_en.
     if language == "se":
         return match.get("ans_se") or match.get("ans_en") or ""
-    if language == "en":
-        return match.get("ans_en") or match.get("ans_se") or ""
     return match.get("ans_en") or match.get("ans_se") or ""
 
 
@@ -763,6 +762,9 @@ class GradingScreen(TentanatorScreen):
         self.index: int = 0
         self.suggestion: Optional[Dict[str, Any]] = None
         self.active_session: str = "default"
+        # When on, advancing to an ungraded response auto-requests an AI
+        # suggestion (mirrors the web client's "auto AI-suggest" toggle).
+        self.auto_suggest: bool = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -793,6 +795,8 @@ class GradingScreen(TentanatorScreen):
             yield Button("AI suggest [a]", id="suggest")
             yield Button("save", id="save", variant="primary")
             yield Button("skip [s]", id="skip")
+            yield Label("auto", id="autolabel")
+            yield Switch(value=self.auto_suggest, id="autosuggest")
         yield Footer()
 
     async def on_mount(self) -> None:
@@ -857,6 +861,13 @@ class GradingScreen(TentanatorScreen):
         if event.value is not Select.BLANK:
             self.active_session = str(event.value)
 
+    @on(Switch.Changed, "#autosuggest")
+    def _autosuggest_changed(self, event: Switch.Changed) -> None:
+        self.auto_suggest = event.value
+        # Turning it on mid-question kicks off a suggestion for the current row.
+        if self.auto_suggest and self.suggestion is None and self.ungraded:
+            self.run_worker(self.action_suggest())
+
     @on(Input.Submitted, "#course")
     async def _save_course(self) -> None:
         course = self.query_one("#course", Input).value.strip()
@@ -915,9 +926,11 @@ class GradingScreen(TentanatorScreen):
         input_col = question.get("input_column", "")
         total = len(self.rows)
         graded = len(question.get("graded_items", []))
+        icl_ready = False
         try:
             status = await self.api.question_status(self.exam_name, self.current_col)
-            icl = "yes" if status.get("icl_ready") else "no"
+            icl_ready = bool(status.get("icl_ready"))
+            icl = "yes" if icl_ready else "no"
         except APIError:
             icl = "?"
         self.query_one("#aibox", Static).update("")
@@ -939,6 +952,10 @@ class GradingScreen(TentanatorScreen):
             f"(graded {graded}/{total}, ICL ready: {icl})  -  id: {rid}"
         )
         self.query_one("#response", Static).update(f"[dim]({words} words)[/dim]\n\n{text}")
+        # Auto AI-suggest on advance: only when enabled, ICL is ready, and we
+        # have not already fetched a suggestion for this response.
+        if self.auto_suggest and icl_ready and self.suggestion is None:
+            await self.action_suggest()
 
     def _current_row_id(self) -> Optional[str]:
         if not self.ungraded:
@@ -1007,6 +1024,7 @@ class GradingScreen(TentanatorScreen):
     def action_skip(self) -> None:
         if self.ungraded:
             self.index = (self.index + 1) % len(self.ungraded)
+            self.suggestion = None
             self.run_worker(self.show_current())
 
     @on(Button.Pressed, "#skip")
@@ -1581,14 +1599,18 @@ class ImportScreen(TentanatorScreen):
                         f"existing={c['existing_grade']}  incoming={c['incoming_grade']}",
                         classes="conflictlabel",
                     ),
-                    Button(f"Keep {c['existing_grade']}", id=f"keep-{i}"),
-                    Button(f"Use {c['incoming_grade']}", id=f"use-{i}"),
+                    Button(f"Keep {c['existing_grade']}", id=f"keep-{i}",
+                           classes="conflictbtn"),
+                    Button(f"Use {c['incoming_grade']}", id=f"use-{i}",
+                           classes="conflictbtn"),
                     classes="conflictrow",
                 )
             )
 
-    @on(Button.Pressed)
+    @on(Button.Pressed, ".conflictbtn")
     async def _conflict_button(self, event: Button.Pressed) -> None:
+        # Scoped to the dynamically-created conflict buttons; the static
+        # #preview / #apply buttons have their own dedicated handlers.
         bid = event.button.id or ""
         if bid.startswith("keep-"):
             await self._resolve(int(bid[len("keep-"):]), "existing")
@@ -1651,11 +1673,19 @@ class ResultsScreen(TentanatorScreen):
             return
         dist = data.get("distribution", {})
         dist_str = "  ".join(f"{g}:{c}" for g, c in sorted(dist.items()))
-        self.query_one("#summary", Static).update(
+        summary = (
             f"{len(data.get('results', []))} students  |  "
             f"complete {data.get('complete', 0)}/{data.get('total_students', 0)}  |  "
             f"{data.get('unresolved_conflicts', 0)} unresolved conflict(s)  |  {dist_str}"
         )
+        stats = data.get("stats")
+        if stats:
+            summary += (
+                f"\nmean {stats.get('mean', 0):.1f}  median {stats.get('median', 0):.1f}  "
+                f"min {stats.get('min', 0):.1f}  max {stats.get('max', 0):.1f}  "
+                f"σ {stats.get('stdev', 0):.1f}"
+            )
+        self.query_one("#summary", Static).update(summary)
         for r in data.get("results", []):
             est = ", ".join(r.get("estimated", [])) or "-"
             table.add_row(
@@ -1819,8 +1849,12 @@ class TentanatorTUI(App):
     #aibox { padding: 1 2; height: auto; }
     #gradebar { height: auto; padding: 1 1; }
     #gradeinput { width: 1fr; }
+    #autolabel { padding: 1 0; }
     Button { margin: 0 1; }
-    #promptbox { width: 60; height: auto; padding: 1 2; border: thick $primary; background: $surface; }
+    #promptbox {
+        width: 60; height: auto; padding: 1 2;
+        border: thick $primary; background: $surface;
+    }
     #promptactions { height: auto; padding-top: 1; }
     .cfgrow { height: auto; padding: 0 1; }
     .cfgcol { width: 22; padding: 1 0; }

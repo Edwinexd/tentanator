@@ -65,6 +65,7 @@ function SchemeView() {
   const [info, setInfo] = useState<string | null>(null)
 
   useEffect(() => {
+    let active = true
     api
       .getExam(name)
       .then(async (e) => {
@@ -82,8 +83,8 @@ function SchemeView() {
             position: q?.position ?? 0,
           }
         })
-        setCfg(cfgList)
-        setSchemeText(e.scheme ? await api.schemeEmit(e.scheme) : '')
+        if (active) setCfg(cfgList)
+        if (active) setSchemeText(e.scheme ? await api.schemeEmit(e.scheme) : '')
         return api.examRows(e.exam_file)
       })
       .then((rows) => {
@@ -96,9 +97,10 @@ function SchemeView() {
           }
           if (max > 0) m[col] = max
         }
-        setColMax(m)
+        if (active) setColMax(m)
       })
-      .catch((e: Error) => setError(e.message))
+      .catch((e: Error) => { if (active) setError(e.message) })
+    return () => { active = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [name])
 
@@ -266,7 +268,7 @@ function SchemeView() {
                         className="h-7 w-16"
                         type="number"
                         value={r.max_points ?? ''}
-                        onChange={(e) => setRow(i, { max_points: e.target.value ? Number(e.target.value) : undefined })}
+                        onChange={(e) => setRow(i, { max_points: e.target.value ? Number(e.target.value) : 0 })}
                       />
                     </td>
                     <td className="p-2">
@@ -274,7 +276,7 @@ function SchemeView() {
                         className="h-7 w-16"
                         type="number"
                         value={r.position ?? ''}
-                        onChange={(e) => setRow(i, { position: e.target.value ? Number(e.target.value) : undefined })}
+                        onChange={(e) => setRow(i, { position: e.target.value ? Number(e.target.value) : 0 })}
                       />
                     </td>
                   </tr>

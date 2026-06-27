@@ -30,7 +30,12 @@ function ResultsView() {
   const [info, setInfo] = useState<string | null>(null)
 
   useEffect(() => {
-    api.getResults(name).then(setData).catch((e: Error) => setError(e.message))
+    let active = true
+    api
+      .getResults(name)
+      .then((r) => { if (active) setData(r) })
+      .catch((e: Error) => { if (active) setError(e.message) })
+    return () => { active = false }
   }, [name])
 
   async function doExport(fn: (n: string) => Promise<void>) {
@@ -68,7 +73,7 @@ function ResultsView() {
     }
   }
 
-  const d = data?.distribution
+  const stats = data?.stats
   return (
     <div className="mx-auto max-w-4xl space-y-4 p-8">
       <ExamNav name={name} active="results" />
@@ -109,16 +114,28 @@ function ResultsView() {
           <div className="flex flex-wrap gap-2">
             <Badge variant="secondary">{data.results.length} students</Badge>
             <Badge variant="secondary">{data.unresolved_conflicts} unresolved conflict(s)</Badge>
-            {d && (
+            {stats != null && (
               <>
-                {d.mean != null && <Badge variant="secondary">mean {d.mean.toFixed(1)}</Badge>}
-                {d.median != null && <Badge variant="secondary">median {d.median.toFixed(1)}</Badge>}
-                {d.min != null && <Badge variant="secondary">min {d.min.toFixed(1)}</Badge>}
-                {d.max != null && <Badge variant="secondary">max {d.max.toFixed(1)}</Badge>}
-                {d.stdev != null && <Badge variant="secondary">σ {d.stdev.toFixed(1)}</Badge>}
+                <Badge variant="secondary">mean {stats.mean.toFixed(1)}</Badge>
+                <Badge variant="secondary">median {stats.median.toFixed(1)}</Badge>
+                <Badge variant="secondary">min {stats.min.toFixed(1)}</Badge>
+                <Badge variant="secondary">max {stats.max.toFixed(1)}</Badge>
+                <Badge variant="secondary">σ {stats.stdev.toFixed(1)}</Badge>
               </>
             )}
           </div>
+
+          {Object.keys(data.distribution).length > 0 && (
+            <div className="flex flex-wrap gap-2">
+              {Object.entries(data.distribution)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([grade, count]) => (
+                  <Badge key={grade} variant="outline">
+                    {grade}: {count}
+                  </Badge>
+                ))}
+            </div>
+          )}
 
           <Card>
             <CardHeader>

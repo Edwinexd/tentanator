@@ -41,14 +41,18 @@ function ImportView() {
   }
 
   useEffect(() => {
-    api.getExam(name).then(setExam).catch((e: Error) => setError(e.message))
-    api.listExamFiles().then(setExams).catch(() => {})
+    let active = true
+    api.getExam(name).then((e) => { if (active) setExam(e) }).catch((e: Error) => { if (active) setError(e.message) })
+    api.listExamFiles().then((f) => { if (active) setExams(f) }).catch(() => {})
     loadConflicts()
+    return () => { active = false }
   }, [name])
 
   useEffect(() => {
     if (!file) { setColumns([]); return }
-    api.examColumns(file).then(setColumns).catch((e: Error) => setError(e.message))
+    let active = true
+    api.examColumns(file).then((c) => { if (active) setColumns(c) }).catch((e: Error) => { if (active) setError(e.message) })
+    return () => { active = false }
   }, [file])
 
   async function onUpload(e: ChangeEvent<HTMLInputElement>) {
