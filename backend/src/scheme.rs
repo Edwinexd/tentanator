@@ -93,6 +93,59 @@ fn round2(v: f64) -> f64 {
     (v * 100.0).round() / 100.0
 }
 
+/// Append `.0` to bare integer literals so `evalexpr` never does integer
+/// division: `7 / 18` would otherwise evaluate to `0` (i64 division), silently
+/// breaking estimators like `7 / 18 * mc`. Numbers that are part of an
+/// identifier (`hci_mc`), already floats (`3.5`), or inside a string literal
+/// (`groupsum("2024")`) are left untouched.
+fn floatify_int_literals(expr: &str) -> String {
+    let chars: Vec<char> = expr.chars().collect();
+    let mut out = String::with_capacity(expr.len() + 8);
+    let mut i = 0;
+    let mut in_string = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if in_string {
+            out.push(c);
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        let prev = i.checked_sub(1).map(|p| chars[p]);
+        let starts_number = c.is_ascii_digit()
+            && !matches!(prev, Some(p) if p.is_alphanumeric() || p == '_' || p == '.');
+        if starts_number {
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_digit() {
+                i += 1;
+            }
+            for &d in &chars[start..i] {
+                out.push(d);
+            }
+            // Skip a real float (`3.5`) or an identifier suffix (`1e5`); only a
+            // pure integer literal gets the `.0`.
+            let next = chars.get(i).copied();
+            let is_float_or_ident =
+                matches!(next, Some(n) if n == '.' || n.is_alphabetic() || n == '_');
+            if !is_float_or_ident {
+                out.push_str(".0");
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn install_groupsum(
     ctx: &mut HashMapContext,
     questions: &[QuestionConfig],
@@ -154,7 +207,7 @@ pub fn compute_student(
         let Some(expr) = q.estimate.as_ref().filter(|e| !e.trim().is_empty()) else {
             continue;
         };
-        if let Ok(v) = eval_number_with_context(expr, &ctx) {
+        if let Ok(v) = eval_number_with_context(&floatify_int_literals(expr), &ctx) {
             var_points.insert(q.var.clone(), v);
             let _ = ctx.set_value(q.var.clone(), Value::Float(v));
             estimated.push(q.var.clone());
@@ -169,7 +222,7 @@ pub fn compute_student(
     // below a band threshold (mirrors the legacy `round(total, 2)`).
     let mut vars_out: HashMap<String, f64> = HashMap::new();
     for sv in &scheme.vars {
-        let v = round2(eval_number_with_context(&sv.expr, &ctx).unwrap_or(0.0));
+        let v = round2(eval_number_with_context(&floatify_int_literals(&sv.expr), &ctx).unwrap_or(0.0));
         let _ = ctx.set_value(sv.name.clone(), Value::Float(v));
         vars_out.insert(sv.name.clone(), v);
     }
@@ -194,7 +247,7 @@ pub fn compute_student(
         scheme.default_grade.clone()
     };
     for rule in &scheme.rules {
-        if eval_boolean_with_context(&rule.when, &ctx).unwrap_or(false) {
+        if eval_boolean_with_context(&floatify_int_literals(&rule.when), &ctx).unwrap_or(false) {
             grade = rule.grade.clone();
             break;
         }
@@ -400,6 +453,31 @@ mod tests {
         let r = compute_student("s", &scheme, &qs, &points);
         assert_eq!(r.total, 2.0);
         assert_eq!(r.grade, "PASS");
+    }
+
+    #[test]
+    fn floatify_only_touches_bare_integers() {
+        assert_eq!(floatify_int_literals("7 / 18 * hci_mc"), "7.0 / 18.0 * hci_mc");
+        assert_eq!(floatify_int_literals("total >= 45 - lenience"), "total >= 45.0 - lenience");
+        assert_eq!(floatify_int_literals("q1 + q2 >= 3.5"), "q1 + q2 >= 3.5");
+        assert_eq!(floatify_int_literals("groupsum(\"2024\")"), "groupsum(\"2024\")");
+    }
+
+    #[test]
+    fn estimator_uses_float_division() {
+        // `7 / 18 * hci_mc` is integer division (-> 0) under raw evalexpr; floatify
+        // makes it 7/18*18 = 7, so hci_total is 18 + 7 = 25.
+        let mut qs = pvt_questions();
+        qs[3].estimate = Some("7 / 18 * hci_mc".into());
+        let points = HashMap::from([
+            ("se_mc".to_string(), Some(15.0)),
+            ("hci_mc".to_string(), Some(18.0)),
+            ("se_essay".to_string(), Some(6.0)),
+            ("hci_essay".to_string(), None),
+        ]);
+        let r = compute_student("s", &pvt_scheme(), &qs, &points);
+        assert!(r.estimated.contains(&"hci_essay".to_string()));
+        assert!((r.vars["hci_total"] - 25.0).abs() < 1e-9, "got {}", r.vars["hci_total"]);
     }
 
     #[test]

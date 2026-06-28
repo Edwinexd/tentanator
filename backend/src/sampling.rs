@@ -2,7 +2,9 @@
 //! `random` and `maximin` (max-spread / farthest-first), ported from
 //! `maximin_sampling` in the original Python `sampling.py`.
 
+use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
+use rand::SeedableRng;
 use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -21,12 +23,13 @@ impl Algorithm {
     }
 }
 
-/// Random selection of `n` ids (all if `n >= len`).
+/// Random selection of `n` ids (all if `n >= len`). Seeded so the same inputs
+/// reproduce the same sample across runs (mirrors the legacy `default_rng(42)`).
 pub fn random_sample(ids: &[String], n: usize) -> Vec<String> {
     if n >= ids.len() {
         return ids.to_vec();
     }
-    let mut rng = rand::thread_rng();
+    let mut rng = StdRng::seed_from_u64(42);
     let mut chosen: Vec<String> = ids
         .choose_multiple(&mut rng, n)
         .cloned()
@@ -60,7 +63,11 @@ pub fn maximin_sample(data: &[(String, Vec<f32>)], n: usize) -> Vec<String> {
         .map(|(_, v)| {
             let mut row = vec![0.0f64; dim];
             for (j, val) in v.iter().take(dim).enumerate() {
-                row[j] = *val as f64;
+                // Drop non-finite components: a single NaN/Inf would make a point's
+                // distance NaN, which `fold(INFINITY, min)` masks to +inf and would
+                // then be picked first, poisoning the whole maximin selection.
+                let f = *val as f64;
+                row[j] = if f.is_finite() { f } else { 0.0 };
             }
             row
         })
@@ -163,5 +170,26 @@ mod tests {
         let data: Vec<(String, Vec<f32>)> =
             vec![("a".into(), vec![1.0]), ("b".into(), vec![2.0])];
         assert_eq!(maximin_sample(&data, 5).len(), 2);
+    }
+
+    #[test]
+    fn random_is_deterministic() {
+        let ids: Vec<String> = (0..20).map(|i| i.to_string()).collect();
+        assert_eq!(random_sample(&ids, 5), random_sample(&ids, 5));
+    }
+
+    #[test]
+    fn maximin_survives_non_finite_components() {
+        // A corrupted embedding (NaN) must not be selected first or panic; the
+        // result is still n distinct genuine ids.
+        let data: Vec<(String, Vec<f32>)> = vec![
+            ("a".into(), vec![0.0, 0.0]),
+            ("b".into(), vec![0.1, 0.1]),
+            ("c".into(), vec![10.0, 10.0]),
+            ("bad".into(), vec![f32::NAN, f32::INFINITY]),
+            ("e".into(), vec![20.0, 20.0]),
+        ];
+        let picked = maximin_sample(&data, 3);
+        assert_eq!(picked.len(), 3);
     }
 }

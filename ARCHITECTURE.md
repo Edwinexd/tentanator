@@ -314,7 +314,7 @@ find it).
 cd backend && TENTANATOR_DATA_DIR=.. cargo run        # or cargo run --release
 
 # 2. TUI (separate terminal)
-cd tui && python3 -m venv .venv && source .venv/bin/activate
+cd tui && python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 TENTANATOR_API=http://127.0.0.1:8787 python app.py
 

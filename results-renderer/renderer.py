@@ -185,11 +185,13 @@ def detect_covers(pdf_path, id_regex=r"^(\d+)-(\d+)$"):
         for i, fn in enumerate(files):
             for r in zxingcpp.read_barcodes(Image.open(os.path.join(tmp, fn))):
                 m = pat.match(r.text)
-                if m:
-                    sid = m.group(m.lastindex) if m.lastindex else r.text.strip()
-                    covers.setdefault(sid, i)
-                else:
-                    covers.setdefault(r.text.strip(), i)
+                if not m:
+                    # Not a student-id barcode (logo QR, page tracker, garbled
+                    # decode): ignore it. Counting it as a cover would inflate the
+                    # count that gates cover-eligibility and mis-match real students.
+                    continue
+                sid = m.group(m.lastindex) if m.lastindex else r.text.strip()
+                covers.setdefault(sid, i)
     return covers
 
 

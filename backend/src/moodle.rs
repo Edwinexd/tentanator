@@ -123,23 +123,44 @@ fn merge_attempts(attempts: &[&HashMap<String, String>]) -> HashMap<String, Stri
     out
 }
 
+/// Moodle appends an `Overall average` summary row (no `Daisy ID`). Detect it by
+/// its label so it's dropped even if a future export gives it an id, and so a
+/// real student who merely lacks a Daisy ID is not mistaken for it and silently
+/// discarded.
+fn is_summary_row(r: &HashMap<String, String>) -> bool {
+    ["Last name", "First name"].iter().any(|c| {
+        r.get(*c)
+            .map(|v| v.trim().eq_ignore_ascii_case("Overall average"))
+            .unwrap_or(false)
+    })
+}
+
 /// Group rows by `Daisy ID`, merging each id's attempts into one row. Returns the
-/// ids in first-seen order alongside the merged rows. Rows without a `Daisy ID`
-/// (e.g. the trailing `Overall average`) are skipped.
+/// keys in first-seen order alongside the merged rows. The `Overall average`
+/// summary row is dropped; a real student with no `Daisy ID` can't be joined to
+/// responses but is kept (under a per-row synthetic key) rather than silently
+/// lost.
 fn combine_attempts(
     rows: &[HashMap<String, String>],
 ) -> (Vec<String>, HashMap<String, HashMap<String, String>>) {
     let mut order: Vec<String> = Vec::new();
     let mut groups: HashMap<String, Vec<&HashMap<String, String>>> = HashMap::new();
-    for r in rows {
-        let id = r.get(DAISY_ID).map(|s| s.trim()).unwrap_or("");
-        if id.is_empty() {
+    for (i, r) in rows.iter().enumerate() {
+        if is_summary_row(r) {
             continue;
         }
-        if !groups.contains_key(id) {
-            order.push(id.to_string());
+        let id = r.get(DAISY_ID).map(|s| s.trim()).unwrap_or("");
+        // Real IDs are numeric, so the NUL-prefixed synthetic key can't collide
+        // with one; it keeps a blank-id student as a distinct (un-joinable) row.
+        let key = if id.is_empty() {
+            format!("\u{0}noid:{i}")
+        } else {
+            id.to_string()
+        };
+        if !groups.contains_key(&key) {
+            order.push(key.clone());
         }
-        groups.entry(id.to_string()).or_default().push(r);
+        groups.entry(key).or_default().push(r);
     }
     let merged = groups
         .into_iter()
@@ -160,8 +181,8 @@ pub fn combine(grades_path: &Path, responses_path: &Path) -> AppResult<CombineRe
 
     // A student who hit technical issues and re-sat shows up as several rows with
     // the same Daisy ID in both files. Collapse those attempts into one row each
-    // (the trailing "Overall average" row, having no Daisy ID, is skipped here),
-    // then join the two sides by Daisy ID so row order between files is irrelevant.
+    // (the trailing "Overall average" summary row is dropped by label), then join
+    // the two sides by Daisy ID so row order between files is irrelevant.
     let (grade_order, grades_by_id) = combine_attempts(&grades);
     let (_, responses_by_id) = combine_attempts(&responses);
     let merged_grades: Vec<&HashMap<String, String>> = grade_order
@@ -304,6 +325,28 @@ mod tests {
         // First grades row is Bob (id 7); his response joins from the responses file.
         assert_eq!(out.rows[0], vec!["7", "Beta", "Bob", "bob-answer", "2"]);
         assert_eq!(out.rows[1], vec!["3", "Alpha", "Ann", "ann-answer", "1"]);
+    }
+
+    #[test]
+    fn keeps_student_without_daisy_id_drops_summary() {
+        // Gabe has no Daisy ID (so no response can join), but his grade must not be
+        // dropped; only the labelled "Overall average" row is removed.
+        let grades = tmp("grades-noid.csv");
+        std::fs::write(
+            &grades,
+            "Daisy ID,Last name,First name,Q. 1 /1.00\n\
+             7,Beta,Bob,2\n\
+             ,Gamma,Gabe,1\n\
+             ,Overall average,,1.5\n",
+        )
+        .unwrap();
+        let responses = tmp("responses-noid.csv");
+        std::fs::write(&responses, "Daisy ID,Response 1\n7,bob-answer\n").unwrap();
+
+        let out = combine(&grades, &responses).unwrap();
+        assert_eq!(out.students, 2, "blank-id student kept, summary row dropped");
+        assert_eq!(out.rows[0], vec!["7", "Beta", "Bob", "bob-answer", "2"]);
+        assert_eq!(out.rows[1], vec!["", "Gamma", "Gabe", "", "1"]);
     }
 
     #[test]

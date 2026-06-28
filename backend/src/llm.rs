@@ -361,7 +361,10 @@ fn extract_grade_from_answer(answer: &str) -> Option<String> {
     trailing_grade(hay)
 }
 
-/// Longest trailing substring that parses as a grade, whitespace removed.
+/// Longest trailing substring that parses as a grade, whitespace removed. Only
+/// trusted when nothing earlier in the reply is itself a number: otherwise text
+/// like "5 out of 10" would yield the wrong figure (10). A label prefix
+/// ("Grade: 4") carries no earlier digit and still resolves.
 fn trailing_grade(hay: &str) -> Option<String> {
     let chars: Vec<char> = hay.chars().collect();
     for start in 0..chars.len() {
@@ -375,6 +378,9 @@ fn trailing_grade(hay: &str) -> Option<String> {
             continue;
         }
         if evaluate_grade(trimmed).is_some() {
+            if chars[..start].iter().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
             return Some(trimmed.chars().filter(|c| !c.is_whitespace()).collect());
         }
     }
@@ -400,6 +406,16 @@ mod tests {
     fn unparseable_is_none() {
         assert_eq!(extract_grade_from_answer("I cannot grade this answer."), None);
         assert_eq!(extract_grade_from_answer(""), None);
+    }
+
+    #[test]
+    fn trailing_grade_ignores_earlier_numbers() {
+        // A multi-number sentence must not have its last figure mistaken for the
+        // grade; fail safe to no suggestion instead.
+        assert_eq!(extract_grade_from_answer("5 out of 10"), None);
+        assert_eq!(extract_grade_from_answer("I give 8, the example got 4"), None);
+        // A label prefix with no earlier digit still resolves.
+        assert_eq!(extract_grade_from_answer("Grade: 4").as_deref(), Some("4"));
     }
 
     #[test]

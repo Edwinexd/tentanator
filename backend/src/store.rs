@@ -91,6 +91,10 @@ pub fn list_pdf_files(config: &Config) -> Vec<String> {
 }
 
 pub fn resolve_exam_path(config: &Config, exam_file: &str) -> Option<PathBuf> {
+    // Reduce to a bare filename. Exam files live flat in exams_dir, so a crafted
+    // path segment (e.g. `..%2f..%2fetc%2fpasswd`, which Axum percent-decodes into
+    // the `{file}` capture) must not be able to escape the directory.
+    let exam_file = Path::new(exam_file).file_name().and_then(|s| s.to_str())?;
     let direct = config.exams_dir().join(exam_file);
     if direct.exists() {
         return Some(direct);
@@ -466,10 +470,15 @@ pub async fn seed_prefilled_grades(
         for row in rows {
             let row_id = crate::domain::row_id(row, &exam.id_columns);
             let input_text = row.get(&input_col).cloned().unwrap_or_default();
+            // A row already graded (manually, imported, or by AI) is never
+            // clobbered, regardless of what the source sheet's output cell holds.
+            if already.contains(&row_id) {
+                continue;
+            }
             let (grade, source) =
                 if let Some(g) = prefilled_grade(&row.get(col).cloned().unwrap_or_default()) {
                     (g, "prefilled")
-                } else if !crate::domain::is_meaningful(&input_text) && !already.contains(&row_id) {
+                } else if !crate::domain::is_meaningful(&input_text) {
                     ("0".to_string(), "auto-zero")
                 } else {
                     continue;
@@ -1804,6 +1813,44 @@ mod tests {
         // Idempotent: a second pass seeds nothing new.
         let again = seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await.unwrap();
         assert_eq!(again, 0);
+    }
+
+    #[tokio::test]
+    async fn seed_does_not_clobber_graded_prefilled_cell() {
+        let conn = mem_conn().await;
+        let mut exam = sample_exam("pf");
+        exam.ensure_question("g");
+        insert_exam(&conn, &exam).await.unwrap();
+
+        // Source sheet ships a prefilled value (3) in the output cell for r1.
+        let rows = vec![HashMap::from([
+            ("id".to_string(), "r1".to_string()),
+            ("ans".to_string(), "an answer".to_string()),
+            ("g".to_string(), "3".to_string()),
+        ])];
+
+        // First seed picks up the prefilled 3.
+        let seeded = seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await.unwrap();
+        assert_eq!(seeded, 1);
+
+        // Grader overrides it to 5 in-app.
+        put_graded_item(
+            &conn,
+            "pf",
+            "g",
+            &GradedItem { row_id: "r1".into(), input_text: "an answer".into(), grade: "5".into(), timestamp: now_iso() },
+            "manual",
+            "default",
+        )
+        .await
+        .unwrap();
+
+        // Re-seeding (runs on every results/export view) must not revert to 3.
+        let again = seed_prefilled_grades(&conn, &exam, &rows, &exam.output_columns).await.unwrap();
+        assert_eq!(again, 0, "already-graded prefilled cell is not reseeded");
+        let q = load_question(&conn, "pf", "g").await.unwrap().unwrap();
+        let g = q.graded_items.iter().find(|i| i.row_id == "r1").unwrap();
+        assert_eq!(g.grade, "5", "manual override survives reseed");
     }
 
     #[test]
