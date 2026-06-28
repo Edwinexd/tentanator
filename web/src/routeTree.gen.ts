@@ -15,6 +15,7 @@ import { Route as CombineRouteImport } from './routes/combine'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as ExamNameRouteImport } from './routes/exam.$name'
 import { Route as ExamNameIndexRouteImport } from './routes/exam.$name.index'
+import { Route as ExamNameTableRouteImport } from './routes/exam.$name.table'
 import { Route as ExamNameSchemeRouteImport } from './routes/exam.$name.scheme'
 import { Route as ExamNameResultsRouteImport } from './routes/exam.$name.results'
 import { Route as ExamNamePdfRouteImport } from './routes/exam.$name.pdf'
@@ -50,6 +51,11 @@ const ExamNameIndexRoute = ExamNameIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ExamNameRoute,
 } as any)
+const ExamNameTableRoute = ExamNameTableRouteImport.update({
+  id: '/table',
+  path: '/table',
+  getParentRoute: () => ExamNameRoute,
+} as any)
 const ExamNameSchemeRoute = ExamNameSchemeRouteImport.update({
   id: '/scheme',
   path: '/scheme',
@@ -81,6 +87,7 @@ export interface FileRoutesByFullPath {
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
+  '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name/': typeof ExamNameIndexRoute
 }
 export interface FileRoutesByTo {
@@ -92,6 +99,7 @@ export interface FileRoutesByTo {
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
+  '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name': typeof ExamNameIndexRoute
 }
 export interface FileRoutesById {
@@ -105,6 +113,7 @@ export interface FileRoutesById {
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
+  '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name/': typeof ExamNameIndexRoute
 }
 export interface FileRouteTypes {
@@ -119,6 +128,7 @@ export interface FileRouteTypes {
     | '/exam/$name/pdf'
     | '/exam/$name/results'
     | '/exam/$name/scheme'
+    | '/exam/$name/table'
     | '/exam/$name/'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -130,6 +140,7 @@ export interface FileRouteTypes {
     | '/exam/$name/pdf'
     | '/exam/$name/results'
     | '/exam/$name/scheme'
+    | '/exam/$name/table'
     | '/exam/$name'
   id:
     | '__root__'
@@ -142,6 +153,7 @@ export interface FileRouteTypes {
     | '/exam/$name/pdf'
     | '/exam/$name/results'
     | '/exam/$name/scheme'
+    | '/exam/$name/table'
     | '/exam/$name/'
   fileRoutesById: FileRoutesById
 }
@@ -197,6 +209,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ExamNameIndexRouteImport
       parentRoute: typeof ExamNameRoute
     }
+    '/exam/$name/table': {
+      id: '/exam/$name/table'
+      path: '/table'
+      fullPath: '/exam/$name/table'
+      preLoaderRoute: typeof ExamNameTableRouteImport
+      parentRoute: typeof ExamNameRoute
+    }
     '/exam/$name/scheme': {
       id: '/exam/$name/scheme'
       path: '/scheme'
@@ -233,6 +252,7 @@ interface ExamNameRouteChildren {
   ExamNamePdfRoute: typeof ExamNamePdfRoute
   ExamNameResultsRoute: typeof ExamNameResultsRoute
   ExamNameSchemeRoute: typeof ExamNameSchemeRoute
+  ExamNameTableRoute: typeof ExamNameTableRoute
   ExamNameIndexRoute: typeof ExamNameIndexRoute
 }
 
@@ -241,6 +261,7 @@ const ExamNameRouteChildren: ExamNameRouteChildren = {
   ExamNamePdfRoute: ExamNamePdfRoute,
   ExamNameResultsRoute: ExamNameResultsRoute,
   ExamNameSchemeRoute: ExamNameSchemeRoute,
+  ExamNameTableRoute: ExamNameTableRoute,
   ExamNameIndexRoute: ExamNameIndexRoute,
 }
 

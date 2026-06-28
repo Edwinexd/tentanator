@@ -1,13 +1,14 @@
 import { Link } from '@tanstack/react-router'
 import { Button } from '#/components/ui/button'
 
-export type Tab = 'grade' | 'import' | 'scheme' | 'results' | 'pdf'
+export type Tab = 'grade' | 'import' | 'scheme' | 'results' | 'table' | 'pdf'
 
 const tabs: { id: Tab; label: string; to: string }[] = [
   { id: 'grade', label: 'Grade', to: '/exam/$name' },
   { id: 'import', label: 'Import', to: '/exam/$name/import' },
   { id: 'scheme', label: 'Scheme', to: '/exam/$name/scheme' },
   { id: 'results', label: 'Results', to: '/exam/$name/results' },
+  { id: 'table', label: 'Table', to: '/exam/$name/table' },
   { id: 'pdf', label: 'PDF', to: '/exam/$name/pdf' },
 ]
 

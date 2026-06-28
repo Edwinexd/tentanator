@@ -244,7 +244,10 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   (`GET …/conflicts`, `POST …/conflicts/resolve`).
 - **Exports**: `…/export` (full graded xlsx), `…/export/daisy` (Daisy `id,grade`
   xlsx), `…/export/csv` (per-question), `…/export/results-pdf` (proxies the
-  renderer). `GET …/render-data` is the per-student contract the renderer reads.
+  renderer). `GET …/render-data` is the per-student contract the renderer reads;
+  both clients also render it as an in-app **Table** view (per-student ×
+  per-question points, drill into each response, auto-zeroed columns included) so
+  a graded exam can be inspected without exporting.
 
 ### Results-PDF renderer (`results-renderer/`)
 

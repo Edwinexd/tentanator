@@ -78,6 +78,10 @@ function ExamView() {
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Ephemeral (not persisted): extra columns to show alongside the response so
+  // you can read another answer — e.g. a student-comments column — while grading.
+  const [allColumns, setAllColumns] = useState<string[]>([])
+  const [contextCols, setContextCols] = useState<string[]>([])
 
   function refreshSessions(select?: string) {
     return api
@@ -110,6 +114,10 @@ function ExamView() {
           .detectColumns(s.exam_file)
           .then((d) => { if (active) setDetected(d) })
           .catch(() => { if (active) setDetected(null) })
+        api
+          .examColumns(s.exam_file)
+          .then((c) => { if (active) setAllColumns(c) })
+          .catch(() => { if (active) setAllColumns([]) })
         return api.examRows(s.exam_file)
       })
       .then((r) => { if (active) setRows(r) })
@@ -644,6 +652,60 @@ function ExamView() {
               {current[inputCol]}
             </CardContent>
           </Card>
+
+          {allColumns.length > 0 && (
+            <Accordion type="single" collapsible>
+              <AccordionItem value="context-columns">
+                <AccordionTrigger className="text-sm text-muted-foreground">
+                  Show other answers
+                  {contextCols.length ? ` · ${contextCols.length} shown` : ''}
+                </AccordionTrigger>
+                <AccordionContent className="space-y-2">
+                  <p className="text-xs text-muted-foreground">
+                    Pick columns to read alongside this response (e.g. a comments
+                    column). Not saved — clears when you leave.
+                  </p>
+                  <div className="flex flex-wrap gap-x-4 gap-y-1">
+                    {allColumns
+                      .filter((c) => c !== inputCol)
+                      .map((c) => (
+                        <label
+                          key={c}
+                          className="flex items-center gap-1.5 text-sm"
+                        >
+                          <Checkbox
+                            checked={contextCols.includes(c)}
+                            onCheckedChange={(v) =>
+                              setContextCols((cur) =>
+                                v === true
+                                  ? [...cur, c]
+                                  : cur.filter((x) => x !== c),
+                              )
+                            }
+                          />
+                          <span className="truncate" title={c}>{c}</span>
+                        </label>
+                      ))}
+                  </div>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          )}
+
+          {contextCols
+            .filter((c) => c !== inputCol)
+            .map((c) => (
+              <div key={c} className="space-y-1">
+                <Label className="text-xs text-muted-foreground">{c}</Label>
+                <Card>
+                  <CardContent className="max-h-48 overflow-auto whitespace-pre-wrap p-3 text-sm">
+                    {current[c] || (
+                      <span className="text-muted-foreground">(no value)</span>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            ))}
 
           <div className="min-h-[4.75rem] rounded-md border-l-4 border-primary bg-muted/50 p-3 text-sm">
             {curSuggestion ? (

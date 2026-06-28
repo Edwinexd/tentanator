@@ -736,11 +736,13 @@ class GradingScreen(TentanatorScreen):
         ("s", "skip", "Skip"),
         ("e", "export", "Export"),
         ("r", "results", "Results"),
+        ("b", "table", "Table"),
         ("c", "scheme", "Scheme"),
         ("m", "import_grades", "Import"),
         ("p", "pdf", "PDF"),
         ("t", "qsettings", "Question settings"),
         ("g", "graded", "Graded items"),
+        ("x", "context_cols", "Context cols"),
     ]
 
     def __init__(self, exam_name: str) -> None:
@@ -749,11 +751,15 @@ class GradingScreen(TentanatorScreen):
         self.exam: Dict[str, Any] = {}
         self.rows: List[Dict[str, str]] = []
         self.id_columns: List[str] = []
+        self.all_columns: List[str] = []
         self.current_col: Optional[str] = None
         self.ungraded: List[Dict[str, str]] = []
         self.index: int = 0
         self.suggestion: Optional[Dict[str, Any]] = None
         self.active_session: str = "default"
+        # Ephemeral (not persisted): extra columns to show under the response so
+        # another answer (e.g. a student-comments column) is visible while grading.
+        self.context_cols: List[str] = []
         # When on, advancing to an ungraded response auto-requests an AI
         # suggestion (mirrors the web client's "auto AI-suggest" toggle).
         self.auto_suggest: bool = False
@@ -765,8 +771,10 @@ class GradingScreen(TentanatorScreen):
             yield Button("scheme [c]", id="nav-scheme")
             yield Button("import [m]", id="nav-import")
             yield Button("results [r]", id="nav-results")
+            yield Button("table [b]", id="nav-table")
             yield Button("pdf [p]", id="nav-pdf")
             yield Button("graded [g]", id="nav-graded")
+            yield Button("context [x]", id="nav-context")
             yield Button("+questions", id="nav-addq")
         with Horizontal(id="metabar"):
             yield Label("Course:")
@@ -795,6 +803,7 @@ class GradingScreen(TentanatorScreen):
         try:
             self.exam = await self.api.get_exam(self.exam_name)
             self.rows = await self.api.exam_rows(self.exam["exam_file"])
+            self.all_columns = await self.api.exam_columns(self.exam["exam_file"])
         except APIError as exc:
             self.notify(str(exc), severity="error", timeout=8)
             return
@@ -943,7 +952,13 @@ class GradingScreen(TentanatorScreen):
             f"[b]{self.current_col}[/b]  -  {self.index + 1}/{len(self.ungraded)} ungraded  "
             f"(graded {graded}/{total}, ICL ready: {icl})  -  id: {rid}"
         )
-        self.query_one("#response", Static).update(f"[dim]({words} words)[/dim]\n\n{text}")
+        body = f"[dim]({words} words)[/dim]\n\n{text}"
+        for col in self.context_cols:
+            if col == input_col:
+                continue
+            value = row.get(col, "") or "[dim](no value)[/dim]"
+            body += f"\n\n[b]--- {col} ---[/b]\n{value}"
+        self.query_one("#response", Static).update(body)
         # Auto AI-suggest on advance: only when enabled, ICL is ready, and we
         # have not already fetched a suggestion for this response.
         if self.auto_suggest and icl_ready and self.suggestion is None:
@@ -1106,6 +1121,36 @@ class GradingScreen(TentanatorScreen):
     @on(Button.Pressed, "#nav-results")
     def action_results(self) -> None:
         self._open(ResultsScreen(self.exam_name))
+
+    @on(Button.Pressed, "#nav-table")
+    def action_table(self) -> None:
+        self._open(TableScreen(self.exam_name))
+
+    @on(Button.Pressed, "#nav-context")
+    def _context_btn(self) -> None:
+        self.action_context_cols()
+
+    @work
+    async def action_context_cols(self) -> None:
+        """Pick extra columns to show under the response (ephemeral, not saved)."""
+        if not self.all_columns:
+            self.notify("No columns to show", severity="warning")
+            return
+        current_input = ""
+        if self.current_col:
+            current_input = (
+                self.exam.get("questions", {})
+                .get(self.current_col, {})
+                .get("input_column", "")
+            )
+        choices = [c for c in self.all_columns if c != current_input]
+        chosen = await self.app.push_screen_wait(
+            ColumnPickerScreen(choices, list(self.context_cols))
+        )
+        if chosen is None:
+            return
+        self.context_cols = chosen
+        await self.show_current()
 
     @on(Button.Pressed, "#nav-pdf")
     def action_pdf(self) -> None:
@@ -1821,6 +1866,150 @@ class PdfScreen(TentanatorScreen):
         self.dismiss(None)
 
 
+class ColumnPickerScreen(ModalScreen[Optional[List[str]]]):
+    """Multi-select of exam columns; dismisses with the chosen list (or None)."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, columns: List[str], selected: List[str]) -> None:
+        super().__init__()
+        self.columns = columns
+        self.selected = set(selected)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="pickbox"):
+            yield Label("Show columns alongside the response (space to toggle)")
+            yield SelectionList(id="collist")
+            with Horizontal(id="pickactions"):
+                yield Button("Apply", id="apply", variant="primary")
+                yield Button("Cancel [esc]", id="cancel")
+
+    def on_mount(self) -> None:
+        sl = self.query_one("#collist", SelectionList)
+        sl.add_options(
+            [Selection(c, c, c in self.selected) for c in self.columns]
+        )
+        sl.focus()
+
+    @on(Button.Pressed, "#apply")
+    def _apply(self) -> None:
+        sl = self.query_one("#collist", SelectionList)
+        self.dismiss(list(sl.selected))
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class StudentResponsesScreen(ModalScreen[None]):
+    """Read-only per-question responses + points for one student."""
+
+    BINDINGS = [("escape", "cancel", "Cancel")]
+
+    def __init__(self, student: Dict[str, Any]) -> None:
+        super().__init__()
+        self.student = student
+
+    def compose(self) -> ComposeResult:
+        sid = self.student.get("id", "")
+        grade = self.student.get("grade", "") or "-"
+        total = self.student.get("total", 0.0)
+        with Vertical(id="respbox"):
+            yield Label(f"{sid}  -  grade {grade}  -  total {total:.1f}")
+            with VerticalScroll(id="respscroll"):
+                yield Static(self._render(), id="resptext")
+            yield Button("Close [esc]", id="cancel")
+
+    def _render(self) -> str:
+        parts: List[str] = []
+        for i, q in enumerate(self.student.get("questions", [])):
+            label = q.get("label") or f"Q{i + 1}"
+            pts = q.get("points")
+            pts_s = "-" if pts is None else f"{pts}/{q.get('max', 0)}"
+            est = " [dim](estimated)[/dim]" if q.get("estimated") else ""
+            response = q.get("response", "") or "[dim](no response)[/dim]"
+            parts.append(f"[b]{label}[/b]  {pts_s}{est}\n{response}")
+        return "\n\n".join(parts)
+
+    @on(Button.Pressed, "#cancel")
+    def _cancel(self) -> None:
+        self.dismiss(None)
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class TableScreen(TentanatorScreen):
+    """Full graded matrix: every student x question; drill into the responses."""
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def __init__(self, exam_name: str) -> None:
+        super().__init__()
+        self.exam_name = exam_name
+        self.students: List[Dict[str, Any]] = []
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            yield Label("Table", id="title")
+            yield Static(
+                "[dim]Points per question (incl. auto-zeroed; * = estimated). "
+                "Enter on a row to read the responses.[/dim]"
+            )
+            yield Static("", id="tablesummary")
+            yield DataTable(id="fulltable")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#fulltable", DataTable)
+        table.cursor_type = "row"
+        try:
+            data = await self.api.render_data(self.exam_name)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.students = data.get("students", [])
+        if not self.students:
+            self.query_one("#tablesummary", Static).update("No students in this exam yet.")
+            return
+        headers = self.students[0].get("questions", [])
+        labels = [q.get("label") or f"Q{i + 1}" for i, q in enumerate(headers)]
+        table.add_columns("ID", "Grade", "Total", *labels)
+        for i, student in enumerate(self.students):
+            cells = [self._fmt_points(q) for q in student.get("questions", [])]
+            table.add_row(
+                student.get("id", ""),
+                student.get("grade", "") or "-",
+                f"{student.get('total', 0.0):.1f}",
+                *cells,
+                key=str(i),
+            )
+        self.query_one("#tablesummary", Static).update(f"{len(self.students)} students")
+
+    @staticmethod
+    def _fmt_points(question: Dict[str, Any]) -> str:
+        pts = question.get("points")
+        if pts is None:
+            return "-"
+        star = "*" if question.get("estimated") else ""
+        return f"{pts}/{question.get('max', 0)}{star}"
+
+    @on(DataTable.RowSelected)
+    def _row_selected(self, event: DataTable.RowSelected) -> None:
+        key = event.row_key.value if event.row_key is not None else None
+        if key is None:
+            return
+        student = self.students[int(key)]
+        self.app.push_screen(StudentResponsesScreen(student))
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
 class TentanatorTUI(App):
     """Top-level app holding the shared API client."""
 
@@ -1854,6 +2043,19 @@ class TentanatorTUI(App):
     .conflictrow { height: auto; padding: 0 1; }
     .conflictlabel { width: 1fr; padding: 1 0; }
     #resultstable { height: 1fr; margin: 0 1; }
+    #fulltable { height: 1fr; margin: 0 1; }
+    #tablesummary { padding: 0 2; }
+    #pickbox {
+        width: 70; height: 80%; padding: 1 2;
+        border: thick $primary; background: $surface;
+    }
+    #collist { height: 1fr; border: round $primary; margin: 1 0; }
+    #pickactions { height: auto; }
+    #respbox {
+        width: 90%; height: 85%; padding: 1 2;
+        border: thick $primary; background: $surface;
+    }
+    #respscroll { height: 1fr; border: round $primary; margin: 1 0; }
     #banktable { height: 1fr; margin: 0 1; }
     #searchquery { width: 1fr; }
     #searchlang, #matchlang { width: 22; }
