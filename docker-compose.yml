@@ -1,0 +1,72 @@
+# Tentanator: Rust backend + TanStack web + Textual TUI.
+#
+#   docker compose up -d --build      # start backend + web
+#   open http://localhost:3000        # web UI
+#   docker compose run --rm tui       # interactive TUI
+#   docker compose down               # stop
+#
+# The repo root is the data dir (mounted at /workspace): exam files go in
+# ./exams/, graded exports land in ./graded_exams/, the DB is ./.tentanator.db,
+# and legacy data (.tentanator_sessions/, workspaces/, global_bank/) is imported
+# from there on startup. API keys (optional) go in .env. See .env.example.
+
+services:
+  backend:
+    build: ./backend
+    image: tentanator-backend
+    ports:
+      - "8787:8787"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TENTANATOR_DATA_DIR: /workspace
+      TENTANATOR_BIND: 0.0.0.0:8787
+      RENDERER_URL: http://renderer:8000
+    volumes:
+      - .:/workspace
+    restart: unless-stopped
+
+  # Results-PDF renderer (LaTeX answer sheets + scanned cover pages).
+  renderer:
+    build: ./results-renderer
+    image: tentanator-results-renderer
+    environment:
+      TENTANATOR_API: http://backend:8787
+      TENTANATOR_DATA_DIR: /workspace
+    volumes:
+      - .:/workspace
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./web
+      # The web image build generates its DTO types from the backend Rust
+      # structs (ts-rs); the bindings stage compiles them from this source.
+      additional_contexts:
+        backend: ./backend
+    image: tentanator-web
+    ports:
+      - "3000:3000"
+    # The browser (on the host) talks to the backend's published port.
+    environment:
+      VITE_API_BASE: http://localhost:8787
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # Interactive terminal client. Not started by `up`; run on demand:
+  #   docker compose run --rm tui
+  tui:
+    build: ./tui
+    image: tentanator-tui
+    environment:
+      TENTANATOR_API: http://backend:8787
+    depends_on:
+      - backend
+    profiles:
+      - tui
+    stdin_open: true
+    tty: true

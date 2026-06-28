@@ -1,0 +1,22 @@
+node_modules
+.DS_Store
+dist
+dist-ssr
+*.local
+.env
+.nitro
+.tanstack
+.wrangler
+.output
+.vinxi
+__unconfig*
+todos.json
+
+# The repo-root .gitignore is a Python template whose `lib/` rule otherwise eats
+# our API client at src/lib/. Re-include the source dir.
+!src/lib/
+
+# DTO types generated from the Rust backend structs via ts-rs. Not committed —
+# produced by `cd backend && cargo test export_bindings` (and in CI from the
+# backend job's artifact). Source of truth is the Rust structs.
+src/lib/generated/

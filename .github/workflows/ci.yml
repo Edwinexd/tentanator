@@ -1,0 +1,134 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  pull_request:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  backend-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - name: cargo test
+        working-directory: backend
+        # `cargo test` also runs the ts-rs export_bindings_* tests, which
+        # (re)generate web/src/lib/generated/*.ts from the Rust structs.
+        run: cargo test --locked
+      - name: upload generated TS types
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-types
+          path: web/src/lib/generated/
+
+  web-check:
+    runs-on: ubuntu-latest
+    # The DTO types under web/src/lib/generated/ are produced by the backend job
+    # (ts-rs) and not committed, so pull them in before type-checking.
+    needs: backend-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: install
+        working-directory: web
+        run: npm ci
+      - name: generated TS types
+        uses: actions/download-artifact@v4
+        with:
+          name: generated-types
+          path: web/src/lib/generated/
+      - name: typecheck
+        working-directory: web
+        run: |
+          npm run generate-routes
+          npx tsc --noEmit
+
+  py-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: byte-compile tui + renderer
+        run: python -m py_compile tui/*.py results-renderer/*.py
+      - name: API contract parity (backend <-> tui <-> web)
+        run: python scripts/check_api_parity.py
+
+  images:
+    needs: [backend-test, web-check, py-check]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { service: backend, context: ./backend }
+          # The web image generates its DTO types from the backend Rust structs
+          # (ts-rs) in a bindings stage, so the build needs the backend source
+          # as an extra build context.
+          - { service: web, context: ./web, build-contexts: backend=./backend }
+          - { service: tui, context: ./tui }
+          - { service: results-renderer, context: ./results-renderer }
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lowercase owner
+        id: owner
+        run: echo "name=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Bootstrapping buildx pulls moby/buildkit from Docker Hub, which the gha
+      # layer cache can't cache and which intermittently times out on shared
+      # runners. Pull it with retries so a transient blip doesn't fail the build.
+      - name: Bootstrap buildx
+        run: |
+          for attempt in 1 2 3; do
+            docker buildx inspect --bootstrap && exit 0
+            echo "buildx bootstrap attempt $attempt failed; retrying in 15s" >&2
+            sleep 15
+          done
+          exit 1
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ steps.owner.outputs.name }}/tentanator-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=sha
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build-contexts }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
