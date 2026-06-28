@@ -80,12 +80,52 @@ pub fn detect_question_pairs(columns: &[String]) -> DetectedColumns {
     }
 }
 
+/// Sanitize an arbitrary column name into a valid scheme identifier: non
+/// alphanumeric/underscore runs become `_`, and a leading digit/empty string is
+/// prefixed with `_`. Lowercased so the same column always maps to one var.
+pub fn sanitize_ident(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect::<String>()
+        .to_lowercase();
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// Suggested scheme variable for a question column. `Points 3` -> `p3`,
+/// `Response 3` -> `r3`; any other column is sanitized to a valid identifier.
+/// The backend owns this so both clients show the same default without each
+/// reimplementing the `Points N` regex.
+pub fn default_var(col: &str) -> String {
+    let lo = col.trim().to_lowercase();
+    if let Some(n) = points_index(&lo) {
+        format!("p{n}")
+    } else if let Some(n) = response_index(&lo) {
+        format!("r{n}")
+    } else {
+        sanitize_ident(col)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn default_var_derives_from_points_and_response() {
+        assert_eq!(default_var("Points 1"), "p1");
+        assert_eq!(default_var("Point 12"), "p12");
+        assert_eq!(default_var("points3"), "p3");
+        assert_eq!(default_var("Response 2"), "r2");
+        assert_eq!(default_var("Daisy ID"), "daisy_id");
+        assert_eq!(default_var("3a Score"), "_3a_score");
     }
 
     #[test]

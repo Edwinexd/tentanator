@@ -58,14 +58,6 @@ def is_meaningful(text: str) -> bool:
     return t not in ("", "-", "N/A")
 
 
-def sanitize_ident(s: str) -> str:
-    """Best-effort default scheme var for a column (backend re-derives on save)."""
-    out = "".join(c if (c.isalnum() or c == "_") else "_" for c in s)
-    if not out or out[0].isdigit():
-        out = "_" + out
-    return out.lower()
-
-
 def match_question(match: Dict[str, Any], language: Optional[str]) -> str:
     """Pick a GlobalBankMatch's question text for the (detected) language."""
     # Swedish prefers q_se; English (and the default) prefers q_en.
@@ -1348,11 +1340,13 @@ class SchemeScreen(TentanatorScreen):
         super().__init__()
         self.exam_name = exam_name
         self.cfg_rows: List[Tuple[str, Dict[str, Input]]] = []
+        # Loaded position per column, preserved on save (not editable here).
+        self.cfg_pos: Dict[str, int] = {}
 
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Label("Question config (var / group / type / max / pos)", id="title")
+            yield Label("Question config (var / group / type / max)", id="title")
             yield Vertical(id="cfgrows")
             with Horizontal(id="cfg-actions"):
                 yield Button("Save config", id="saveconfig")
@@ -1378,12 +1372,13 @@ class SchemeScreen(TentanatorScreen):
         container = self.query_one("#cfgrows", Vertical)
         for col in exam.get("output_columns", []):
             q = questions.get(col, {})
+            # The backend supplies the suggested var (Points N -> pN); show it as-is.
+            self.cfg_pos[col] = int(q.get("position", 0) or 0)
             inputs = {
-                "var": Input(value=q.get("var") or sanitize_ident(col), classes="cfgin"),
+                "var": Input(value=q.get("var", ""), classes="cfgin"),
                 "group": Input(value=q.get("group", ""), classes="cfgin"),
                 "qtype": Input(value=q.get("qtype", ""), classes="cfgin"),
                 "max": Input(value=str(q.get("max_points", 0) or 0), classes="cfgnum"),
-                "pos": Input(value=str(q.get("position", 0) or 0), classes="cfgnum"),
             }
             self.cfg_rows.append((col, inputs))
             await container.mount(
@@ -1393,7 +1388,6 @@ class SchemeScreen(TentanatorScreen):
                     inputs["group"],
                     inputs["qtype"],
                     inputs["max"],
-                    inputs["pos"],
                     classes="cfgrow",
                 )
             )
@@ -1414,17 +1408,13 @@ class SchemeScreen(TentanatorScreen):
                 max_points = float(inputs["max"].value or 0)
             except ValueError:
                 max_points = 0.0
-            try:
-                position = int(float(inputs["pos"].value or 0))
-            except ValueError:
-                position = 0
             updates.append({
                 "col": col,
                 "var": inputs["var"].value.strip(),
                 "group": inputs["group"].value.strip(),
                 "qtype": inputs["qtype"].value.strip(),
                 "max_points": max_points,
-                "position": position,
+                "position": self.cfg_pos.get(col, 0),
             })
         return updates
 

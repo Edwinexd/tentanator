@@ -36,7 +36,7 @@ import {
   TableHeader,
   TableRow,
 } from '#/components/ui/table'
-import { Save, Eye, Play } from 'lucide-react'
+import { Save, Eye, Play, Wand2 } from 'lucide-react'
 
 export const Route = createFileRoute('/exam/$name/scheme')({ component: SchemeView })
 
@@ -53,6 +53,25 @@ function normQtype(v: string): string {
   return QTYPES.some((t) => t.v === lo) ? lo : ''
 }
 
+// A classic 100-point A-F scheme to start from. `total` is the sum of the
+// current question vars so it previews immediately; thresholds are the familiar
+// 90/80/70/60/50 bands the user then tunes to their exam.
+function starterScheme(vars: string[]): string {
+  const sum = vars.length > 0 ? vars.join(' + ') : '0'
+  return [
+    '# Starter scheme: total points -> A-F. Tune the thresholds to your exam.',
+    `total = ${sum}`,
+    'total_var: total',
+    'default_grade: F',
+    '',
+    'when total >= 90 -> A',
+    'when total >= 80 -> B',
+    'when total >= 70 -> C',
+    'when total >= 60 -> D',
+    'when total >= 50 -> E',
+  ].join('\n')
+}
+
 function SchemeView() {
   const { name } = Route.useParams()
   const [cfg, setCfg] = useState<QuestionConfigUpdate[]>([])
@@ -60,6 +79,7 @@ function SchemeView() {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkGroup, setBulkGroup] = useState('')
   const [bulkType, setBulkType] = useState('')
+  const [bulkMax, setBulkMax] = useState('')
   const [schemeText, setSchemeText] = useState('')
   const [preview, setPreview] = useState<ResultsResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -76,11 +96,14 @@ function SchemeView() {
           const q = questions[col]
           const maxGuess = colMax[col] ?? undefined
           return {
+            // The backend supplies the suggested var (Points N -> pN); no
+            // client-side guessing so the two clients can't drift.
             col,
-            var: q?.var ?? col.replace(/\s+/g, '_').toLowerCase(),
+            var: q?.var ?? '',
             group: q?.group ?? '',
             qtype: normQtype(q?.qtype ?? ''),
             max_points: q?.max_points ?? maxGuess ?? 0,
+            // Kept so saves don't reset it, but no longer surfaced in the editor.
             position: q?.position ?? 0,
           }
         })
@@ -163,7 +186,12 @@ function SchemeView() {
     }
   }
 
+  function loadStarter() {
+    setSchemeText(starterScheme(cfg.map((r) => r.var).filter(Boolean)))
+  }
+
   const scope = selected.size === 0 ? 'all' : `${selected.size} selected`
+  const schemeEmpty = !schemeText.trim()
 
   return (
     <PageShell>
@@ -176,11 +204,15 @@ function SchemeView() {
             Question config
             <Badge variant="secondary" className="text-xs">{scope}</Badge>
           </CardTitle>
-          <CardDescription>Configure each question's type, max points, and group</CardDescription>
+          <CardDescription>
+            Set each question's scheme variable (used in the grade scheme below), max points,
+            type, and optional group. Bulk actions apply to the selected rows, or all rows when
+            none are selected.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="flex flex-wrap items-center gap-2">
-            <Label className="text-sm">Bulk set group:</Label>
+            <Label className="text-sm">Group:</Label>
             <Input
               className="h-8 w-40"
               placeholder="group name"
@@ -195,7 +227,7 @@ function SchemeView() {
               Apply
             </Button>
 
-            <Label className="ml-2 text-sm">Bulk set type:</Label>
+            <Label className="ml-2 text-sm">Type:</Label>
             <Select value={bulkType} onValueChange={setBulkType}>
               <SelectTrigger className="h-8 w-auto">
                 <SelectValue placeholder="—" />
@@ -211,6 +243,30 @@ function SchemeView() {
             >
               Apply
             </Button>
+
+            <Label className="ml-2 text-sm">Max:</Label>
+            <Input
+              className="h-8 w-20"
+              type="number"
+              placeholder="0"
+              value={bulkMax}
+              onChange={(e) => setBulkMax(e.target.value)}
+            />
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => applyToSelected(() => ({ max_points: Number(bulkMax) || 0 }))}
+            >
+              Apply
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              title="Fill each question's max from the highest value seen in its column"
+              onClick={() => applyToSelected((r) => ({ max_points: colMax[r.col] ?? r.max_points }))}
+            >
+              Max from data
+            </Button>
           </div>
 
           <div className="overflow-x-auto">
@@ -224,11 +280,10 @@ function SchemeView() {
                     />
                   </th>
                   <th className="p-2 font-medium">Column</th>
-                  <th className="p-2 font-medium">Var</th>
+                  <th className="p-2 font-medium" title="Identifier used in the grade scheme (e.g. p1)">Var</th>
                   <th className="p-2 font-medium">Group</th>
                   <th className="p-2 font-medium">Type</th>
-                  <th className="p-2 font-medium">Max</th>
-                  <th className="p-2 font-medium">Pos</th>
+                  <th className="p-2 font-medium" title="Maximum points for this question">Max</th>
                 </tr>
               </thead>
               <tbody>
@@ -272,14 +327,6 @@ function SchemeView() {
                         onChange={(e) => setRow(i, { max_points: e.target.value ? Number(e.target.value) : 0 })}
                       />
                     </td>
-                    <td className="p-2">
-                      <Input
-                        className="h-7 w-16"
-                        type="number"
-                        value={r.position ?? ''}
-                        onChange={(e) => setRow(i, { position: e.target.value ? Number(e.target.value) : 0 })}
-                      />
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -305,12 +352,24 @@ function SchemeView() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {schemeEmpty && (
+            <Alert>
+              <AlertDescription className="flex flex-wrap items-center gap-2">
+                No scheme yet. Start from a classic 100-point A–F template, then adjust the
+                thresholds and variables to your exam.
+                <Button onClick={loadStarter} variant="outline" size="sm">
+                  <Wand2 className="mr-1 h-4 w-4" />
+                  Insert starter template
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           <textarea
             className="min-h-[200px] w-full rounded-md border border-input bg-transparent p-3 font-mono text-sm"
             value={schemeText}
             onChange={(e) => setSchemeText(e.target.value)}
           />
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <Button onClick={doPreview} variant="outline" size="sm">
               <Eye className="mr-1 h-4 w-4" />
               Preview
@@ -319,6 +378,12 @@ function SchemeView() {
               <Save className="mr-1 h-4 w-4" />
               Save scheme
             </Button>
+            {!schemeEmpty && (
+              <Button onClick={loadStarter} variant="ghost" size="sm" className="ml-auto">
+                <Wand2 className="mr-1 h-4 w-4" />
+                Reset to template
+              </Button>
+            )}
           </div>
         </CardContent>
       </Card>

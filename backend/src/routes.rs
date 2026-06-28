@@ -700,7 +700,17 @@ async fn get_exam(
     State(s): State<AppState>,
     Path(name): Path<String>,
 ) -> AppResult<Json<Exam>> {
-    Ok(Json(load_exam_or_404(&s, &name).await?))
+    let mut exam = load_exam_or_404(&s, &name).await?;
+    // Surface the suggested scheme var on every question so the clients render it
+    // without re-deriving the heuristic. In-memory only; persisted when the user
+    // saves the config.
+    for col in exam.output_columns.clone() {
+        let q = exam.ensure_question(&col);
+        if q.var.is_empty() {
+            q.var = detect::default_var(&col);
+        }
+    }
+    Ok(Json(exam))
 }
 
 async fn update_exam(
@@ -1162,21 +1172,12 @@ struct ResultsResponse {
     unresolved_conflicts: usize,
 }
 
-fn sanitize_ident(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
-        .collect();
-    if out.is_empty() || out.chars().next().unwrap().is_ascii_digit() {
-        out.insert(0, '_');
-    }
-    out
-}
-
-/// Variable name a question contributes to scheme expressions.
+/// Variable name a question contributes to scheme expressions. Falls back to the
+/// shared default (`Points N` -> `pN`, else sanitized) so an unconfigured
+/// question grades under the same var the editor shows.
 fn effective_var(col: &str, q: &QuestionGrades) -> String {
     if q.var.is_empty() {
-        sanitize_ident(col)
+        detect::default_var(col)
     } else {
         q.var.clone()
     }
