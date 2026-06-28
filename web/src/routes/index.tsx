@@ -13,6 +13,7 @@ import {
 } from '#/components/ui/card'
 import { Alert, AlertDescription } from '#/components/ui/alert'
 import { Skeleton } from '#/components/ui/skeleton'
+import { PageShell } from '#/components/PageShell'
 
 export const Route = createFileRoute('/')({ component: Home })
 
@@ -187,7 +188,7 @@ function Home() {
   const hasLegacy = legacy.length > 0 || legacyCount > 0
 
   return (
-    <div className="mx-auto max-w-3xl p-8">
+    <PageShell className="space-y-0">
       <div className="flex items-center justify-between">
         <h1 className="text-3xl font-bold tracking-tight">Tentanator</h1>
         <div className="flex items-center gap-2">
@@ -290,6 +291,6 @@ function Home() {
           />
         </div>
       )}
-    </div>
+    </PageShell>
   )
 }

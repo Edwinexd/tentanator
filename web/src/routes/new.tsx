@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { api } from '#/lib/api'
 import {
@@ -22,7 +22,8 @@ import {
   SelectContent,
   SelectItem,
 } from '#/components/ui/select'
-import { ArrowLeft, Wand2 } from 'lucide-react'
+import { PageShell, PageHeader } from '#/components/PageShell'
+import { Wand2 } from 'lucide-react'
 
 export const Route = createFileRoute('/new')({ component: NewSession })
 
@@ -132,15 +133,8 @@ function NewSession() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-8">
-      <div className="flex items-center gap-2">
-        <Link to="/">
-          <Button variant="ghost" size="icon" aria-label="Back">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-        </Link>
-        <h1 className="text-2xl font-bold">New exam</h1>
-      </div>
+    <PageShell>
+      <PageHeader title="New exam" />
 
       <Card>
         <CardHeader>
@@ -237,6 +231,6 @@ function NewSession() {
           </Button>
         </CardFooter>
       </Card>
-    </div>
+    </PageShell>
   )
 }

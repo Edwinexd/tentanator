@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { api, type ResultsResponse } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Badge } from '#/components/ui/badge'
 import { Alert, AlertDescription } from '#/components/ui/alert'
@@ -75,7 +76,7 @@ function ResultsView() {
 
   const stats = data?.stats
   return (
-    <div className="mx-auto max-w-4xl space-y-4 p-8">
+    <PageShell>
       <ExamNav name={name} active="results" />
       <h1 className="text-2xl font-bold">Results</h1>
 
@@ -170,6 +171,6 @@ function ResultsView() {
           </Card>
         </>
       )}
-    </div>
+    </PageShell>
   )
 }

@@ -6,6 +6,7 @@ import {
   type ResultsResponse,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Input } from '#/components/ui/input'
 import { Label } from '#/components/ui/label'
@@ -165,7 +166,7 @@ function SchemeView() {
   const scope = selected.size === 0 ? 'all' : `${selected.size} selected`
 
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-8">
+    <PageShell>
       <ExamNav name={name} active="scheme" />
       <h1 className="text-2xl font-bold">Grade scheme</h1>
 
@@ -365,6 +366,6 @@ function SchemeView() {
 
       {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-    </div>
+    </PageShell>
   )
 }

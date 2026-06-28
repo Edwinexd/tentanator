@@ -2,6 +2,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState, type ChangeEvent } from 'react'
 import { api, type Exam, type GradeConflict, type ImportSummary } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Label } from '#/components/ui/label'
 import {
@@ -121,7 +122,7 @@ function ImportView() {
 
   const outCols = exam?.output_columns ?? []
   return (
-    <div className="mx-auto max-w-4xl space-y-5 p-8">
+    <PageShell>
       <ExamNav name={name} active="import" />
       <h1 className="text-2xl font-bold">Import grades</h1>
 
@@ -262,6 +263,6 @@ function ImportView() {
 
       {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-    </div>
+    </PageShell>
   )
 }

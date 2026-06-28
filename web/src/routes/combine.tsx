@@ -1,4 +1,4 @@
-import { createFileRoute, Link, useNavigate } from '@tanstack/react-router'
+import { createFileRoute, useNavigate } from '@tanstack/react-router'
 import { useState } from 'react'
 import { api, type CombineMoodleResp } from '#/lib/api'
 import {
@@ -14,7 +14,8 @@ import { Input } from '#/components/ui/input'
 import { Label } from '#/components/ui/label'
 import { Badge } from '#/components/ui/badge'
 import { Alert, AlertDescription } from '#/components/ui/alert'
-import { ArrowLeft, Combine, Loader2 } from 'lucide-react'
+import { PageShell, PageHeader } from '#/components/PageShell'
+import { Combine, Loader2 } from 'lucide-react'
 
 export const Route = createFileRoute('/combine')({ component: CombineMoodle })
 
@@ -50,18 +51,8 @@ function CombineMoodle() {
   }
 
   return (
-    <div className="mx-auto max-w-2xl space-y-6 p-8">
-      <div className="flex items-center gap-2">
-        <Link to="/">
-          <Button variant="ghost" size="icon" aria-label="Back">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-        </Link>
-        <h1 className="flex items-center gap-2 text-2xl font-bold">
-          <Combine className="h-6 w-6" />
-          Combine Moodle dumps
-        </h1>
-      </div>
+    <PageShell>
+      <PageHeader title="Combine Moodle dumps" icon={Combine} />
 
       <Card>
         <CardHeader>
@@ -155,6 +146,6 @@ function CombineMoodle() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </PageShell>
   )
 }

@@ -1,4 +1,4 @@
-import { createFileRoute, Link } from '@tanstack/react-router'
+import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useRef, useState } from 'react'
 import {
   api,
@@ -33,7 +33,8 @@ import {
   TableRow,
 } from '#/components/ui/table'
 import { toast } from '#/hooks/use-toast'
-import { ArrowLeft, Database, RefreshCw, Upload, Search, Loader2 } from 'lucide-react'
+import { PageShell, PageHeader } from '#/components/PageShell'
+import { Database, RefreshCw, Upload, Search, Loader2 } from 'lucide-react'
 
 export const Route = createFileRoute('/global-bank')({ component: GlobalBank })
 
@@ -126,18 +127,8 @@ function GlobalBank() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-8">
-      <div className="flex items-center gap-2">
-        <Link to="/">
-          <Button variant="ghost" size="icon" aria-label="Back">
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-        </Link>
-        <h1 className="flex items-center gap-2 text-2xl font-bold">
-          <Database className="h-6 w-6" />
-          Global question bank
-        </h1>
-      </div>
+    <PageShell>
+      <PageHeader title="Global question bank" icon={Database} />
 
       {error && (
         <Alert variant="destructive">
@@ -282,6 +273,6 @@ function GlobalBank() {
           )}
         </CardContent>
       </Card>
-    </div>
+    </PageShell>
   )
 }

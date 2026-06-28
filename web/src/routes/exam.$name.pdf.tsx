@@ -3,6 +3,7 @@ import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import { api, type ScanMatch } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Label } from '#/components/ui/label'
 import {
@@ -108,7 +109,7 @@ function PdfView() {
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4 p-8">
+    <PageShell>
       <ExamNav name={name} active="pdf" />
       <h1 className="text-2xl font-bold">Results PDF</h1>
 
@@ -196,6 +197,6 @@ function PdfView() {
 
       {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
-    </div>
+    </PageShell>
   )
 }

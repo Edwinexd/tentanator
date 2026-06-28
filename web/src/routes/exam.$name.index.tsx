@@ -14,6 +14,7 @@ import {
   type SessionSummary,
 } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Input } from '#/components/ui/input'
 import { Textarea } from '#/components/ui/textarea'
@@ -395,7 +396,7 @@ function ExamView() {
 
   if (!exam) {
     return (
-      <div className="mx-auto max-w-4xl p-8">
+      <PageShell className="space-y-0">
         {error ? (
           <Alert variant="destructive">
             <AlertDescription>{error}</AlertDescription>
@@ -406,7 +407,7 @@ function ExamView() {
         <Link to="/">
           <Button variant="link" className="mt-4">← back</Button>
         </Link>
-      </div>
+      </PageShell>
     )
   }
 
@@ -417,7 +418,7 @@ function ExamView() {
   const missing = detOutputs.filter((c) => !exam.output_columns.includes(c))
 
   return (
-    <div className="mx-auto max-w-4xl space-y-4 p-8">
+    <PageShell>
       <ExamNav name={name} active="grade" />
       <h1 className="text-2xl font-bold">{exam.name}</h1>
 
@@ -711,6 +712,6 @@ function ExamView() {
           </CardContent>
         </Card>
       )}
-    </div>
+    </PageShell>
   )
 }
