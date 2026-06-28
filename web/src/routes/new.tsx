@@ -146,7 +146,7 @@ function NewSession() {
             <Label htmlFor="exam-file-select">File</Label>
             <Select value={examFile} onValueChange={setExamFile}>
               <SelectTrigger id="exam-file-select">
-                <SelectValue placeholder="— select —" />
+                <SelectValue placeholder="Select a file" />
               </SelectTrigger>
               <SelectContent>
                 {exams.map((f) => (
@@ -202,7 +202,7 @@ function NewSession() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label htmlFor="exam-name">Name (optional — auto-generated if empty)</Label>
+            <Label htmlFor="exam-name">Name (leave empty to auto-generate)</Label>
             <Input
               id="exam-name"
               placeholder="e.g. Midterm 2026"

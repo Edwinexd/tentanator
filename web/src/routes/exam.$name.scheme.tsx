@@ -41,7 +41,7 @@ import { Save, Eye, Play, Wand2 } from 'lucide-react'
 export const Route = createFileRoute('/exam/$name/scheme')({ component: SchemeView })
 
 const QTYPES: { v: string; l: string }[] = [
-  { v: '', l: '—' },
+  { v: '', l: '(none)' },
   { v: 'mc', l: 'Multiple choice' },
   { v: 'sc', l: 'Single choice' },
   { v: 'essay', l: 'Essay' },
@@ -230,7 +230,7 @@ function SchemeView() {
             <Label className="ml-2 text-sm">Type:</Label>
             <Select value={bulkType} onValueChange={setBulkType}>
               <SelectTrigger className="h-8 w-auto">
-                <SelectValue placeholder="—" />
+                <SelectValue placeholder="(none)" />
               </SelectTrigger>
               <SelectContent>
                 {QTYPES.map((t) => <SelectItem key={t.v} value={t.v}>{t.l}</SelectItem>)}
@@ -355,7 +355,7 @@ function SchemeView() {
           {schemeEmpty && (
             <Alert>
               <AlertDescription className="flex flex-wrap items-center gap-2">
-                No scheme yet. Start from a classic 100-point A–F template, then adjust the
+                No scheme yet. Start from a classic 100-point A-F template, then adjust the
                 thresholds and variables to your exam.
                 <Button onClick={loadStarter} variant="outline" size="sm">
                   <Wand2 className="mr-1 h-4 w-4" />
@@ -416,9 +416,9 @@ function SchemeView() {
                   {preview.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade || '—'}</TableCell>
+                      <TableCell>{s.grade || '-'}</TableCell>
                       <TableCell>{s.total.toFixed(1)}</TableCell>
-                      <TableCell>{s.estimated.length > 0 ? s.estimated.join(', ') : '—'}</TableCell>
+                      <TableCell>{s.estimated.length > 0 ? s.estimated.join(', ') : '-'}</TableCell>
                       <TableCell>{s.complete ? '✓' : '…'}</TableCell>
                     </TableRow>
                   ))}

@@ -188,10 +188,10 @@ function ImportView() {
                       onValueChange={(v) => setMapping((m) => ({ ...m, [outCol]: v }))}
                     >
                       <SelectTrigger className="w-64">
-                        <SelectValue placeholder="— skip —" />
+                        <SelectValue placeholder="Skip this column" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="_skip">— skip —</SelectItem>
+                        <SelectItem value="_skip">Skip this column</SelectItem>
                         {columns.map((c) => (
                           <SelectItem key={c} value={c}>{c}</SelectItem>
                         ))}

@@ -1561,9 +1561,9 @@ class ImportScreen(TentanatorScreen):
         container = self.query_one("#mappings", Vertical)
         await container.remove_children()
         self.map_selects = []
-        options = [("— skip —", "_skip")] + [(c, c) for c in cols]
+        options = [("Skip this column", "_skip")] + [(c, c) for c in cols]
         for out_col in self.output_columns:
-            sel = Select(options, prompt="— skip —", allow_blank=False, value="_skip")
+            sel = Select(options, prompt="Skip this column", allow_blank=False, value="_skip")
             self.map_selects.append((out_col, sel))
             await container.mount(Horizontal(Label(out_col, classes="mapcol"), sel))
 

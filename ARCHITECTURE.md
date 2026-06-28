@@ -19,14 +19,14 @@ two interchangeable controllers (clients):
         └─────────────────┘          └─────────────────────┘
 ```
 
-- **backend/** — Rust + Axum. Owns all domain logic and is the single source of
+- **backend/** is the Rust + Axum service. Owns all domain logic and is the single source of
   truth: reads exam files, runs sampling, builds in-context-learning prompts,
   calls the LLM providers, persists exams and grading sessions to an embedded
   [Turso](https://github.com/tursodatabase/turso) database (the Rust SQLite
   rewrite), exports graded Excel. No business logic lives in the clients.
-- **tui/** — Python [Textual](https://textual.textualize.io/) app. Thin client
+- **tui/** is the Python [Textual](https://textual.textualize.io/) app, a thin client
   over the HTTP API.
-- **web/** — TanStack Start React app. Thin client over the same HTTP API.
+- **web/** is the TanStack Start React app, a thin client over the same HTTP API.
 
 The original single-file Python app (`tentanator.py`, `sampling.py`, etc.) has
 been removed; its behaviour now lives in `backend/`. The pre-rearchitecture code
@@ -69,14 +69,14 @@ grade scheme, and the single canonical grade set. Exams carry an optional
 A **session** is a lightweight named grading pass *under* an exam (table keyed by
 `(exam, name)`). Every exam starts with a `default` session. Grades recorded in a
 session land in the exam's one grade set, tagged with the session name (the
-`session` column on `graded_items`), so sessions group/track work — they are not
+`session` column on `graded_items`), so sessions group/track work. They are not
 separate grade sets. `GET /api/exams/{exam}/sessions` reports each session's
 `graded_count`.
 
 ## State & concurrency
 
-All exam state — exams, sessions, questions, graded items, embedding caches and
-the cross-exam graded pool — lives in a single Turso database at
+All exam state (exams, sessions, questions, graded items, embedding caches and
+the cross-exam graded pool) lives in a single Turso database at
 `<data_dir>/.tentanator.db` (`db.rs` defines the schema; vectors are stored as
 f32 BLOBs). Only exam inputs (`exams/`) and exported Excel (`graded_exams/`)
 stay as files. Data directory defaults to the repo root; override with
@@ -91,7 +91,7 @@ keeping LLM calls parallel. The lock can be relaxed as Turso's MVCC matures.)
 ## Legacy import (on demand)
 
 The backend does **not** import anything on startup and does not migrate old DB
-rows — start fresh. But the old Python-app on-disk data can be pulled into the
+rows. Start fresh. But the old Python-app on-disk data can be pulled into the
 new format on request, so in-progress exams carry over. Each old session becomes
 one exam (`session_name`->`name`, `csv_file`->`exam_file`) with a `default`
 grading session; its graded items land in that session, caches and the graded
@@ -120,37 +120,37 @@ status.
 ### Health, legacy import & exam files
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/health` | — | `{ "status": "ok" }` |
-| GET | `/api/legacy-workspaces` | — | `[{ name, exams }]` (importable) |
-| POST | `/api/legacy-workspaces/{name}/import` | — | `{ imported_exams[], imported_files, skipped_files }` |
-| GET | `/api/legacy-sessions` | — | `{ count }` (loose `.tentanator_sessions/`) |
-| POST | `/api/legacy-sessions/import` | — | `{ imported_exams[] }` |
-| GET | `/api/exam-files` | — | `string[]` filenames in `exams/` |
-| GET | `/api/scans` | — | `string[]` scanned PDF filenames in `scans/` |
+| GET | `/api/health` | none | `{ "status": "ok" }` |
+| GET | `/api/legacy-workspaces` | none | `[{ name, exams }]` (importable) |
+| POST | `/api/legacy-workspaces/{name}/import` | none | `{ imported_exams[], imported_files, skipped_files }` |
+| GET | `/api/legacy-sessions` | none | `{ count }` (loose `.tentanator_sessions/`) |
+| POST | `/api/legacy-sessions/import` | none | `{ imported_exams[] }` |
+| GET | `/api/exam-files` | none | `string[]` filenames in `exams/` |
+| GET | `/api/scans` | none | `string[]` scanned PDF filenames in `scans/` |
 | PUT | `/api/files/{kind}/{filename}` | raw bytes | `{ filename }` (`kind` ∈ `exams`/`scans`/`raw`) |
 | POST | `/api/exam-files/combine-moodle` | `{ grades_file, responses_file, output_name? }` | `{ filename, students, questions, dropped_columns[] }` |
-| GET | `/api/exam-files/{file}/columns` | — | `string[]` header names |
-| GET | `/api/exam-files/{file}/rows` | — | `{ rows: object[] }` (cells as strings) |
-| GET | `/api/exam-files/{file}/detect` | — | `DetectedColumns` (`Response N`/`Points N` pairing + id guess) |
+| GET | `/api/exam-files/{file}/columns` | none | `string[]` header names |
+| GET | `/api/exam-files/{file}/rows` | none | `{ rows: object[] }` (cells as strings) |
+| GET | `/api/exam-files/{file}/detect` | none | `DetectedColumns` (`Response N`/`Points N` pairing + id guess) |
 
 ### Exams
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/exams?archived=false&course=` | — | `ExamSummary[]` (optional `course` filter) |
+| GET | `/api/exams?archived=false&course=` | none | `ExamSummary[]` (optional `course` filter) |
 | POST | `/api/exams` | `CreateExam` | `Exam` |
-| GET | `/api/exams/{name}` | — | `Exam` |
+| GET | `/api/exams/{name}` | none | `Exam` |
 | PUT | `/api/exams/{name}` | `{ course? }` | `Exam` |
-| DELETE | `/api/exams/{name}` | — | `204` |
-| POST | `/api/exams/{name}/archive` | — | `204` |
-| POST | `/api/exams/{name}/unarchive` | — | `204` |
+| DELETE | `/api/exams/{name}` | none | `204` |
+| POST | `/api/exams/{name}/archive` | none | `204` |
+| POST | `/api/exams/{name}/unarchive` | none | `204` |
 | PUT | `/api/exams/{name}/columns` | `{ id_columns[]?, input_columns[], output_columns[] }` | `Exam` |
 
 ### Sessions (grading passes under an exam)
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/exams/{name}/sessions` | — | `SessionSummary[]` (with `graded_count`) |
+| GET | `/api/exams/{name}/sessions` | none | `SessionSummary[]` (with `graded_count`) |
 | POST | `/api/exams/{name}/sessions` | `{ name? }` | `Session` |
-| DELETE | `/api/exams/{name}/sessions/{session}` | — | `204` (not `default`) |
+| DELETE | `/api/exams/{name}/sessions/{session}` | none | `204` (not `default`) |
 
 ### Grading workflow (per output column / question)
 | Method | Path | Body | Returns |
@@ -158,11 +158,11 @@ status.
 | PUT | `/api/exams/{name}/questions/{col}` | `QuestionMeta` | `Question` |
 | POST | `/api/exams/{name}/questions/{col}/sampling` | `{ algorithm, n_samples }` | `SamplingResult` |
 | POST | `/api/exams/{name}/questions/{col}/grade` | `{ row_id, grade, session? }` | `Question` |
-| DELETE | `/api/exams/{name}/questions/{col}/grade/{row_id}` | — | `Question` |
+| DELETE | `/api/exams/{name}/questions/{col}/grade/{row_id}` | none | `Question` |
 | POST | `/api/exams/{name}/questions/{col}/suggest` | `{ row_id }` | `AIGradeSuggestion` |
 | POST | `/api/exams/{name}/questions/{col}/auto-match` | `{ language?, top_k? }` | `{ language, matches: GlobalBankMatch[] }` (bank match for this question) |
-| GET | `/api/exams/{name}/questions/{col}/status` | — | `QuestionStatus` (graded counts, ICL readiness) |
-| POST | `/api/exams/{name}/export` | — | graded `.xlsx` file (attachment, not JSON) |
+| GET | `/api/exams/{name}/questions/{col}/status` | none | `QuestionStatus` (graded counts, ICL readiness) |
+| POST | `/api/exams/{name}/export` | none | graded `.xlsx` file (attachment, not JSON) |
 
 `CreateExam = { exam_file, id_columns[], input_columns[], output_columns[], name?, course? }`
 `QuestionMeta = { exam_question?, sample_answer?, global_question_id? }`
@@ -181,18 +181,18 @@ the evaluated numeric total (for export).
 | POST | `/api/scheme/emit` | `GradeScheme` | `{ text }` (emit the readable DSL) |
 | PUT | `/api/exams/{name}/scheme` | `GradeScheme` | `204` |
 | PUT | `/api/exams/{name}/questions-config` | `QuestionConfigUpdate[]` | `Exam` |
-| GET | `/api/exams/{name}/results` | — | `ResultsResponse` |
+| GET | `/api/exams/{name}/results` | none | `ResultsResponse` |
 | POST | `/api/exams/{name}/results` | `GradeScheme` | `ResultsResponse` (live preview of an unsaved scheme) |
 | POST | `/api/exams/{name}/import/preview` | `ImportReq` | `ImportSummary` |
 | POST | `/api/exams/{name}/import/apply` | `ImportReq` | `ImportSummary` |
-| GET | `/api/exams/{name}/conflicts` | — | `GradeConflict[]` |
+| GET | `/api/exams/{name}/conflicts` | none | `GradeConflict[]` |
 | POST | `/api/exams/{name}/conflicts/resolve` | `ResolveReq` | `204` |
-| GET | `/api/exams/{name}/render-data` | — | `RenderData` (per-student renderer contract) |
-| GET | `/api/exams/{name}/scans` | — | `ScanMatch[]` (scans eligible for cover pages) |
-| POST | `/api/exams/{name}/export/daisy` | — | Daisy `id,grade` `.xlsx` (attachment) |
-| POST | `/api/exams/{name}/export/csv` | — | per-question `.csv` (attachment) |
+| GET | `/api/exams/{name}/render-data` | none | `RenderData` (per-student renderer contract) |
+| GET | `/api/exams/{name}/scans` | none | `ScanMatch[]` (scans eligible for cover pages) |
+| POST | `/api/exams/{name}/export/daisy` | none | Daisy `id,grade` `.xlsx` (attachment) |
+| POST | `/api/exams/{name}/export/csv` | none | per-question `.csv` (attachment) |
 | POST | `/api/exams/{name}/export/results-pdf` | `{ scanned_pdf? }` | renderer JSON (proxied; PDF lands in `graded_exams/`) |
-| GET | `/api/graded/{filename}` | — | streams a file from `graded_exams/` |
+| GET | `/api/graded/{filename}` | none | streams a file from `graded_exams/` |
 
 `ImportReq = { file, id_column, mappings: [{ column, output_col }], label? }`
 `ResolveReq = { output_col, row_id, choose }` (`choose ∈ existing | incoming`).
@@ -201,9 +201,9 @@ the evaluated numeric total (for export).
 
 | Method | Path | Body | Returns |
 |---|---|---|---|
-| GET | `/api/global-bank` | — | `{ banks: [{ name, questions }], total_questions, indexed_vectors }` |
+| GET | `/api/global-bank` | none | `{ banks: [{ name, questions }], total_questions, indexed_vectors }` |
 | POST | `/api/global-bank/import` | `{ file, bank? }` | `{ bank, imported }` (load a bank CSV into the DB, replacing that bank) |
-| POST | `/api/global-bank/reindex` | — | `{ embedded, total_questions }` (embed all bank questions) |
+| POST | `/api/global-bank/reindex` | none | `{ embedded, total_questions }` (embed all bank questions) |
 | POST | `/api/global-bank/search` | `{ query, language?, top_k? }` | `{ language, matches: GlobalBankMatch[] }` |
 
 The bank is a single app-wide library of reference questions, managed in-app and
@@ -224,7 +224,7 @@ ICL (the graded pool). `GlobalBankMatch` is a ts-rs DTO.
 
 An examination is the central object: a roster + responses (the exam file), per-
 question config, grades from any source, a grade scheme, and computed results.
-Nothing about a specific exam's shape is hardcoded — sections, question counts,
+Nothing about a specific exam's shape is hardcoded. Sections, question counts,
 types and the grade formula are all per-examination config (`scheme.rs`).
 
 - **Question config** (`PUT /api/exams/{name}/questions-config`): per question
@@ -251,10 +251,10 @@ types and the grade formula are all per-examination config (`scheme.rs`).
 
 ### Results-PDF renderer (`results-renderer/`)
 
-A separate Python service (LaTeX/poppler/zxing/pikepdf — too heavy to reimplement
-in Rust). `POST /render { exam, scanned_pdf? }` fetches `render-data` from the
+A separate Python service built on LaTeX/poppler/zxing/pikepdf, too heavy to reimplement
+in Rust. `POST /render { exam, scanned_pdf? }` fetches `render-data` from the
 backend, renders a LaTeX answer sheet per student (responses, marks, grade, a
-Code128 id barcode), and — when a scanned exam PDF is provided in `data/scans/` —
+Code128 id barcode). When a scanned exam PDF is provided in `data/scans/`, it
 prepends each student's original cover page (matched by PDF417 barcode), then
 concatenates to `graded_exams/<exam>_results.pdf`. The backend reaches it via
 `RENDERER_URL`. Generalized from `reference/pvt/scripts/01-03`.
@@ -264,7 +264,7 @@ concatenates to `graded_exams/<exam>_results.pdf`. The backend reaches it via
 The whole stack runs from `docker-compose.yml`. You only need Docker.
 
 ```bash
-# 1. (optional) API keys — manual grading + random sampling work without them;
+# 1. (optional) API keys. Manual grading + random sampling work without them;
 #    embeddings (maximin) and AI suggestions need them.
 cp .env.example .env        # then edit in your OPENAI_API_KEY / CEREBRAS_API_KEY
 
@@ -299,7 +299,7 @@ host. Files written by the backend container are root-owned; `sudo chown -R
 
 **CI/CD**: `.github/workflows/ci.yml` runs `cargo test` and the web typecheck on
 every push/PR, then on `master` and `v*` tags builds and publishes the three
-images to GHCR — `ghcr.io/<owner>/tentanator-{backend,web,tui}` (tagged
+images to GHCR as `ghcr.io/<owner>/tentanator-{backend,web,tui}` (tagged
 `latest`, the commit SHA, and the semver on tags). To run the published images
 instead of building locally, point the `image:` keys in `docker-compose.yml` at
 the GHCR tags and drop the `build:` lines.

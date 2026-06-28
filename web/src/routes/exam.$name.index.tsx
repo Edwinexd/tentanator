@@ -79,7 +79,7 @@ function ExamView() {
   const [info, setInfo] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   // Ephemeral (not persisted): extra columns to show alongside the response so
-  // you can read another answer — e.g. a student-comments column — while grading.
+  // you can read another answer, such as a student-comments column, while grading.
   const [allColumns, setAllColumns] = useState<string[]>([])
   const [contextCols, setContextCols] = useState<string[]>([])
 
@@ -358,7 +358,7 @@ function ExamView() {
     setQSample(m.ans_en || m.ans_se)
     setQGlobalId(m.qid)
     setBankMatches([])
-    setInfo('Filled from bank match — review and save question settings to persist')
+    setInfo('Filled from bank match. Review and save question settings to persist.')
   }
 
   async function exportExam() {
@@ -532,7 +532,7 @@ function ExamView() {
           <AccordionContent className="space-y-3">
             <div className="space-y-2">
               <Label htmlFor="global-id">
-                Global question id — link the same question across exams/terms to share graded examples
+                Global question id. Link the same question across exams/terms to share graded examples
               </Label>
               <Input
                 id="global-id"
@@ -576,7 +576,7 @@ function ExamView() {
             {bankMatches.length > 0 && (
               <div className="space-y-1 rounded-md border p-2">
                 <div className="text-xs text-muted-foreground">
-                  Top matches — choose one to fill the fields above (review before saving)
+                  Top matches. Choose one to fill the fields above (review before saving).
                 </div>
                 {bankMatches.map((m) => (
                   <button
@@ -589,7 +589,7 @@ function ExamView() {
                       {m.score.toFixed(3)}
                     </span>
                     <span className="font-mono text-xs text-muted-foreground">{m.qid}</span>
-                    <span className="flex-1 truncate">{m.q_en || m.q_se || '—'}</span>
+                    <span className="flex-1 truncate">{m.q_en || m.q_se || '-'}</span>
                   </button>
                 ))}
               </div>
@@ -663,7 +663,7 @@ function ExamView() {
                 <AccordionContent className="space-y-2">
                   <p className="text-xs text-muted-foreground">
                     Pick columns to read alongside this response (e.g. a comments
-                    column). Not saved — clears when you leave.
+                    column). These are not saved and clear when you leave.
                   </p>
                   <div className="flex flex-wrap gap-x-4 gap-y-1">
                     {allColumns

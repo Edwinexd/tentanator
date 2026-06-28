@@ -8,7 +8,7 @@
 # The repo root is the data dir (mounted at /workspace): exam files go in
 # ./exams/, graded exports land in ./graded_exams/, the DB is ./.tentanator.db,
 # and legacy data (.tentanator_sessions/, workspaces/, global_bank/) is imported
-# from there on startup. API keys (optional) go in .env — see .env.example.
+# from there on startup. API keys (optional) go in .env. See .env.example.
 
 services:
   backend:

@@ -24,9 +24,9 @@ python app.py
 
 ## Workflow
 
-- **Sessions screen** — pick an existing session or press `n` for a new one.
-- **New session** — choose an exam file, then the ID / input / output columns.
-- **Grading** — select a question, optionally run `random` or `maximin`
+- **Sessions screen** lists existing sessions. Press `n` to start a new one.
+- **New session** lets you choose an exam file, then the ID / input / output columns.
+- **Grading** lets you select a question, optionally run `random` or `maximin`
   sampling to prioritise representative responses, then grade. Press `a` for an
   AI (in-context-learning) suggestion, edit if needed, and save. `e` exports the
   graded Excel file.

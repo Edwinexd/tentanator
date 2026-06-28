@@ -258,13 +258,13 @@ function GlobalBank() {
                     <TableCell className="font-mono text-xs">{m.score.toFixed(3)}</TableCell>
                     <TableCell className="font-mono text-xs">{m.qid}</TableCell>
                     <TableCell className="max-w-sm whitespace-pre-wrap">
-                      {questionFor(m, lang) || '—'}
+                      {questionFor(m, lang) || '-'}
                     </TableCell>
                     <TableCell className="max-w-sm whitespace-pre-wrap text-muted-foreground">
-                      {answerFor(m, lang) || '—'}
+                      {answerFor(m, lang) || '-'}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {[m.chapter, m.subject].filter(Boolean).join(' / ') || '—'}
+                      {[m.chapter, m.subject].filter(Boolean).join(' / ') || '-'}
                     </TableCell>
                   </TableRow>
                 ))}

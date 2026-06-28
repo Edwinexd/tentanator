@@ -93,7 +93,7 @@ def build_tex_for_student(st, barcode_dir):
     ]
 
     # MC / short-answer table (mc, sc, or unset qtype), then essays, then
-    # ungraded comments — mirroring the reference PVT sample layout.
+    # ungraded comments. Mirrors the reference PVT sample layout.
     short, essays, comments = [], [], []
     for i, q in enumerate(st["questions"], 1):
         q = dict(q)

@@ -18,7 +18,7 @@ import { ChevronDown, ChevronRight } from 'lucide-react'
 export const Route = createFileRoute('/exam/$name/table')({ component: TableView })
 
 function cellPoints(q: RenderQuestion): string {
-  if (q.points == null) return '—'
+  if (q.points == null) return '-'
   return `${q.points}/${q.max}`
 }
 
@@ -98,7 +98,7 @@ function TableView() {
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                        <TableCell>{s.grade || '—'}</TableCell>
+                        <TableCell>{s.grade || '-'}</TableCell>
                         <TableCell className="text-right">{s.total.toFixed(1)}</TableCell>
                         {s.questions.map((q, i) => (
                           <TableCell

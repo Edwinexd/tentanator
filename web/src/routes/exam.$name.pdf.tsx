@@ -125,7 +125,7 @@ function PdfView() {
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="space-y-2">
-            <Label>Scanned exam PDF (optional — prepends cover pages matched by barcode)</Label>
+            <Label>Scanned exam PDF (optional). When set, prepends cover pages matched by barcode.</Label>
             <Select value={scan} onValueChange={setScan} disabled={eligible.length === 0}>
               <SelectTrigger>
                 <SelectValue placeholder="No scan selected" />

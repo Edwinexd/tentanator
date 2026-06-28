@@ -5,7 +5,7 @@
 // an exam. Exam *files* on disk live under /api/exam-files.
 //
 // The domain DTOs below are GENERATED from the Rust backend structs via ts-rs
-// (see web/src/lib/generated/). Do not hand-edit them — change the Rust struct
+// (see web/src/lib/generated/). Do not hand-edit them. Change the Rust struct
 // and regenerate (`cd backend && cargo test export_bindings`). Request/response
 // transport shapes that have no dedicated Rust struct stay hand-written here.
 

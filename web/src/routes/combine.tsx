@@ -114,7 +114,7 @@ function CombineMoodle() {
           <CardHeader>
             <CardTitle className="text-lg">Combined</CardTitle>
             <CardDescription>
-              Saved as <span className="font-mono">{result.filename}</span> — it now appears as a
+              Saved as <span className="font-mono">{result.filename}</span>. It now appears as a
               selectable file when creating an exam.
             </CardDescription>
           </CardHeader>

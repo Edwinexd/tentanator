@@ -106,7 +106,7 @@ function ResultsView() {
 
       {data && !data.has_scheme && (
         <p className="text-muted-foreground">
-          No grade scheme yet — configure one on the Scheme tab to compute final grades.
+          No grade scheme yet. Configure one on the Scheme tab to compute final grades.
         </p>
       )}
 
@@ -157,10 +157,10 @@ function ResultsView() {
                   {data.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade || '—'}</TableCell>
+                      <TableCell>{s.grade || '-'}</TableCell>
                       <TableCell>{s.total.toFixed(1)}</TableCell>
                       <TableCell>
-                        {s.estimated.length > 0 ? s.estimated.join(', ') : '—'}
+                        {s.estimated.length > 0 ? s.estimated.join(', ') : '-'}
                       </TableCell>
                       <TableCell>{s.complete ? '✓' : '…'}</TableCell>
                     </TableRow>
