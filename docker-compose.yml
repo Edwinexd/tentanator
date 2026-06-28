@@ -41,7 +41,12 @@ services:
     restart: unless-stopped
 
   web:
-    build: ./web
+    build:
+      context: ./web
+      # The web image build generates its DTO types from the backend Rust
+      # structs (ts-rs); the bindings stage compiles them from this source.
+      additional_contexts:
+        backend: ./backend
     image: tentanator-web
     ports:
       - "3000:3000"

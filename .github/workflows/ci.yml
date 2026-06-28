@@ -75,20 +75,14 @@ jobs:
       matrix:
         include:
           - { service: backend, context: ./backend }
-          - { service: web, context: ./web }
+          # The web image generates its DTO types from the backend Rust structs
+          # (ts-rs) in a bindings stage, so the build needs the backend source
+          # as an extra build context.
+          - { service: web, context: ./web, build-contexts: backend=./backend }
           - { service: tui, context: ./tui }
           - { service: results-renderer, context: ./results-renderer }
     steps:
       - uses: actions/checkout@v4
-
-      # The web image build type-checks (tsc) and bundles the generated DTO
-      # types, which are not committed. Drop them into the build context first.
-      - name: generated TS types (web only)
-        if: matrix.service == 'web'
-        uses: actions/download-artifact@v4
-        with:
-          name: generated-types
-          path: web/src/lib/generated/
 
       - name: Lowercase owner
         id: owner
@@ -132,6 +126,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build-contexts }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
