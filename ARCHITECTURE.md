@@ -300,7 +300,11 @@ in Rust. `POST /render { exam, scanned_pdf? }` fetches `render-data` from the
 backend, renders a LaTeX answer sheet per student (responses, marks, grade, a
 Code128 id barcode). When a scanned exam PDF is provided in `data/scans/`, it
 prepends each student's original cover page (matched by PDF417 barcode), then
-concatenates to `graded_exams/<exam>_results.pdf`. The backend reaches it via
+concatenates to `graded_exams/<exam>_results.pdf`. Cover-barcode counts (`POST /covers`, used to
+offer only scans matching the exam's student count) are slow on large scans, so
+they are cached in memory and in `scans/.covers_cache.json` (keyed by file name,
+mtime and size), surviving renderer restarts; the backend allows that call 15
+minutes for a first decode. The backend reaches it via
 `RENDERER_URL`. Generalized from `reference/pvt/scripts/01-03`.
 
 ## Quick start (Docker)

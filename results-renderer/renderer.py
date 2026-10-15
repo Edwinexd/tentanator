@@ -10,10 +10,12 @@ sections or question counts is hardcoded; it works off the examination's
 render-data: { exam, students: [ { id, grade, total,
 questions: [ { label, group, qtype, response, points, max, estimated } ] } ] }.
 """
+import json
 import os
 import re
 import subprocess
 import tempfile
+import threading
 
 import barcode
 import pikepdf
@@ -197,6 +199,49 @@ def detect_covers(pdf_path, id_regex=r"^(\d+)-(\d+)$"):
 
 _COVER_IDS_CACHE = {}
 _COVER_IDS_CACHE_MAX = 128
+# On-disk copy of the cache, one file per scan directory, so a renderer restart
+# (e.g. a rebuild) does not re-decode every scan.
+_DISK_CACHE_NAME = ".covers_cache.json"
+_DISK_LOCK = threading.Lock()
+
+
+def _disk_cache_path(scan_path):
+    return os.path.join(os.path.dirname(os.path.abspath(scan_path)), _DISK_CACHE_NAME)
+
+
+def _disk_key(scan_path, stat, id_regex):
+    return f"{os.path.basename(scan_path)}|{stat.st_mtime_ns}|{stat.st_size}|{id_regex}"
+
+
+def _read_disk_cache(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _store_disk_cache(scan_path, key, ids):
+    """Merge one entry into the directory's cache file, replacing older entries
+    for the same scan and dropping scans that are gone. Best effort: a read-only
+    data dir just skips it."""
+    path = _disk_cache_path(scan_path)
+    folder = os.path.dirname(path)
+    with _DISK_LOCK:
+        data = _read_disk_cache(path)
+        name = os.path.basename(scan_path)
+        data = {k: v for k, v in data.items()
+                if (n := k.split("|", 1)[0]) != name and os.path.exists(os.path.join(folder, n))}
+        data[key] = ids
+        try:
+            with tempfile.NamedTemporaryFile(
+                    "w", dir=folder, prefix=_DISK_CACHE_NAME, suffix=".tmp",
+                    delete=False, encoding="utf-8") as tmp:
+                json.dump(data, tmp)
+            os.replace(tmp.name, path)
+        except OSError:
+            pass
 
 
 def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
@@ -204,8 +249,10 @@ def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
 
     Rasterising + barcode decoding is expensive, so results are cached by
     (path, mtime, size): repeated calls for an untouched file are free. The
-    cache is bounded to _COVER_IDS_CACHE_MAX entries, evicting the oldest
-    inserted key (FIFO via dict insertion order) when it would overflow.
+    in-memory cache is bounded to _COVER_IDS_CACHE_MAX entries, evicting the
+    oldest inserted key (FIFO via dict insertion order) when it would overflow,
+    and backed by a `.covers_cache.json` next to the scans that survives
+    restarts.
     """
     try:
         stat = os.stat(scan_path)
@@ -214,7 +261,13 @@ def cover_ids(scan_path, id_regex=r"^(\d+)-(\d+)$"):
     key = (os.path.abspath(scan_path), stat.st_mtime, stat.st_size, id_regex)
     cached = _COVER_IDS_CACHE.get(key)
     if cached is None:
-        cached = sorted(detect_covers(scan_path, id_regex).keys())
+        dkey = _disk_key(scan_path, stat, id_regex)
+        cached = _read_disk_cache(_disk_cache_path(scan_path)).get(dkey)
+        if not isinstance(cached, list):
+            cached = sorted(detect_covers(scan_path, id_regex).keys())
+            # An empty decode may be a missing decoder; don't persist that.
+            if cached:
+                _store_disk_cache(scan_path, dkey, cached)
         if len(_COVER_IDS_CACHE) >= _COVER_IDS_CACHE_MAX:
             oldest = next(iter(_COVER_IDS_CACHE))
             del _COVER_IDS_CACHE[oldest]

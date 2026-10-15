@@ -1824,9 +1824,14 @@ struct ScanMatch {
 }
 
 /// Ask the renderer how many cover pages (barcodes) it can decode from a scan.
+/// A first decode of a large scan (hundreds of pages) far outlasts the client's
+/// default timeout; the renderer caches it on disk, so this is paid once a file.
+const COVER_COUNT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 async fn scan_cover_count(http: &reqwest::Client, url: &str, filename: &str) -> Option<usize> {
     let resp = http
         .post(url)
+        .timeout(COVER_COUNT_TIMEOUT)
         .json(&json!({ "scanned_pdf": filename }))
         .send()
         .await
