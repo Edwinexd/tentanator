@@ -26,6 +26,7 @@ turso = "0.4"
 evalexpr = "12"
 roxmltree = "0.20"
 ts-rs = "10"
+base64 = "0.22"
 
 [profile.dev]
 opt-level = 0

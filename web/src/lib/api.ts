@@ -96,11 +96,17 @@ export interface ConflictSample {
 }
 export interface ImportSummary {
   new: number
+  /** Edited in the sheet over a stored grade unchanged since export. */
+  updated: number
   same: number
   conflict: number
   skipped: number
   unknown_ids: number
   conflicts: ConflictSample[]
+  /** The sheet carries the export state column (auto-mapped, three-way merge). */
+  snapshot: boolean
+  /** Mappings used (auto-detected when the request had none). */
+  mappings: ColMapping[]
 }
 export interface SecondPassImportReq {
   file: string
@@ -235,10 +241,11 @@ export interface SuggestReq {
   row_id: string
 }
 
+/** `id_column`/`mappings` may be omitted for a sheet with the export state column. */
 export interface ImportReq {
   file: string
-  id_column: string
-  mappings: ColMapping[]
+  id_column?: string
+  mappings?: ColMapping[]
   label?: string
 }
 

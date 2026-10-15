@@ -68,7 +68,10 @@ function ReviewView() {
       setPlan(null)
       setFile('')
       setInfo(
-        `Imported ${res.changed.length} change(s); ${res.grade_changes.length} final grade(s) moved`,
+        `Imported ${res.changed.length} change(s); ${res.grade_changes.length} final grade(s) moved` +
+          (res.conflicts.length
+            ? `; ${res.conflicts.length} conflict(s) queued on the Import page`
+            : ''),
       )
       load()
     })
@@ -185,6 +188,9 @@ function ImportPlan({
       <div className="flex flex-wrap gap-2">
         <Badge variant="secondary">{file}</Badge>
         <Badge variant="secondary">{plan.changed.length} changed</Badge>
+        {plan.conflicts.length > 0 && (
+          <Badge variant="destructive">{plan.conflicts.length} conflict(s)</Badge>
+        )}
         <Badge variant="secondary">{plan.unchanged} unchanged</Badge>
         <Badge variant="secondary">{plan.blank} blank</Badge>
         {plan.invalid.length > 0 && (
@@ -199,6 +205,20 @@ function ImportPlan({
             </li>
           ))}
         </ul>
+      )}
+      {plan.conflicts.length > 0 && (
+        <div>
+          <div className="font-semibold">
+            Conflicts (stored points changed since export; queued, not written)
+          </div>
+          <ul className="font-mono text-xs">
+            {plan.conflicts.map((c) => (
+              <li key={`${c.id}/${c.col}`}>
+                {c.id} {c.col}: stored {c.before || '(none)'}, sheet {c.after}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
       {plan.grade_changes.length > 0 && (
         <div>
@@ -215,8 +235,13 @@ function ImportPlan({
           {plan.invalid.map((m) => <li key={m}>{m}</li>)}
         </ul>
       )}
-      <Button size="sm" onClick={onApply} disabled={plan.changed.length === 0}>
+      <Button
+        size="sm"
+        onClick={onApply}
+        disabled={plan.changed.length + plan.conflicts.length === 0}
+      >
         Apply {plan.changed.length} change(s)
+        {plan.conflicts.length > 0 && `, queue ${plan.conflicts.length} conflict(s)`}
       </Button>
     </div>
   )

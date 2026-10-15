@@ -1528,6 +1528,8 @@ class ImportScreen(TentanatorScreen):
         self.output_columns: List[str] = []
         self.map_selects: List[Tuple[str, Select]] = []
         self.conflicts: List[Dict[str, Any]] = []
+        # The file carries the export state column: ids and columns come from it.
+        self.auto = False
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1535,6 +1537,9 @@ class ImportScreen(TentanatorScreen):
             yield Label("Import grades", id="title")
             yield Label("Import file (in exams/):")
             yield Select([], id="impfile", prompt="Select a file")
+            with Horizontal(id="imp-auto"):
+                yield Static("", id="impauto")
+                yield Button("Map manually", id="manual")
             yield Label("ID column in import file:")
             yield Select([], id="idcol", prompt="Select id column")
             yield Label("Map import columns to questions:")
@@ -1556,7 +1561,26 @@ class ImportScreen(TentanatorScreen):
             return
         self.output_columns = exam.get("output_columns", [])
         self.query_one("#impfile", Select).set_options([(f, f) for f in files])
+        self._set_auto(False)
         await self._load_conflicts()
+
+    def _set_auto(self, auto: bool, summary: Optional[Dict[str, Any]] = None) -> None:
+        self.auto = auto
+        self.query_one("#imp-auto", Horizontal).display = auto
+        for widget_id in ("#idcol", "#mappings"):
+            self.query_one(widget_id).disabled = auto
+        if auto and summary is not None:
+            self.query_one("#impauto", Static).update(
+                f"[b]Exported by Tentanator[/b]: {len(summary.get('mappings', []))} question "
+                "column(s) mapped automatically; only cells changed on both sides since "
+                "export are conflicts."
+            )
+            self._show_summary("Preview", summary)
+
+    @on(Button.Pressed, "#manual")
+    def _map_manually(self) -> None:
+        self._set_auto(False)
+        self.query_one("#impsummary", Static).update("")
 
     @on(Select.Changed, "#impfile")
     async def _file_chosen(self, event: Select.Changed) -> None:
@@ -1576,9 +1600,17 @@ class ImportScreen(TentanatorScreen):
             sel = Select(options, prompt="Skip this column", allow_blank=False, value="_skip")
             self.map_selects.append((out_col, sel))
             await container.mount(Horizontal(Label(out_col, classes="mapcol"), sel))
+        self.query_one("#impsummary", Static).update("")
+        try:
+            summary = await self.api.import_preview(self.exam_name, {"file": str(event.value)})
+        except APIError:
+            summary = {}
+        self._set_auto(bool(summary.get("snapshot")), summary)
 
     def _build_req(self) -> Optional[Dict[str, Any]]:
         file = self.query_one("#impfile", Select).value
+        if self.auto and file is not Select.BLANK:
+            return {"file": str(file)}
         idcol = self.query_one("#idcol", Select).value
         if file is Select.BLANK or idcol is Select.BLANK:
             self.notify("Pick a file and id column", severity="warning")
@@ -1620,7 +1652,8 @@ class ImportScreen(TentanatorScreen):
 
     def _show_summary(self, kind: str, summary: Dict[str, Any]) -> None:
         self.query_one("#impsummary", Static).update(
-            f"[b]{kind}[/b]  {summary.get('new', 0)} new, {summary.get('same', 0)} unchanged, "
+            f"[b]{kind}[/b]  {summary.get('new', 0)} new, {summary.get('updated', 0)} updated, "
+            f"{summary.get('same', 0)} unchanged, "
             f"{summary.get('conflict', 0)} conflict(s), {summary.get('skipped', 0)} skipped, "
             f"{summary.get('unknown_ids', 0)} unknown id(s)"
         )
@@ -2054,11 +2087,12 @@ def import_summary_text(plan: SecondPassImportPlan) -> str:
     s = plan.summary
     head = "Applied" if s.get("applied") else "Dry run of"
     changed = s.get("changed", [])
+    conflicts = s.get("conflicts", [])
     invalid = s.get("invalid", [])
     lines = [
         f"[b]{head} {escape(plan.file)}[/b]: {len(changed)} point change(s), "
-        f"{s.get('unchanged', 0)} unchanged, {s.get('blank', 0)} blank, "
-        f"{len(invalid)} invalid"
+        f"{len(conflicts)} conflict(s), {s.get('unchanged', 0)} unchanged, "
+        f"{s.get('blank', 0)} blank, {len(invalid)} invalid"
     ]
     if changed:
         lines.append("[b]Point changes[/b]")
@@ -2066,6 +2100,13 @@ def import_summary_text(plan: SecondPassImportPlan) -> str:
             f"  {escape(c['id'])}  {escape(c['col'])}: "
             f"{escape(c.get('before') or '(none)')} → {escape(c['after'])}"
             for c in changed
+        ]
+    if conflicts:
+        lines.append("[b]Conflicts[/b] (stored points changed since export; queued, not written)")
+        lines += [
+            f"  {escape(c['id'])}  {escape(c['col'])}: stored "
+            f"{escape(c.get('before') or '(none)')}, sheet {escape(c['after'])}"
+            for c in conflicts
         ]
     grade_changes = s.get("grade_changes", [])
     if grade_changes:
@@ -2227,7 +2268,7 @@ class SecondPassScreen(TentanatorScreen):
             return
         self.plan = SecondPassImportPlan(file=file, summary=summary)
         self.query_one("#spimport", Static).update(import_summary_text(self.plan))
-        has_changes = bool(summary.get("changed"))
+        has_changes = bool(summary.get("changed") or summary.get("conflicts"))
         self.query_one("#sp-apply", Button).disabled = not has_changes
         self.query_one("#sp-discard", Button).disabled = False
         if not has_changes:
@@ -2246,7 +2287,11 @@ class SecondPassScreen(TentanatorScreen):
         self.query_one("#spimport", Static).update(import_summary_text(self.plan))
         self._reset_import_buttons()
         self.plan = None
-        self.notify(f"Applied {len(summary.get('changed', []))} point change(s)")
+        queued = len(summary.get("conflicts", []))
+        self.notify(
+            f"Applied {len(summary.get('changed', []))} point change(s)"
+            + (f"; {queued} conflict(s) queued on the Import screen" if queued else "")
+        )
         await self.reload()
 
     @on(Button.Pressed, "#sp-discard")
@@ -2403,6 +2448,8 @@ class TentanatorTUI(App):
     .cfgin { width: 16; }
     .cfgnum { width: 8; }
     .mapcol { width: 30; padding: 1 0; }
+    #imp-auto { height: auto; padding: 0 1; }
+    #impauto { width: 1fr; padding: 1 0; }
     .conflictrow { height: auto; padding: 0 1; }
     .conflictlabel { width: 1fr; padding: 1 0; }
     #resultstable { height: 1fr; margin: 0 1; }

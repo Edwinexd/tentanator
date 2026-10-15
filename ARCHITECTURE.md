@@ -196,14 +196,16 @@ the evaluated numeric total (for export).
 | GET | `/api/exams/{name}/render-data` | none | `RenderData` (per-student renderer contract) |
 | GET | `/api/exams/{name}/second-pass?margin=1` | none | `SecondPassReport` (students within `margin` points of a better grade) |
 | POST | `/api/exams/{name}/export/second-pass` | `{ margin? }` | second-pass review `.xlsx` (attachment) |
-| POST | `/api/exams/{name}/second-pass/import` | `{ file, dry_run? }` | `SecondPassImport` (filled review sheet; overwrites, no conflicts) |
+| POST | `/api/exams/{name}/second-pass/import` | `{ file, dry_run? }` | `SecondPassImport` (filled review sheet; overwrites, except changed-on-both-sides cells are queued as conflicts) |
 | GET | `/api/exams/{name}/scans` | none | `ScanMatch[]` (scans eligible for cover pages) |
 | POST | `/api/exams/{name}/export/daisy` | none | Daisy `id,grade` `.xlsx` (attachment) |
 | POST | `/api/exams/{name}/export/csv` | none | per-question `.csv` (attachment) |
 | POST | `/api/exams/{name}/export/results-pdf` | `{ scanned_pdf? }` | renderer JSON (proxied; PDF lands in `graded_exams/`) |
 | GET | `/api/graded/{filename}` | none | streams a file from `graded_exams/` |
 
-`ImportReq = { file, id_column, mappings: [{ column, output_col }], label? }`
+`ImportReq = { file, id_column?, mappings?: [{ column, output_col }], label? }`
+(`id_column`/`mappings` may be omitted for a sheet with the export state column;
+`ImportSummary` reports `snapshot` and the `mappings` actually used).
 `ResolveReq = { output_col, row_id, choose }` (`choose ∈ existing | incoming`).
 
 ### Global question bank (app-wide; not exam/course-scoped)
@@ -251,6 +253,17 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   sheet's columns to questions; non-conflicting cells merge with `source`
   provenance, disagreements become `grade_conflicts`
   (`GET …/conflicts`, `POST …/conflicts/resolve`).
+- **Export state column** (`snapshot.rs`): the graded export and the
+  second-pass review sheet end with a `_tentanator_state` column holding, per
+  row, base64 JSON `{ v, exam, id, cells }` of the grade cells as exported. On
+  import this makes the merge three-way (export value, stored value, sheet
+  value): a cell untouched in the sheet is never a conflict, one edited over a
+  stored value unchanged since export overwrites it (`updated`), and only a cell
+  changed on both sides is a conflict. It also carries the row id and question
+  columns, so a graded import of such a sheet needs no manual mapping (clients
+  preview with just `{ file }` and skip the mapping step when `snapshot` is
+  true). State written for another exam is ignored. Sheets without the column
+  (older exports, foreign files) keep the two-way behaviour.
 - **Exports**: `…/export` (full graded xlsx), `…/export/daisy` (Daisy `id,grade`
   xlsx), `…/export/csv` (per-question), `…/export/results-pdf` (proxies the
   renderer). `GET …/render-data` is the per-student contract the renderer reads;
@@ -271,8 +284,11 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   the questions with headroom, their responses, and the lift each one alone
   gives. The review sheet has one row per (student, question) with a `New
   points` column; importing it overwrites changed points with source
-  `second-pass` (the reviewer is authoritative, so no conflict queue) and reports
-  the resulting grade changes. `dry_run` previews without writing.
+  `second-pass` (the reviewer is authoritative) and reports the resulting grade
+  changes. With the export state column, points whose stored value also moved
+  since export are queued as `grade_conflicts` instead (`conflicts` in the
+  summary), and an edited `Points` cell counts when `New points` is blank.
+  `dry_run` previews without writing.
 
 ### Results-PDF renderer (`results-renderer/`)
 

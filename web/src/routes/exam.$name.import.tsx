@@ -33,6 +33,8 @@ function ImportView() {
   const [idColumn, setIdColumn] = useState('')
   const [mapping, setMapping] = useState<Record<string, string>>({})
   const [summary, setSummary] = useState<ImportSummary | null>(null)
+  // The file carries the export state column: ids and columns come from it.
+  const [auto, setAuto] = useState(false)
   const [conflicts, setConflicts] = useState<GradeConflict[]>([])
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
@@ -50,11 +52,21 @@ function ImportView() {
   }, [name])
 
   useEffect(() => {
+    setAuto(false)
+    setSummary(null)
     if (!file) { setColumns([]); return }
     let active = true
     api.examColumns(file).then((c) => { if (active) setColumns(c) }).catch((e: Error) => { if (active) setError(e.message) })
+    api
+      .importPreview(name, { file })
+      .then((r) => {
+        if (!active || !r.snapshot) return
+        setAuto(true)
+        setSummary(r)
+      })
+      .catch(() => {})
     return () => { active = false }
-  }, [file])
+  }, [file, name])
 
   async function onUpload(e: ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0]
@@ -69,6 +81,7 @@ function ImportView() {
   }
 
   function buildReq() {
+    if (auto) return { file }
     const mappingEntries = Object.entries(mapping).filter(([, v]) => v && v !== '_skip')
     return {
       file,
@@ -96,7 +109,7 @@ function ImportView() {
     try {
       const r = await api.importApply(name, buildReq())
       setInfo(
-        `Imported ${r.new} new, ${r.same} unchanged, ${r.conflict} conflict(s)` +
+        `Imported ${r.new} new, ${r.updated} updated, ${r.same} unchanged, ${r.conflict} conflict(s)` +
           (r.skipped ? `, ${r.skipped} skipped` : '') +
           (r.unknown_ids ? `, ${r.unknown_ids} unknown id(s)` : ''),
       )
@@ -157,7 +170,19 @@ function ImportView() {
         </CardContent>
       </Card>
 
-      {file && columns.length > 0 && (
+      {auto && (
+        <Alert>
+          <AlertDescription className="flex flex-wrap items-center gap-2">
+            Exported by Tentanator: {summary?.mappings.length ?? 0} question column(s) mapped
+            automatically, and only cells changed on both sides since export are conflicts.
+            <Button variant="outline" size="sm" onClick={() => { setAuto(false); setSummary(null) }}>
+              Map manually instead
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
+
+      {file && !auto && columns.length > 0 && (
         <Card>
           <CardHeader>
             <CardTitle className="text-lg">Column mapping</CardTitle>
@@ -215,12 +240,13 @@ function ImportView() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-lg">
               <CheckCircle2 className="h-5 w-5 text-green-600" />
-              Preview: {summary.new} new, {summary.same} unchanged
+              Preview: {summary.new} new, {summary.updated} updated, {summary.same} unchanged
             </CardTitle>
           </CardHeader>
           <CardContent>
             <div className="mb-3 flex flex-wrap gap-2">
               <Badge variant="secondary">{summary.new} new</Badge>
+              <Badge variant="secondary">{summary.updated} updated</Badge>
               <Badge variant="secondary">{summary.same} unchanged</Badge>
               <Badge variant="secondary">{summary.conflict} conflict(s)</Badge>
               <Badge variant="secondary">{summary.skipped} skipped</Badge>

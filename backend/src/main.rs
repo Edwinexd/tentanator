@@ -14,6 +14,7 @@ mod sampling;
 mod scheme;
 mod scheme_text;
 mod second_pass;
+mod snapshot;
 mod store;
 mod workspace;
 

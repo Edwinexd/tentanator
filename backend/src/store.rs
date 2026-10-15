@@ -1,7 +1,7 @@
 //! Persistence. Exam state lives in the Turso database (`db.rs`); exam files and
 //! exported Excel stay on disk.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 use calamine::{open_workbook_auto, Data, Reader};
@@ -15,6 +15,7 @@ use crate::domain::{
     SessionSummary,
 };
 use crate::error::{AppError, AppResult};
+use crate::snapshot::{RowState, COL_STATE};
 
 // ---------------------------------------------------------------------------
 // Timestamps & name sanitization
@@ -1548,7 +1549,12 @@ pub fn build_graded_xlsx(
 
     let mut workbook = Workbook::new();
     let sheet = workbook.add_worksheet();
-    for (c, header) in columns.iter().enumerate() {
+    // A roster that is itself an earlier export already has a state column;
+    // drop it so the fresh one stays the single trailing column.
+    let columns: Vec<&String> = columns.iter().filter(|c| *c != COL_STATE).collect();
+    let state_col = columns.len() as u16;
+    let state_header = COL_STATE.to_string();
+    for (c, header) in columns.iter().copied().chain([&state_header]).enumerate() {
         sheet
             .write_string(0, c as u16, header)
             .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
@@ -1556,7 +1562,8 @@ pub fn build_graded_xlsx(
     for (r, row) in exam_rows.iter().enumerate() {
         let rid = crate::domain::row_id(row, &exam.id_columns);
         let overrides = grades_by_row.get(&rid);
-        for (c, col) in columns.iter().enumerate() {
+        let mut state = BTreeMap::new();
+        for (c, col) in columns.iter().copied().enumerate() {
             let value = overrides
                 .and_then(|o| o.get(col))
                 .cloned()
@@ -1565,7 +1572,13 @@ pub fn build_graded_xlsx(
             sheet
                 .write_string((r + 1) as u32, c as u16, &value)
                 .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
+            if exam.output_columns.contains(col) {
+                state.insert(col.clone(), value);
+            }
         }
+        sheet
+            .write_string((r + 1) as u32, state_col, RowState::new(&exam.name, &rid, state).encode())
+            .map_err(|e| AppError::Other(anyhow::anyhow!(e)))?;
     }
     let bytes = workbook
         .save_to_buffer()

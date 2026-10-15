@@ -23,9 +23,10 @@ use crate::domain::{
     self, AIGradeSuggestion, Exam, ExamSummary, GradedItem, QuestionGrades, Session, SessionSummary,
 };
 use crate::error::{AppError, AppResult};
-use crate::grade::{grades_equal, validate_grade};
+use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
 use crate::scheme::{self, GradeScheme, StudentResult};
+use crate::snapshot::{self, Merge};
 use crate::{detect, global_bank, llm, moodle, scheme_text, second_pass, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
@@ -1325,19 +1326,30 @@ async fn preview_results(
 // Import & merge graded sheets
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct ColMapping {
     column: String,
     output_col: String,
 }
 
+/// `id_column` and `mappings` may be left empty for a sheet carrying the
+/// tentanator state column: the row id and question columns come from it.
 #[derive(Deserialize)]
 struct ImportReq {
     file: String,
+    #[serde(default)]
     id_column: String,
+    #[serde(default)]
     mappings: Vec<ColMapping>,
     #[serde(default)]
     label: Option<String>,
+}
+
+impl ImportReq {
+    /// Grade source recorded for cells this import writes or contests.
+    fn source(&self) -> String {
+        format!("imported:{}", self.label.as_deref().unwrap_or(&self.file))
+    }
 }
 
 #[derive(Deserialize)]
@@ -1358,30 +1370,133 @@ struct ConflictSample {
 #[derive(Default, Serialize)]
 struct ImportSummary {
     new: usize,
+    /// Edited in the sheet over a stored grade unchanged since export.
+    updated: usize,
     same: usize,
     conflict: usize,
     skipped: usize,
     unknown_ids: usize,
     conflicts: Vec<ConflictSample>,
+    /// The sheet carries the export state column (three-way merge).
+    snapshot: bool,
+    /// Mappings used (the auto-detected ones when the request had none).
+    mappings: Vec<ColMapping>,
 }
 
-/// Read roster + import file, returning (roster id-set, import rows).
-fn load_import(
+/// Read-only plan of a grade import: the summary plus the grades to write and
+/// the conflicts to queue. With the export state column, a cell untouched in
+/// the sheet is never a conflict and one edited over an unmoved stored grade
+/// overwrites it; see `snapshot::merge`.
+async fn plan_grade_import(
     s: &AppState,
+    conn: &turso::Connection,
     exam: &Exam,
-    file: &str,
-) -> AppResult<(std::collections::HashSet<String>, Vec<HashMap<String, String>>)> {
+    req: &ImportReq,
+) -> AppResult<(ImportSummary, Vec<(String, GradedItem)>, Vec<domain::GradeConflict>)> {
     let (roster, _) = exam_data(&s.config, exam)?;
-    let ids: std::collections::HashSet<String> = roster
+    let roster_by_id: HashMap<String, &HashMap<String, String>> = roster
         .iter()
-        .map(|r| domain::row_id(r, &exam.id_columns))
+        .map(|r| (domain::row_id(r, &exam.id_columns), r))
         .collect();
-    let ipath = store::resolve_exam_path(&s.config, file)
-        .ok_or_else(|| AppError::NotFound(format!("import file '{file}' not found")))?;
+    let ipath = store::resolve_exam_path(&s.config, &req.file)
+        .ok_or_else(|| AppError::NotFound(format!("import file '{}' not found", req.file)))?;
     let irows = store::read_exam_data(&ipath)?;
-    Ok((ids, irows))
+    let label = req.source();
+
+    let mut summary = ImportSummary {
+        snapshot: snapshot::sheet_has_state(&irows, &exam.name),
+        mappings: req.mappings.clone(),
+        ..Default::default()
+    };
+    if summary.mappings.is_empty() && summary.snapshot {
+        let headers = irows.first();
+        summary.mappings = exam
+            .output_columns
+            .iter()
+            .filter(|c| headers.is_some_and(|h| h.contains_key(*c)))
+            .map(|c| ColMapping { column: c.clone(), output_col: c.clone() })
+            .collect();
+    }
+
+    let mut writes = Vec::new();
+    let mut conflicts = Vec::new();
+    for irow in &irows {
+        let state = snapshot::RowState::of_row(irow, &exam.name);
+        let id = if req.id_column.is_empty() {
+            state.as_ref().map(|st| st.id.clone()).unwrap_or_default()
+        } else {
+            irow.get(&req.id_column).cloned().unwrap_or_default()
+        };
+        if id.is_empty() {
+            continue;
+        }
+        let Some(student) = roster_by_id.get(&id) else {
+            summary.unknown_ids += 1;
+            continue;
+        };
+        for m in &summary.mappings {
+            let incoming = irow.get(&m.column).cloned().unwrap_or_default();
+            if !domain::is_meaningful(&incoming) {
+                summary.skipped += 1;
+                continue;
+            }
+            let existing = store::get_graded(conn, &exam.name, &m.output_col, &id).await?;
+            let current = existing.as_ref().map(|(g, _)| g.as_str()).unwrap_or("");
+            let base = state.as_ref().and_then(|st| st.base(&m.column));
+            let input_text = exam
+                .questions
+                .get(&m.output_col)
+                .and_then(|q| student.get(&q.input_column))
+                .cloned()
+                .unwrap_or_default();
+            match snapshot::merge(base, current, &incoming) {
+                Merge::Same => summary.same += 1,
+                Merge::New | Merge::Update => {
+                    if existing.is_some() {
+                        summary.updated += 1;
+                    } else {
+                        summary.new += 1;
+                    }
+                    writes.push((
+                        m.output_col.clone(),
+                        GradedItem {
+                            row_id: id.clone(),
+                            input_text,
+                            grade: incoming,
+                            timestamp: store::now_iso(),
+                        },
+                    ));
+                }
+                Merge::Conflict => {
+                    let (existing_grade, existing_source) = existing.unwrap_or_default();
+                    summary.conflict += 1;
+                    if summary.conflicts.len() < 100 {
+                        summary.conflicts.push(ConflictSample {
+                            output_col: m.output_col.clone(),
+                            row_id: id.clone(),
+                            existing: existing_grade.clone(),
+                            incoming: incoming.clone(),
+                        });
+                    }
+                    conflicts.push(domain::GradeConflict {
+                        output_col: m.output_col.clone(),
+                        row_id: id.clone(),
+                        existing_grade,
+                        existing_source,
+                        incoming_grade: incoming,
+                        incoming_source: label.clone(),
+                        input_text,
+                        timestamp: store::now_iso(),
+                    });
+                }
+            }
+        }
+    }
+    Ok((summary, writes, conflicts))
 }
 
+/// Preview an import. With no mappings and no state column this returns an
+/// empty summary (`snapshot: false`), telling the client to ask for a mapping.
 async fn import_preview(
     State(s): State<AppState>,
     Path(name): Path<String>,
@@ -1391,44 +1506,7 @@ async fn import_preview(
     let exam = store::load_exam(&conn, &name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
-    let (roster_ids, irows) = load_import(&s, &exam, &req.file)?;
-
-    let mut summary = ImportSummary::default();
-    for irow in &irows {
-        let id = irow.get(&req.id_column).cloned().unwrap_or_default();
-        if id.is_empty() {
-            continue;
-        }
-        if !roster_ids.contains(&id) {
-            summary.unknown_ids += 1;
-            continue;
-        }
-        for m in &req.mappings {
-            let incoming = irow.get(&m.column).cloned().unwrap_or_default();
-            if !domain::is_meaningful(&incoming) {
-                summary.skipped += 1;
-                continue;
-            }
-            match store::get_graded(&conn, &name, &m.output_col, &id).await? {
-                None => summary.new += 1,
-                Some((existing, _)) => {
-                    if grades_equal(&existing, &incoming) {
-                        summary.same += 1;
-                    } else {
-                        summary.conflict += 1;
-                        if summary.conflicts.len() < 100 {
-                            summary.conflicts.push(ConflictSample {
-                                output_col: m.output_col.clone(),
-                                row_id: id.clone(),
-                                existing,
-                                incoming,
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let (summary, _, _) = plan_grade_import(&s, &conn, &exam, &req).await?;
     Ok(Json(summary))
 }
 
@@ -1441,83 +1519,24 @@ async fn import_apply(
     let exam = store::load_exam(&conn, &name)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("exam '{name}' not found")))?;
-    let (roster, _) = exam_data(&s.config, &exam)?;
-    let roster_by_id: HashMap<String, &HashMap<String, String>> = roster
-        .iter()
-        .map(|r| (domain::row_id(r, &exam.id_columns), r))
-        .collect();
-    let (roster_ids, irows) = load_import(&s, &exam, &req.file)?;
-    let label = format!(
-        "imported:{}",
-        req.label.clone().unwrap_or_else(|| req.file.clone())
-    );
-
-    let mut summary = ImportSummary::default();
-    // One transaction for the whole apply: a mid-loop failure rolls back rather
+    let label = req.source();
+    // Plan and write in one transaction: a mid-loop failure rolls back rather
     // than leaving a half-applied import.
-    store::transaction(&conn, async {
-        for irow in &irows {
-            let id = irow.get(&req.id_column).cloned().unwrap_or_default();
-            if id.is_empty() {
-                continue;
-            }
-            if !roster_ids.contains(&id) {
-                summary.unknown_ids += 1;
-                continue;
-            }
-            for m in &req.mappings {
-                let incoming = irow.get(&m.column).cloned().unwrap_or_default();
-                if !domain::is_meaningful(&incoming) {
-                    summary.skipped += 1;
-                    continue;
-                }
-                let input_text = exam
-                    .questions
-                    .get(&m.output_col)
-                    .and_then(|q| roster_by_id.get(&id).and_then(|r| r.get(&q.input_column)))
-                    .cloned()
-                    .unwrap_or_default();
-                match store::get_graded(&conn, &name, &m.output_col, &id).await? {
-                    Some((existing, existing_source)) if !grades_equal(&existing, &incoming) => {
-                        summary.conflict += 1;
-                        store::add_conflict(
-                            &conn,
-                            &name,
-                            &domain::GradeConflict {
-                                output_col: m.output_col.clone(),
-                                row_id: id.clone(),
-                                existing_grade: existing,
-                                existing_source,
-                                incoming_grade: incoming.clone(),
-                                incoming_source: label.clone(),
-                                input_text,
-                                timestamp: store::now_iso(),
-                            },
-                        )
-                        .await?;
-                    }
-                    other => {
-                        if other.is_some() {
-                            // Identical grade already present: leave it (and its
-                            // source provenance) untouched.
-                            summary.same += 1;
-                        } else {
-                            summary.new += 1;
-                            let item = GradedItem {
-                                row_id: id.clone(),
-                                input_text,
-                                grade: incoming.clone(),
-                                timestamp: store::now_iso(),
-                            };
-                            store::put_graded_item(&conn, &name, &m.output_col, &item, &label, "")
-                                .await?;
-                        }
-                    }
-                }
-            }
+    let summary = store::transaction(&conn, async {
+        let (summary, writes, conflicts) = plan_grade_import(&s, &conn, &exam, &req).await?;
+        if summary.mappings.is_empty() {
+            return Err(AppError::BadRequest(
+                "no columns mapped (the sheet has no tentanator state column)".into(),
+            ));
+        }
+        for (col, item) in &writes {
+            store::put_graded_item(&conn, &name, col, item, &label, "").await?;
+        }
+        for c in &conflicts {
+            store::add_conflict(&conn, &name, c).await?;
         }
         store::touch(&conn, &name).await?;
-        Ok::<_, AppError>(())
+        Ok::<_, AppError>(summary)
     })
     .await?;
     Ok(Json(summary))
@@ -1715,7 +1734,8 @@ async fn export_second_pass(
 }
 
 /// Import a filled review sheet. The reviewer is authoritative: changed points
-/// overwrite the stored grade (source `second-pass`), no conflict queue.
+/// overwrite the stored grade (source `second-pass`), unless the sheet's state
+/// column shows the stored points also moved since export (queued as conflicts).
 async fn second_pass_import(
     State(s): State<AppState>,
     Path(name): Path<String>,
@@ -1725,14 +1745,29 @@ async fn second_pass_import(
     let path = store::resolve_exam_path(&s.config, &req.file)
         .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", req.file)))?;
     let sheet = store::read_exam_data(&path)?;
-    let (mut summary, writes) = second_pass::plan_import(&exam, &rows, &sheet)?;
-    if req.dry_run || writes.is_empty() {
+    let (mut summary, writes, conflicts) = second_pass::plan_import(&exam, &rows, &sheet)?;
+    if req.dry_run || (writes.is_empty() && conflicts.is_empty()) {
         return Ok(Json(summary));
     }
     let conn = s.db().await;
     store::transaction(&conn, async {
         for (col, item) in &writes {
             store::put_graded_item(&conn, &name, col, item, second_pass::SOURCE, "").await?;
+        }
+        for (col, item) in conflicts {
+            let (existing_grade, existing_source) =
+                store::get_graded(&conn, &name, &col, &item.row_id).await?.unwrap_or_default();
+            let conflict = domain::GradeConflict {
+                output_col: col,
+                row_id: item.row_id,
+                existing_grade,
+                existing_source,
+                incoming_grade: item.grade,
+                incoming_source: second_pass::SOURCE.to_string(),
+                input_text: item.input_text,
+                timestamp: item.timestamp,
+            };
+            store::add_conflict(&conn, &name, &conflict).await?;
         }
         store::touch(&conn, &name).await?;
         Ok::<_, AppError>(())
