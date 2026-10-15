@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { Fragment, useEffect, useMemo, useState } from 'react'
 import { api, type RenderData, type RenderQuestion } from '#/lib/api'
+import { gradeLabel } from '#/lib/utils'
 import { ExamNav } from '#/components/ExamNav'
 import { PageShell } from '#/components/PageShell'
 import { Badge } from '#/components/ui/badge'
@@ -98,7 +99,7 @@ function TableView() {
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                        <TableCell>{s.grade || '-'}</TableCell>
+                        <TableCell>{gradeLabel(s)}</TableCell>
                         <TableCell className="text-right">{s.total.toFixed(1)}</TableCell>
                         {s.questions.map((q, i) => (
                           <TableCell

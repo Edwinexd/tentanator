@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 import { api, type ResultsResponse } from '#/lib/api'
+import { gradeLabel } from '#/lib/utils'
 import { ExamNav } from '#/components/ExamNav'
 import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
@@ -157,7 +158,7 @@ function ResultsView() {
                   {data.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade || '-'}</TableCell>
+                      <TableCell>{gradeLabel(s)}</TableCell>
                       <TableCell>{s.total.toFixed(1)}</TableCell>
                       <TableCell>
                         {s.estimated.length > 0 ? s.estimated.join(', ') : '-'}

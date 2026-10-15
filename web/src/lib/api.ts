@@ -143,6 +143,7 @@ export interface RenderQuestion {
 export interface RenderStudent {
   id: string
   grade: string
+  rounded_from: string | null
   total: number
   questions: RenderQuestion[]
 }

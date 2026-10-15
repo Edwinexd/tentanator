@@ -8,13 +8,16 @@
 //! when <cond> -> <grade>      a guarded rule (first match wins)
 //! total_var: <name>           headline total var (optional)
 //! default_grade: <grade>      grade when no rule matches (optional)
+//! round_up: <points> on <var>[, <var>...]
+//!                             grade rounding (optional): `points` added to one
+//!                             listed scheme var at a time, best grade wins
 //! ```
 //!
 //! Blank lines and `#` comments are ignored. `emit_scheme` is the exact inverse
 //! of `parse_scheme`, so loading then saving a scheme is a no-op. Ported from
 //! the former web client `schemeToText` / `textToScheme`.
 
-use crate::scheme::{GradeRule, GradeScheme, SchemeConst, SchemeVar};
+use crate::scheme::{GradeRule, GradeScheme, SchemeConst, SchemeRounding, SchemeVar};
 
 /// Serialize a scheme to the readable DSL.
 pub fn emit_scheme(s: &GradeScheme) -> String {
@@ -26,6 +29,9 @@ pub fn emit_scheme(s: &GradeScheme) -> String {
     }
     if !s.default_grade.is_empty() {
         meta.push(format!("default_grade: {}", s.default_grade));
+    }
+    if let Some(r) = &s.rounding {
+        meta.push(format!("round_up: {} on {}", fmt_num(r.points), r.vars.join(", ")));
     }
     if !meta.is_empty() {
         sections.push(meta.join("\n"));
@@ -82,6 +88,21 @@ pub fn parse_scheme(text: &str) -> Result<GradeScheme, String> {
             s.total_var = rest.trim().to_string();
         } else if let Some(rest) = line.strip_prefix("default_grade:") {
             s.default_grade = rest.trim().to_string();
+        } else if let Some(rest) = line.strip_prefix("round_up:") {
+            let parsed = rest.split_once(" on ").and_then(|(pts, vars)| {
+                let points = pts.trim().parse::<f64>().ok().filter(|p| p.is_finite() && *p > 0.0)?;
+                let vars: Vec<String> =
+                    vars.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect();
+                (!vars.is_empty()).then_some(SchemeRounding { points, vars })
+            });
+            match parsed {
+                Some(r) => s.rounding = Some(r),
+                None => {
+                    return Err(format!(
+                        "{at}: expected 'round_up: <points> on <var>[, <var>...]', got '{line}'"
+                    ))
+                }
+            }
         } else if let Some(body) = line.strip_prefix("const ") {
             let (name, value) = match body.split_once('=') {
                 Some((n, v)) => (n.trim(), v.trim().parse::<f64>().ok()),
@@ -145,6 +166,10 @@ mod tests {
             ],
             total_var: "total".into(),
             default_grade: "F".into(),
+            rounding: Some(SchemeRounding {
+                points: 0.5,
+                vars: vec!["total".into(), "se_total".into()],
+            }),
         }
     }
 
@@ -162,6 +187,21 @@ mod tests {
         assert_eq!(parsed.rules[1].grade, "A");
         assert_eq!(parsed.total_var, "total");
         assert_eq!(parsed.default_grade, "F");
+        let r = parsed.rounding.unwrap();
+        assert_eq!((r.points, r.vars.join(",")), (0.5, "total,se_total".to_string()));
+    }
+
+    #[test]
+    fn round_up_needs_points_and_a_target() {
+        assert!(!emit_scheme(&GradeScheme::default()).contains("round_up"));
+        assert_eq!(
+            emit_scheme(&parse_scheme("round_up: 0.5 on total").unwrap()),
+            "round_up: 0.5 on total"
+        );
+        for bad in ["round_up: 0.5", "round_up: -1 on total", "round_up: 0.5 on ", "round_up: x on total"] {
+            let err = parse_scheme(bad).unwrap_err();
+            assert!(err.contains("round_up"), "{bad}: {err}");
+        }
     }
 
     #[test]

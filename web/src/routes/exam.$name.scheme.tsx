@@ -5,6 +5,7 @@ import {
   type QuestionConfigUpdate,
   type ResultsResponse,
 } from '#/lib/api'
+import { gradeLabel } from '#/lib/utils'
 import { ExamNav } from '#/components/ExamNav'
 import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
@@ -45,6 +46,7 @@ const QTYPES: { v: string; l: string }[] = [
   { v: 'mc', l: 'Multiple choice' },
   { v: 'sc', l: 'Single choice' },
   { v: 'essay', l: 'Essay' },
+  { v: 'code', l: 'Code (monospace in PDF)' },
   { v: 'comment', l: 'Comment (ungraded)' },
 ]
 
@@ -347,7 +349,9 @@ function SchemeView() {
           <CardDescription>
             One statement per line: <code>const name = value</code>,{' '}
             <code>name = expr</code>, <code>when cond -&gt; grade</code>. Optional{' '}
-            <code>total_var:</code> / <code>default_grade:</code>. Blank lines and{' '}
+            <code>total_var:</code> / <code>default_grade:</code> /{' '}
+            <code>round_up: 0.5 on total</code> (adds 0.5 to one listed scheme var at a time;
+            the best grade wins). Blank lines and{' '}
             <code>#</code> comments ignored.
           </CardDescription>
         </CardHeader>
@@ -416,7 +420,7 @@ function SchemeView() {
                   {preview.results.map((s) => (
                     <TableRow key={s.id}>
                       <TableCell className="font-mono text-xs">{s.id}</TableCell>
-                      <TableCell>{s.grade || '-'}</TableCell>
+                      <TableCell>{gradeLabel(s)}</TableCell>
                       <TableCell>{s.total.toFixed(1)}</TableCell>
                       <TableCell>{s.estimated.length > 0 ? s.estimated.join(', ') : '-'}</TableCell>
                       <TableCell>{s.complete ? '✓' : '…'}</TableCell>

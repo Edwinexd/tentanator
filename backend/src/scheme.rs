@@ -73,13 +73,36 @@ pub struct GradeScheme {
     /// Grade when no rule matches (default "F").
     #[serde(default)]
     pub default_grade: String,
+    /// Optional grade rounding (none = off). Totals stay as graded; results
+    /// record the raw grade.
+    #[serde(default)]
+    pub rounding: Option<SchemeRounding>,
+}
+
+/// Grade rounding: `points` added to one named scheme var at a time (and so to
+/// the vars computed from it), best resulting grade wins. Only the listed vars
+/// move, so rules gating on other vars (an essay > 0) cannot be rounded past.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
+pub struct SchemeRounding {
+    pub points: f64,
+    /// Scheme var names (groups via their `groupsum` var), tried one at a time.
+    pub vars: Vec<String>,
+}
+
+/// The scheme's rounding when it would do anything.
+pub fn active_rounding(scheme: &GradeScheme) -> Option<&SchemeRounding> {
+    scheme.rounding.as_ref().filter(|r| r.points > 0.0 && !r.vars.is_empty())
 }
 
 #[derive(Clone, Debug, Serialize, TS)]
 #[ts(export, export_to = "../../web/src/lib/generated/")]
 pub struct StudentResult {
     pub id: String,
+    /// Final grade, after the scheme's rounding.
     pub grade: String,
+    /// Grade before rounding, when rounding lifted it.
+    pub rounded_from: Option<String>,
     pub total: f64,
     pub vars: HashMap<String, f64>,
     /// Question vars whose value was estimated (ungraded + estimator applied).
@@ -181,6 +204,7 @@ struct CompiledScheme<'a> {
     vars: Vec<Option<Node>>,
     rules: Vec<Option<Node>>,
     total: Option<Node>,
+    ranks: HashMap<String, usize>,
 }
 
 /// Outcome of evaluating a scheme over fully-bound question points.
@@ -197,11 +221,48 @@ impl<'a> CompiledScheme<'a> {
             vars: scheme.vars.iter().map(|v| compile(&v.expr)).collect(),
             rules: scheme.rules.iter().map(|r| compile(&r.when)).collect(),
             total: compile(total_var(scheme)),
+            ranks: grade_ranks(scheme),
         }
+    }
+
+    fn rank(&self, g: &str) -> usize {
+        self.ranks.get(g).copied().unwrap_or(usize::MAX)
     }
 
     /// Evaluate aggregate vars, total and the first matching rule.
     fn evaluate(&self, questions: &[QuestionConfig], var_points: &HashMap<String, f64>) -> Evaluated {
+        self.evaluate_with(questions, var_points, None)
+    }
+
+    /// The scheme's rounding applied to `raw`, the grade of `var_points`: each
+    /// target var bumped in turn, the best grade wins.
+    fn rounded(&self, questions: &[QuestionConfig], var_points: &HashMap<String, f64>, raw: String) -> String {
+        let Some(r) = active_rounding(self.scheme) else {
+            return raw;
+        };
+        let mut best = raw;
+        for target in &r.vars {
+            let g = self.evaluate_with(questions, var_points, Some((target, r.points))).grade;
+            if self.rank(&g) < self.rank(&best) {
+                best = g;
+            }
+        }
+        best
+    }
+
+    /// Final (rounded) grade of `var_points`.
+    fn final_grade(&self, questions: &[QuestionConfig], var_points: &HashMap<String, f64>) -> String {
+        let raw = self.evaluate(questions, var_points).grade;
+        self.rounded(questions, var_points, raw)
+    }
+
+    /// `evaluate`, optionally adding `bump.1` to scheme var `bump.0`.
+    fn evaluate_with(
+        &self,
+        questions: &[QuestionConfig],
+        var_points: &HashMap<String, f64>,
+        bump: Option<(&str, f64)>,
+    ) -> Evaluated {
         let mut ctx = base_context(self.scheme);
         for (k, v) in var_points {
             let _ = ctx.set_value(k.clone(), Value::Float(*v));
@@ -213,10 +274,12 @@ impl<'a> CompiledScheme<'a> {
         // below a band threshold (mirrors the legacy `round(total, 2)`).
         let mut vars = HashMap::new();
         for (sv, node) in self.scheme.vars.iter().zip(&self.vars) {
+            let extra = bump.filter(|(name, _)| *name == sv.name).map_or(0.0, |(_, d)| d);
             let v = round2(
                 node.as_ref()
                     .and_then(|n| n.eval_number_with_context(&ctx).ok())
-                    .unwrap_or(0.0),
+                    .unwrap_or(0.0)
+                    + extra,
             );
             let _ = ctx.set_value(sv.name.clone(), Value::Float(v));
             vars.insert(sv.name.clone(), v);
@@ -321,10 +384,14 @@ pub fn compute_student(
     points: &HashMap<String, Option<f64>>,
 ) -> StudentResult {
     let (var_points, estimated, complete) = resolve_points(scheme, questions, points);
-    let ev = CompiledScheme::new(scheme).evaluate(questions, &var_points);
+    let compiled = CompiledScheme::new(scheme);
+    let ev = compiled.evaluate(questions, &var_points);
+    let grade = compiled.rounded(questions, &var_points, ev.grade.clone());
+    let rounded_from = (grade != ev.grade).then_some(ev.grade);
     StudentResult {
         id: id.to_string(),
-        grade: ev.grade,
+        grade,
+        rounded_from,
         total: ev.total,
         vars: ev.vars,
         estimated,
@@ -398,54 +465,57 @@ pub struct GradeGap {
 /// Headroom per question var: how many more points it can take.
 type Room<'a> = Vec<(&'a str, f64)>;
 
-/// Find the smallest extra points (at most `margin`) that lift a student to a
-/// better grade. Rules are arbitrary expressions, so instead of reading
-/// thresholds this simulates: for each source (any question, each group, each
-/// question alone) it adds points into questions' headroom (`max_points` minus
-/// current, estimated questions excluded) and bisects for the cheapest amount
-/// that changes the grade for the better. Assumes more points never worsen the
-/// grade, which holds for any sane scheme. `None` when no source reaches a
-/// better grade within the margin.
-pub fn grade_gap(
-    scheme: &GradeScheme,
-    questions: &[QuestionConfig],
-    points: &HashMap<String, Option<f64>>,
-    margin: f64,
-) -> Option<GradeGap> {
-    let compiled = CompiledScheme::new(scheme);
-    let ranks = grade_ranks(scheme);
-    let rank = |g: &str| ranks.get(g).copied().unwrap_or(usize::MAX);
-    let (base, estimated, _) = resolve_points(scheme, questions, points);
-    let current = rank(&compiled.evaluate(questions, &base).grade);
+/// Simulates extra graded points on a student's bound points for the second
+/// pass. Rules are arbitrary expressions, so instead of reading thresholds it
+/// pours points into questions' headroom (`max_points` minus current,
+/// estimated questions excluded) from each source (any question, each group,
+/// each question alone) and re-evaluates, rounding included. Assumes more
+/// points never worsen the grade, which holds for any sane scheme.
+struct Lifter<'a> {
+    compiled: &'a CompiledScheme<'a>,
+    questions: &'a [QuestionConfig],
+    base: &'a HashMap<String, f64>,
+    sources: Vec<(LiftSource, String, Room<'a>)>,
+}
 
-    let headroom: Room = questions
-        .iter()
-        .filter(|q| q.max_points > 0.0 && !estimated.contains(&q.var))
-        .map(|q| (q.var.as_str(), q.max_points - base.get(&q.var).copied().unwrap_or(0.0)))
-        .filter(|(_, h)| *h > 1e-9)
-        .collect();
-
-    let mut sources: Vec<(LiftSource, String, Room)> =
-        vec![(LiftSource::Any, String::new(), headroom.clone())];
-    let mut groups: Vec<&str> =
-        questions.iter().map(|q| q.group.as_str()).filter(|g| !g.is_empty()).collect();
-    groups.sort();
-    groups.dedup();
-    for g in groups {
-        let in_group: Room = headroom
+impl<'a> Lifter<'a> {
+    fn new(
+        compiled: &'a CompiledScheme<'a>,
+        questions: &'a [QuestionConfig],
+        base: &'a HashMap<String, f64>,
+        estimated: &[String],
+    ) -> Self {
+        let headroom: Room = questions
             .iter()
-            .copied()
-            .filter(|(v, _)| questions.iter().any(|q| q.var == *v && q.group == g))
+            .filter(|q| q.max_points > 0.0 && !estimated.contains(&q.var))
+            .map(|q| (q.var.as_str(), q.max_points - base.get(&q.var).copied().unwrap_or(0.0)))
+            .filter(|(_, h)| *h > 1e-9)
             .collect();
-        sources.push((LiftSource::Group, g.to_string(), in_group));
-    }
-    for &(v, h) in &headroom {
-        sources.push((LiftSource::Question, v.to_string(), vec![(v, h)]));
+
+        let mut sources: Vec<(LiftSource, String, Room)> =
+            vec![(LiftSource::Any, String::new(), headroom.clone())];
+        let mut groups: Vec<&str> =
+            questions.iter().map(|q| q.group.as_str()).filter(|g| !g.is_empty()).collect();
+        groups.sort();
+        groups.dedup();
+        for g in groups {
+            let in_group: Room = headroom
+                .iter()
+                .copied()
+                .filter(|(v, _)| questions.iter().any(|q| q.var == *v && q.group == g))
+                .collect();
+            sources.push((LiftSource::Group, g.to_string(), in_group));
+        }
+        for &(v, h) in &headroom {
+            sources.push((LiftSource::Question, v.to_string(), vec![(v, h)]));
+        }
+        Lifter { compiled, questions, base, sources }
     }
 
-    // Grade after pouring `delta` into `room`, filling each question in turn.
-    let lifted = |room: &[(&str, f64)], delta: f64| -> String {
-        let mut pts = base.clone();
+    /// Final grade after pouring `delta` into `room`, filling each question in
+    /// turn.
+    fn lifted(&self, room: &[(&str, f64)], delta: f64) -> String {
+        let mut pts = self.base.clone();
         let mut left = delta;
         for &(v, h) in room {
             let add = left.min(h);
@@ -455,26 +525,52 @@ pub fn grade_gap(
                 break;
             }
         }
-        compiled.evaluate(questions, &pts).grade
-    };
+        self.compiled.final_grade(self.questions, &pts)
+    }
+}
+
+fn room_total(room: &[(&str, f64)]) -> f64 {
+    room.iter().map(|(_, h)| h).sum()
+}
+
+/// Find the smallest extra graded points (at most `margin`) that lift a
+/// student to a better final grade, rounding included: with rounding on, a
+/// student it already lifted is measured from the rounded grade. For each
+/// source it bisects for the cheapest amount that changes the grade for the
+/// better. `None` when no source reaches a better grade within the margin.
+pub fn grade_gap(
+    scheme: &GradeScheme,
+    questions: &[QuestionConfig],
+    points: &HashMap<String, Option<f64>>,
+    margin: f64,
+) -> Option<GradeGap> {
+    let compiled = CompiledScheme::new(scheme);
+    let (base, estimated, _) = resolve_points(scheme, questions, points);
+    let lifter = Lifter::new(&compiled, questions, &base, &estimated);
+    let current = compiled.rank(&compiled.final_grade(questions, &base));
 
     let mut lifts: Vec<GradeLift> = Vec::new();
-    for (source, key, room) in sources {
-        let cap = margin.min(room.iter().map(|(_, h)| h).sum());
-        if cap <= 0.0 || rank(&lifted(&room, cap)) >= current {
+    for (source, key, room) in &lifter.sources {
+        let cap = margin.min(room_total(room));
+        if cap <= 0.0 || compiled.rank(&lifter.lifted(room, cap)) >= current {
             continue;
         }
         let (mut lo, mut hi) = (0.0, cap);
         while hi - lo > 1e-4 {
             let mid = (lo + hi) / 2.0;
-            if rank(&lifted(&room, mid)) < current {
+            if compiled.rank(&lifter.lifted(room, mid)) < current {
                 hi = mid;
             } else {
                 lo = mid;
             }
         }
-        let points = ((hi * 100.0).ceil() / 100.0).min(cap);
-        lifts.push(GradeLift { source, key, points, grade: lifted(&room, points) });
+        let reach = round2(((hi * 100.0).ceil() / 100.0).min(cap));
+        lifts.push(GradeLift {
+            source: source.clone(),
+            key: key.clone(),
+            points: reach,
+            grade: lifter.lifted(room, reach),
+        });
     }
     lifts.sort_by(|a, b| a.points.partial_cmp(&b.points).unwrap_or(std::cmp::Ordering::Equal));
     let best = lifts.first()?;
@@ -509,6 +605,19 @@ pub fn validate_scheme(scheme: &GradeScheme, question_vars: &[String]) -> Result
     }
     for r in &scheme.rules {
         check(&r.when, &available)?;
+    }
+    if let Some(r) = &scheme.rounding {
+        if !(r.points.is_finite() && r.points > 0.0) {
+            return Err(format!("rounding points must be a positive number, got {}", r.points));
+        }
+        if r.vars.is_empty() {
+            return Err("rounding needs at least one scheme var to round".into());
+        }
+        for v in &r.vars {
+            if !scheme.vars.iter().any(|sv| &sv.name == v) {
+                return Err(format!("rounding targets `{v}`, which is not a scheme var"));
+            }
+        }
     }
     Ok(())
 }
@@ -589,6 +698,7 @@ mod tests {
             ],
             total_var: "total".into(),
             default_grade: "F".into(),
+            rounding: None,
         }
     }
 
@@ -668,6 +778,119 @@ mod tests {
             .iter()
             .any(|l| l.source == LiftSource::Question && l.key == "hci_essay"));
         assert!(!g.lifts.iter().any(|l| l.key == "se_mc"));
+    }
+
+    fn round(points: f64, vars: &[&str]) -> Option<SchemeRounding> {
+        Some(SchemeRounding { points, vars: vars.iter().map(|v| v.to_string()).collect() })
+    }
+
+    // IDSV-shaped: plain thresholds on a total spread over two questions.
+    fn banded(rounding: Option<SchemeRounding>) -> (GradeScheme, Vec<QuestionConfig>) {
+        let rule = |w: &str, g: &str| GradeRule { when: w.into(), grade: g.into() };
+        let scheme = GradeScheme {
+            vars: vec![SchemeVar { name: "total".into(), expr: "q1 + q2".into() }],
+            rules: vec![rule("total >= 34", "A"), rule("total >= 32", "B"), rule("total >= 18", "FX")],
+            total_var: "total".into(),
+            default_grade: "F".into(),
+            rounding,
+            ..Default::default()
+        };
+        let qs = ["q1", "q2"]
+            .iter()
+            .map(|v| QuestionConfig { var: v.to_string(), max_points: 20.0, ..Default::default() })
+            .collect();
+        (scheme, qs)
+    }
+
+    fn banded_points(q1: f64, q2: f64) -> HashMap<String, Option<f64>> {
+        HashMap::from([("q1".to_string(), Some(q1)), ("q2".to_string(), Some(q2))])
+    }
+
+    #[test]
+    fn rounding_lifts_within_points_only() {
+        let (scheme, qs) = banded(round(0.5, &["total"]));
+        let r = compute_student("s", &scheme, &qs, &banded_points(17.0, 16.5));
+        assert_eq!((r.grade.as_str(), r.rounded_from.as_deref()), ("A", Some("B")));
+        assert_eq!(r.total, 33.5, "totals stay as graded");
+        let r = compute_student("s", &scheme, &qs, &banded_points(17.0, 16.49));
+        assert_eq!((r.grade.as_str(), r.rounded_from), ("B", None));
+        // F -> FX rounds like any other step.
+        let r = compute_student("s", &scheme, &qs, &banded_points(9.0, 8.5));
+        assert_eq!((r.grade.as_str(), r.rounded_from.as_deref()), ("FX", Some("F")));
+        // Off without rounding, and with no target vars.
+        for off in [None, round(0.5, &[])] {
+            let (s, _) = banded(off);
+            assert_eq!(compute_student("s", &s, &qs, &banded_points(17.0, 16.5)).grade, "B");
+        }
+    }
+
+    #[test]
+    fn rounding_total_matches_second_pass_on_threshold_scheme() {
+        // On a plain total scheme, rounding total by m lifts exactly the
+        // students a margin-m second pass lists.
+        let (off, qs) = banded(None);
+        let (on, _) = banded(round(0.5, &["total"]));
+        for q2 in [15.4, 15.5, 15.51, 16.0, 16.49, 16.5, 16.99, 17.0] {
+            let pts = banded_points(17.0, q2);
+            let listed = grade_gap(&off, &qs, &pts, 0.5).is_some();
+            let rounded = compute_student("s", &on, &qs, &pts).rounded_from.is_some();
+            assert_eq!(listed, rounded, "q2 = {q2}");
+        }
+    }
+
+    #[test]
+    fn rounding_cannot_pass_gates_on_other_vars() {
+        // PVT caps at D on a zero essay; rounding total must not lift it,
+        // though a hundredth on that essay would.
+        let mut scheme = pvt_scheme();
+        scheme.rounding = round(0.5, &["total"]);
+        let points: HashMap<String, Option<f64>> = pvt_with_max()
+            .iter()
+            .zip([18.0, 18.0, 7.0, 0.0])
+            .map(|(q, p)| (q.var.clone(), Some(p)))
+            .collect();
+        let r = compute_student("s", &scheme, &pvt_with_max(), &points);
+        assert_eq!((r.grade.as_str(), r.rounded_from), ("D", None));
+    }
+
+    #[test]
+    fn rounding_a_section_var_feeds_derived_vars() {
+        // Rounding se_total also moves total, which derives from it.
+        let mut scheme = pvt_scheme();
+        scheme.rounding = round(0.5, &["se_total"]);
+        // se 9.5 < secmin 10: F; rounding se_total to 10 clears the gate (E).
+        let points: HashMap<String, Option<f64>> = pvt_with_max()
+            .iter()
+            .zip([8.5, 12.0, 1.0, 1.0])
+            .map(|(q, p)| (q.var.clone(), Some(p)))
+            .collect();
+        let r = compute_student("s", &scheme, &pvt_with_max(), &points);
+        assert_eq!((r.grade.as_str(), r.rounded_from.as_deref()), ("E", Some("F")));
+        assert_eq!(r.vars["total"], 22.5, "reported vars stay as graded");
+    }
+
+    #[test]
+    fn gap_counts_from_rounded_grade() {
+        // 33.0 rounds to 33.5 (still B): 0.5 more graded points reach A.
+        let (scheme, qs) = banded(round(0.5, &["total"]));
+        let g = grade_gap(&scheme, &qs, &banded_points(17.0, 16.0), 1.0).unwrap();
+        assert_eq!(g.next_grade, "A");
+        assert!((g.points - 0.5).abs() < 1e-9, "{}", g.points);
+        // Already rounded to A: nothing better to reach.
+        assert!(grade_gap(&scheme, &qs, &banded_points(17.0, 16.5), 1.0).is_none());
+    }
+
+    #[test]
+    fn validate_checks_rounding_targets() {
+        let qvars = vec!["q1".to_string(), "q2".to_string()];
+        let (mut scheme, _) = banded(round(0.5, &["totl"]));
+        assert!(validate_scheme(&scheme, &qvars).unwrap_err().contains("totl"));
+        scheme.rounding = round(0.5, &["q1"]);
+        assert!(validate_scheme(&scheme, &qvars).is_err(), "question vars are not targets");
+        scheme.rounding = round(0.0, &["total"]);
+        assert!(validate_scheme(&scheme, &qvars).is_err());
+        scheme.rounding = round(0.5, &["total"]);
+        assert!(validate_scheme(&scheme, &qvars).is_ok());
     }
 
     #[test]

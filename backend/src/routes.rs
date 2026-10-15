@@ -1617,6 +1617,7 @@ struct RenderQuestion {
 struct RenderStudent {
     id: String,
     grade: String,
+    rounded_from: Option<String>,
     total: f64,
     questions: Vec<RenderQuestion>,
 }
@@ -1662,6 +1663,7 @@ async fn render_data(
         students.push(RenderStudent {
             id: rid,
             grade: sr.grade,
+            rounded_from: sr.rounded_from,
             total: sr.total,
             questions: rq,
         });
@@ -1777,6 +1779,10 @@ async fn second_pass_import(
     Ok(Json(summary))
 }
 
+/// A results PDF compiles LaTeX per student and merges scan covers; a few
+/// hundred students take minutes, far past the client's default timeout.
+const RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
 async fn export_results_pdf(
     State(s): State<AppState>,
     Path(name): Path<String>,
@@ -1798,6 +1804,7 @@ async fn export_results_pdf(
     let resp = s
         .http
         .post(&url)
+        .timeout(RENDER_TIMEOUT)
         .json(&body)
         .send()
         .await

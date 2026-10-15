@@ -7,7 +7,7 @@ are concatenated into one PDF.
 
 Generalized from the PVT pipeline (reference/pvt/scripts) - nothing about
 sections or question counts is hardcoded; it works off the examination's
-render-data: { exam, students: [ { id, grade, total,
+render-data: { exam, students: [ { id, grade, rounded_from, total,
 questions: [ { label, group, qtype, response, points, max, estimated } ] } ] }.
 """
 import json
@@ -16,18 +16,49 @@ import re
 import subprocess
 import tempfile
 import threading
+import unicodedata
 
 import barcode
 import pikepdf
 from barcode.writer import ImageWriter
 
 
+# Non-Latin characters pdflatex (utf8 + T1) cannot print, mapped to LaTeX.
+_LATEX_SYMBOLS = {
+    "→": r"\ensuremath{\rightarrow}", "➡": r"\ensuremath{\rightarrow}",
+    "⟶": r"\ensuremath{\longrightarrow}", "←": r"\ensuremath{\leftarrow}",
+    "↔": r"\ensuremath{\leftrightarrow}", "⇒": r"\ensuremath{\Rightarrow}",
+    "⇐": r"\ensuremath{\Leftarrow}", "⇔": r"\ensuremath{\Leftrightarrow}",
+    "↑": r"\ensuremath{\uparrow}", "↓": r"\ensuremath{\downarrow}",
+    "≤": r"\ensuremath{\leq}", "≥": r"\ensuremath{\geq}", "≠": r"\ensuremath{\neq}",
+    "≈": r"\ensuremath{\approx}", "∞": r"\ensuremath{\infty}", "−": "-",
+    "•": r"\textbullet{}", "…": r"\ldots{}", "€": r"\texteuro{}", "™": r"\texttrademark{}",
+}
+# Beyond Latin-1/Extended-A, characters utf8 + T1 prints as-is.
+_LATEX_OK = set("–—‘’‚“”„†‡‰‹›")
+
+
+def _latex_char(c):
+    """One character pdflatex can print: as-is, a LaTeX symbol, dropped if
+    invisible (variation selectors, zero-width), else a visible U+XXXX tag."""
+    if ord(c) < 0x180 or c in _LATEX_OK:
+        return c
+    if c in _LATEX_SYMBOLS:
+        return _LATEX_SYMBOLS[c]
+    if unicodedata.category(c) in ("Cf", "Mn", "Me") or 0xFE00 <= ord(c) <= 0xFE0F:
+        return ""
+    return f"[U+{ord(c):04X}]"
+
+
 def latex_escape(s):
     if s is None:
         return ""
+    # Compose decomposed accents (macOS text has "a" + U+0308 for "ä"), which
+    # pdflatex rejects; marks with no precomposed form drop in _latex_char.
+    s = unicodedata.normalize("NFC", str(s))
     # Replace backslash with a sentinel first so the braces in its replacement
     # (\textbackslash{}) are not themselves escaped by the brace rules below.
-    s = str(s).replace("\\", "\x00")
+    s = s.replace("\\", "\x00")
     for a, b in [
         ("&", r"\&"), ("%", r"\%"), ("$", r"\$"), ("#", r"\#"),
         ("_", r"\_"), ("{", r"\{"), ("}", r"\}"),
@@ -35,7 +66,76 @@ def latex_escape(s):
         ("<", r"\textless{}"), (">", r"\textgreater{}"),
     ]:
         s = s.replace(a, b)
-    return s.replace("\x00", r"\textbackslash{}")
+    s = s.replace("\x00", r"\textbackslash{}")
+    return "".join(_latex_char(c) for c in s)
+
+
+def _code_break(run, prev):
+    """Decode one flattened line break: (blank line before?, indent). Moodle's
+    export turns each break into 6 spaces plus the next line's indent, and the
+    editor auto-indents empty lines, so a blank line is 6 + its own indent + 6
+    + the next indent. Python indents by 4 and deepens one level at a time."""
+    def ok(indent):
+        return indent >= 0 and indent % 4 == 0 and indent <= prev + 4
+    if ok(run - 6):
+        return False, run - 6
+    # Blank line indented like the next line (the editor's usual), else like
+    # the previous line, else not at all.
+    for blank_indent in ((run - 12) / 2, prev, 0):
+        indent = run - 12 - blank_indent
+        if indent == int(indent) and ok(int(indent)):
+            return True, int(indent)
+    return False, run - 6
+
+
+def code_lines(text):
+    """Source lines of a code answer, undoing Moodle's flattened line breaks
+    (runs of 6+ spaces; see _code_break)."""
+    if "\n" in text:
+        return text.rstrip().splitlines()
+    parts = re.split(r"( {6,})", text.rstrip())
+    lines, line, prev = [], parts[0], 0
+    for sep, chunk in zip(parts[1::2], parts[2::2]):
+        lines.append(line)
+        blank, indent = _code_break(len(sep), prev)
+        if blank:
+            lines.append("")
+        line, prev = " " * indent + chunk, indent
+    lines.append(line)
+    return lines
+
+
+def code_block(text):
+    """Monospace LaTeX for a code answer, indentation kept, long lines wrap."""
+    out = [r"{\ttfamily\small\setlength{\parskip}{0pt}"]
+    for line in code_lines(text):
+        esc = latex_escape(line).replace(" ", r"\ ")
+        out.append((esc or r"\mbox{}") + r"\par")
+    out.append("}")
+    return out
+
+
+def answer_block(q):
+    """LaTeX for one free-text answer (essay, code or untyped): heading with
+    points, then the response (monospace for code)."""
+    grp = (q.get("group") or "").strip()
+    kind = {"essay": "essay", "code": "code"}.get((q.get("qtype") or "").lower(), "")
+    label = " ".join(w for w in (grp, kind) if w) or "Answer"
+    label = f"{label[0].upper()}{label[1:]} (Q{q['_n']})"
+    est = " (estimated)" if q.get("estimated") else ""
+    out = [
+        rf"\par\medskip\textbf{{{latex_escape(label)}}} \hfill "
+        rf"\textbf{{{_fmt_pts(q.get('points'))}{est}}} / {q.get('max') or 0:.0f}",
+        r"\par\smallskip",
+    ]
+    body = str(q.get("response", "") or "")
+    if not body or body.strip() == "-":
+        out.append(r"\textit{(no answer)}")
+    elif kind == "code":
+        out += code_block(body)
+    else:
+        out += [latex_escape(p.strip()) + r"\par" for p in re.split(r"\s{4,}|\n+", body) if p.strip()]
+    return out
 
 
 def make_barcode(value, barcode_dir):
@@ -61,6 +161,15 @@ def _fmt_pts(p):
 
 
 
+def grade_notes(st: dict) -> tuple[str, str]:
+    """LaTeX notes after the grade (rounded up) and the total (estimated)."""
+    rounded = st.get("rounded_from")
+    round_note = rf" \textit{{(rounded up from {latex_escape(rounded)})}}" if rounded else ""
+    any_est = any(q.get("estimated") for q in st["questions"])
+    est_note = r" \textit{(some grades estimated)}" if any_est else ""
+    return round_note, est_note
+
+
 def build_tex_for_student(st, barcode_dir):
     bc = make_barcode(st["id"], barcode_dir).replace("\\", "/")
     lines = [
@@ -83,18 +192,17 @@ def build_tex_for_student(st, barcode_dir):
         r"\begin{document}",
         r"\thispagestyle{fancy}",
     ]
-    any_est = any(q.get("estimated") for q in st["questions"])
-    est_note = r" \textit{(some grades estimated)}" if any_est else ""
+    round_note, est_note = grade_notes(st)
     lines += [
         r"\begin{center}",
         rf"\includegraphics[height=28pt]{{{bc}}} \\[6pt]",
-        rf"\textbf{{Grade:}} {{\Large\bfseries {latex_escape(st['grade'])}}} \quad "
+        rf"\textbf{{Grade:}} {{\Large\bfseries {latex_escape(st['grade'])}}}{round_note} \quad "
         rf"\textbf{{Total:}} {st['total']:.2f}{est_note}",
         r"\end{center}",
         r"\vspace{4pt}\hrule\vspace{8pt}",
     ]
 
-    # MC / short-answer table (mc, sc, or unset qtype), then essays, then
+    # MC table (mc, sc), then free-text blocks (essay, code, untyped), then
     # ungraded comments. Mirrors the reference PVT sample layout.
     short, essays, comments = [], [], []
     for i, q in enumerate(st["questions"], 1):
@@ -104,10 +212,10 @@ def build_tex_for_student(st, barcode_dir):
         resp = str(q.get("response", "") or "")
         if qt == "comment":
             comments.append(q)
-        elif qt == "essay":
-            essays.append(q)
-        else:
+        elif qt in ("mc", "sc"):
             short.append(q)
+        else:
+            essays.append(q)
 
     if short:
         lines.append(r"\textbf{Multiple-choice} \hfill {\normalfont\itshape Q | Response | Pts}\par\medskip")
@@ -121,25 +229,7 @@ def build_tex_for_student(st, barcode_dir):
         lines.append(r"\end{longtable}")
 
     for q in essays:
-        n = q["_n"]
-        grp = (q.get("group") or "").strip()
-        label = f"{grp} essay (Q{n})" if grp else f"Essay (Q{n})"
-        mx = q.get("max") or 0
-        pts = _fmt_pts(q.get("points"))
-        est = " (estimated)" if q.get("estimated") else ""
-        lines.append(
-            rf"\par\medskip\textbf{{{latex_escape(label)}}} \hfill "
-            rf"\textbf{{{pts}{est}}} / {mx:.0f}"
-        )
-        lines.append(r"\par\smallskip")
-        body = str(q.get("response", "") or "")
-        if not body or body.strip() == "-":
-            lines.append(r"\textit{(no answer)}")
-        else:
-            for p in re.split(r"\s{4,}|\n+", body):
-                p = p.strip()
-                if p:
-                    lines.append(latex_escape(p) + r"\par")
+        lines += answer_block(q)
 
     for q in comments:
         n = q["_n"]

@@ -147,6 +147,18 @@ function ReviewView() {
 
       {data && data.has_scheme && (
         <>
+          {data.rounding && (
+            <Alert>
+              <AlertDescription>
+                Rounding is on (
+                <code>
+                  round_up: {fmt(data.rounding.points)} on {data.rounding.vars.join(', ')}
+                </code>
+                ). Grades here are already rounded and students it lifted are not listed; the
+                margin is graded points needed beyond the rounded grade.
+              </AlertDescription>
+            </Alert>
+          )}
           <div className="flex flex-wrap gap-2">
             <Badge variant="secondary">
               {data.students.length} student(s) within {fmt(data.margin)} pt

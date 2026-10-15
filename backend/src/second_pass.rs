@@ -17,7 +17,7 @@ use ts_rs::TS;
 
 use crate::domain::{self, Exam, GradedItem};
 use crate::error::{AppError, AppResult};
-use crate::scheme::{self, GradeGap, LiftSource};
+use crate::scheme::{self, GradeGap, LiftSource, SchemeRounding};
 use crate::snapshot::{self, Merge, RowState, COL_STATE};
 
 /// Grade source recorded for points changed through a second-pass import.
@@ -64,6 +64,9 @@ pub struct SecondPassStudent {
 pub struct SecondPassReport {
     pub margin: f64,
     pub has_scheme: bool,
+    /// The scheme's rounding, when on: grades are already rounded and the
+    /// margin counts graded points beyond it.
+    pub rounding: Option<SchemeRounding>,
     /// Closest to a better grade first.
     pub students: Vec<SecondPassStudent>,
 }
@@ -71,7 +74,7 @@ pub struct SecondPassReport {
 /// Every student within `margin` points of a better grade.
 pub fn report(exam: &Exam, rows: &[HashMap<String, String>], margin: f64) -> SecondPassReport {
     let Some(scheme) = &exam.scheme else {
-        return SecondPassReport { margin, has_scheme: false, students: Vec::new() };
+        return SecondPassReport { margin, has_scheme: false, rounding: None, students: Vec::new() };
     };
     let questions = exam.scheme_questions();
     let col_of: HashMap<String, &String> =
@@ -132,7 +135,7 @@ pub fn report(exam: &Exam, rows: &[HashMap<String, String>], margin: f64) -> Sec
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.id.cmp(&b.id))
     });
-    SecondPassReport { margin, has_scheme: true, students }
+    SecondPassReport { margin, has_scheme: true, rounding: scheme::active_rounding(scheme).cloned(), students }
 }
 
 fn xlsx_err(e: rust_xlsxwriter::XlsxError) -> AppError {

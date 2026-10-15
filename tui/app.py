@@ -55,6 +55,13 @@ def row_id(row: Dict[str, str], id_columns: List[str]) -> str:
     return "_".join(row.get(c, "") for c in id_columns)
 
 
+def grade_label(student: Dict[str, Any]) -> str:
+    """Final grade for display, noting the raw grade when round_up lifted it."""
+    grade = student.get("grade", "") or "-"
+    rounded = student.get("rounded_from")
+    return f"{grade} (rounded from {rounded})" if rounded else grade
+
+
 def is_meaningful(text: str) -> bool:
     """Mirror the backend's meaningful-response test (display ordering only)."""
     t = (text or "").strip()
@@ -1401,14 +1408,18 @@ class SchemeScreen(TentanatorScreen):
     def compose(self) -> ComposeResult:
         yield Header()
         with VerticalScroll():
-            yield Label("Question config (var / group / type / max)", id="title")
+            yield Label(
+                "Question config (var / group / type: mc, sc, essay, code, comment / max)",
+                id="title",
+            )
             yield Vertical(id="cfgrows")
             with Horizontal(id="cfg-actions"):
                 yield Button("Save config", id="saveconfig")
             yield Label("Grade scheme (DSL)")
             yield Static(
                 "[dim]One per line: const name = value | name = expr | "
-                "when cond -> grade | total_var: x | default_grade: x[/dim]"
+                "when cond -> grade | total_var: x | default_grade: x | "
+                "round_up: 0.5 on total (adds 0.5 to one listed scheme var at a time)[/dim]"
             )
             yield TextArea(id="schemetext")
             with Horizontal(id="scheme-actions"):
@@ -1769,7 +1780,7 @@ class ResultsScreen(TentanatorScreen):
             est = ", ".join(r.get("estimated", [])) or "-"
             table.add_row(
                 r.get("id", ""),
-                r.get("grade", "") or "-",
+                grade_label(r),
                 f"{r.get('total', 0):.1f}",
                 est,
                 "yes" if r.get("complete") else "...",
@@ -1963,7 +1974,7 @@ class StudentResponsesScreen(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         sid = self.student.get("id", "")
-        grade = self.student.get("grade", "") or "-"
+        grade = grade_label(self.student)
         total = self.student.get("total", 0.0)
         with Vertical(id="respbox"):
             yield Label(f"{sid}  -  grade {grade}  -  total {total:.1f}")
@@ -2031,7 +2042,7 @@ class TableScreen(TentanatorScreen):
             cells = [self._fmt_points(q) for q in student.get("questions", [])]
             table.add_row(
                 student.get("id", ""),
-                student.get("grade", "") or "-",
+                grade_label(student),
                 f"{student.get('total', 0.0):.1f}",
                 *cells,
                 key=str(i),
@@ -2187,10 +2198,19 @@ class SecondPassScreen(TentanatorScreen):
             key = f"{st.get('grade', '')}→{st['gap'].get('next_grade', '')}"
             transitions[key] = transitions.get(key, 0) + 1
         trans = "  ".join(f"{k}: {v}" for k, v in transitions.items())
-        summary.update(
+        text = (
             f"{len(self.students)} student(s) within {fmt_pts(self.margin)} pt of a better "
             f"grade" + (f"  |  {trans}" if trans else "")
         )
+        rounding = data.get("rounding")
+        if rounding:
+            rule = f"round_up: {fmt_pts(rounding['points'])} on {', '.join(rounding['vars'])}"
+            text = (
+                f"[yellow]Rounding is on ({escape(rule)}). Grades here are already rounded and "
+                "students it lifted are not listed; the margin is graded points needed beyond "
+                "the rounded grade.[/yellow]\n" + text
+            )
+        summary.update(text)
         for i, st in enumerate(self.students):
             gap = st["gap"]
             alone = sum(1 for q in st.get("questions", []) if q.get("lift") is not None)

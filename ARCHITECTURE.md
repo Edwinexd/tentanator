@@ -194,7 +194,7 @@ the evaluated numeric total (for export).
 | GET | `/api/exams/{name}/conflicts` | none | `GradeConflict[]` |
 | POST | `/api/exams/{name}/conflicts/resolve` | `ResolveReq` | `204` |
 | GET | `/api/exams/{name}/render-data` | none | `RenderData` (per-student renderer contract) |
-| GET | `/api/exams/{name}/second-pass?margin=1` | none | `SecondPassReport` (students within `margin` points of a better grade) |
+| GET | `/api/exams/{name}/second-pass?margin=1` | none | `SecondPassReport` (students within `margin` points of a better grade, plus the scheme's `rounding`) |
 | POST | `/api/exams/{name}/export/second-pass` | `{ margin? }` | second-pass review `.xlsx` (attachment) |
 | POST | `/api/exams/{name}/second-pass/import` | `{ file, dry_run? }` | `SecondPassImport` (filled review sheet; overwrites, except changed-on-both-sides cells are queued as conflicts) |
 | GET | `/api/exams/{name}/scans` | none | `ScanMatch[]` (scans eligible for cover pages) |
@@ -240,14 +240,26 @@ types and the grade formula are all per-examination config (`scheme.rs`).
 
 - **Question config** (`PUT /api/exams/{name}/questions-config`): per question
   `var` (expression identifier), `group` (section tag), `qtype`, `max_points`,
-  `position`, optional `estimate` expression.
+  `position`, optional `estimate` expression. `qtype` drives the results-PDF
+  layout: `mc`/`sc` go in the multiple-choice table, `essay`, `code` and untyped
+  answers get their own block (`code` in monospace, with the line breaks
+  Moodle's export flattens to space runs restored), `comment` is ungraded notes.
 - **Grade scheme** (`PUT /api/exams/{name}/scheme`): tunable `constants`,
   named `vars` (expressions over question vars / prior vars / `groupsum("tag")`),
   and ordered guarded `rules` (`when <bool> -> <grade>`, first match wins).
   Expressions run via `evalexpr`. Reproduces PVT's gated ECTS rules; collapses to
   trivial for simple exams (tested against `reference/pvt/data/grades.json`).
+  Optional `rounding` (DSL `round_up: 0.5 on total[, teori, ...]`): `points`
+  added to one listed scheme var at a time (vars derived from it follow), best
+  resulting grade wins. Targets must be scheme vars (groups via their
+  `groupsum` var) and are required, so rounding never touches question points
+  and cannot pass gates on other vars (an essay > 0). Totals and vars stay as
+  graded; the raw grade is kept as `rounded_from`. On a plain total-threshold
+  scheme, rounding `total` by `m` lifts exactly the students a margin-`m`
+  second pass lists.
 - **Results** (`GET …/results`, `POST …/results` for live preview with an
-  unsaved scheme): `StudentResult[]` (id, grade, total, estimated, complete) +
+  unsaved scheme): `StudentResult[]` (id, grade, rounded_from, total,
+  estimated, complete) +
   distribution + unresolved-conflict count.
 - **Import & merge** (`POST …/import/preview`, `…/import/apply`): map a graded
   sheet's columns to questions; non-conflicting cells merge with `source`
@@ -280,7 +292,10 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   rules are therefore handled too (a zero essay capping the grade shows up as a
   tiny lift on that essay). Grade order is the ECTS scale when every grade is on
   it, else first appearance in the rules with the default last (rule order alone
-  is wrong: gate rules like `... -> F` usually come first). Each student lists
+  is wrong: gate rules like `... -> F` usually come first). With `rounding` on,
+  lifted points are evaluated with rounding applied and measured from the
+  rounded grade, so the list is who is still borderline after rounding (the
+  report carries `rounding` and both clients warn while it is on). Each student lists
   the questions with headroom, their responses, and the lift each one alone
   gives. The review sheet has one row per student: `ID`, grade, total, next
   grade and gap, then a response and a points column (headed by the exam's own
@@ -304,7 +319,8 @@ concatenates to `graded_exams/<exam>_results.pdf`. Cover-barcode counts (`POST /
 offer only scans matching the exam's student count) are slow on large scans, so
 they are cached in memory and in `scans/.covers_cache.json` (keyed by file name,
 mtime and size), surviving renderer restarts; the backend allows that call 15
-minutes for a first decode. The backend reaches it via
+minutes for a first decode. Rendering itself takes minutes for a few hundred
+students, so the backend allows `/render` 30 minutes (the TUI matches). The backend reaches it via
 `RENDERER_URL`. Generalized from `reference/pvt/scripts/01-03`.
 
 ## Quick start (Docker)
