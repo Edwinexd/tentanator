@@ -10,9 +10,12 @@ Run:
 """
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from pathlib import Path
+
+from rich.markup import escape
 
 from textual import on, work
 from textual.app import App, ComposeResult
@@ -727,7 +730,8 @@ class NewExamScreen(TentanatorScreen):
 # Grading --------------------------------------------------------------------
 
 
-class GradingScreen(TentanatorScreen):
+# One action per per-exam tab (Textual actions must be public methods).
+class GradingScreen(TentanatorScreen):  # pylint: disable=too-many-public-methods
     """Grade one output column at a time; hub for the per-exam tabs."""
 
     BINDINGS = [
@@ -743,6 +747,7 @@ class GradingScreen(TentanatorScreen):
         ("t", "qsettings", "Question settings"),
         ("g", "graded", "Graded items"),
         ("x", "context_cols", "Context cols"),
+        ("v", "second_pass", "Second pass"),
     ]
 
     def __init__(self, exam_name: str) -> None:
@@ -772,6 +777,7 @@ class GradingScreen(TentanatorScreen):
             yield Button("import [m]", id="nav-import")
             yield Button("results [r]", id="nav-results")
             yield Button("table [b]", id="nav-table")
+            yield Button("2nd pass [v]", id="nav-second-pass")
             yield Button("pdf [p]", id="nav-pdf")
             yield Button("graded [g]", id="nav-graded")
             yield Button("context [x]", id="nav-context")
@@ -1125,6 +1131,10 @@ class GradingScreen(TentanatorScreen):
     @on(Button.Pressed, "#nav-table")
     def action_table(self) -> None:
         self._open(TableScreen(self.exam_name))
+
+    @on(Button.Pressed, "#nav-second-pass")
+    def action_second_pass(self) -> None:
+        self._open(SecondPassScreen(self.exam_name))
 
     @on(Button.Pressed, "#nav-context")
     def _context_btn(self) -> None:
@@ -1689,6 +1699,7 @@ class ResultsScreen(TentanatorScreen):
                 yield Button("Export Daisy", id="exp-daisy")
                 yield Button("Export CSV", id="exp-csv")
                 yield Button("Results PDF", id="exp-pdf")
+                yield Button("Second pass", id="second-pass")
             yield Static("", id="summary")
             yield DataTable(id="resultstable")
         yield Footer()
@@ -1759,6 +1770,10 @@ class ResultsScreen(TentanatorScreen):
     @on(Button.Pressed, "#exp-pdf")
     def _pdf(self) -> None:
         self.app.push_screen(PdfScreen(self.exam_name))
+
+    @on(Button.Pressed, "#second-pass")
+    def _second_pass(self) -> None:
+        self.app.push_screen(SecondPassScreen(self.exam_name))
 
     def action_back(self) -> None:
         self.dismiss(None)
@@ -2010,6 +2025,354 @@ class TableScreen(TentanatorScreen):
         self.dismiss(None)
 
 
+# Second pass ------------------------------------------------------------------
+
+
+def fmt_pts(value: Optional[float]) -> str:
+    """Compact point formatting (`0.5`, `2`); `-` for none."""
+    return "-" if value is None else f"{value:g}"
+
+
+def lift_text(lift: Dict[str, Any]) -> str:
+    """Human label for a GradeLift: where the points come from and the result."""
+    source = lift.get("source")
+    where = {"any": "any question", "group": f"group {lift.get('key', '')}"}.get(
+        str(source), str(lift.get("key", "")))
+    return f"{where}: +{fmt_pts(lift.get('points'))} → {lift.get('grade', '')}"
+
+
+@dataclass
+class SecondPassImportPlan:
+    """A dry-run review-sheet import awaiting confirmation."""
+
+    file: str
+    summary: Dict[str, Any] = field(default_factory=dict)
+
+
+def import_summary_text(plan: SecondPassImportPlan) -> str:
+    """Render a SecondPassImport summary (dry run or applied)."""
+    s = plan.summary
+    head = "Applied" if s.get("applied") else "Dry run of"
+    changed = s.get("changed", [])
+    invalid = s.get("invalid", [])
+    lines = [
+        f"[b]{head} {escape(plan.file)}[/b]: {len(changed)} point change(s), "
+        f"{s.get('unchanged', 0)} unchanged, {s.get('blank', 0)} blank, "
+        f"{len(invalid)} invalid"
+    ]
+    if changed:
+        lines.append("[b]Point changes[/b]")
+        lines += [
+            f"  {escape(c['id'])}  {escape(c['col'])}: "
+            f"{escape(c.get('before') or '(none)')} → {escape(c['after'])}"
+            for c in changed
+        ]
+    grade_changes = s.get("grade_changes", [])
+    if grade_changes:
+        lines.append("[b]Grade changes[/b]")
+        lines += [
+            f"  {escape(g['id'])}: {escape(g['before'])} → {escape(g['after'])}"
+            for g in grade_changes
+        ]
+    if invalid:
+        lines.append("[b]Invalid rows (skipped)[/b]")
+        lines += [f"  {escape(msg)}" for msg in invalid]
+    return "\n".join(lines)
+
+
+class SecondPassScreen(TentanatorScreen):
+    """Students within a margin of a better grade; review sheet export/import."""
+
+    BINDINGS = [
+        ("escape", "back", "Back"),
+        ("n", "margin", "Margin"),
+        ("f", "refresh", "Refresh"),
+        ("e", "export_sheet", "Export sheet"),
+        ("i", "import_sheet", "Import sheet"),
+    ]
+
+    def __init__(self, exam_name: str) -> None:
+        super().__init__()
+        self.exam_name = exam_name
+        self.margin: float = 1.0
+        self.students: List[Dict[str, Any]] = []
+        self.plan: Optional[SecondPassImportPlan] = None
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        with VerticalScroll():
+            yield Label("Second pass", id="title")
+            yield Static(
+                "[dim]Students within the margin of a better grade, closest first. "
+                "Enter on a row to re-read the answers that still have headroom.[/dim]"
+            )
+            with Horizontal(id="sp-actions"):
+                yield Button("margin [n]", id="sp-margin")
+                yield Button("refresh [f]", id="sp-refresh")
+                yield Button("export sheet [e]", id="sp-export")
+                yield Button("import sheet [i]", id="sp-import")
+            yield Static("", id="spsummary")
+            yield DataTable(id="sptable")
+            yield Static("", id="spimport")
+            with Horizontal(id="spimp-actions"):
+                yield Button("Apply import", id="sp-apply", variant="primary", disabled=True)
+                yield Button("Discard", id="sp-discard", disabled=True)
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#sptable", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("ID", "Grade", "Total", "Gap", "Lifts alone", "Complete")
+        await self.reload()
+
+    async def reload(self) -> None:
+        table = self.query_one("#sptable", DataTable)
+        table.clear()
+        summary = self.query_one("#spsummary", Static)
+        try:
+            data = await self.api.second_pass(self.exam_name, self.margin)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        if not data.get("has_scheme"):
+            self.students = []
+            summary.update(
+                "No grade scheme yet - set one on the Scheme tab to find borderline students."
+            )
+            return
+        self.students = data.get("students", [])
+        transitions: Dict[str, int] = {}
+        for st in self.students:
+            key = f"{st.get('grade', '')}→{st['gap'].get('next_grade', '')}"
+            transitions[key] = transitions.get(key, 0) + 1
+        trans = "  ".join(f"{k}: {v}" for k, v in transitions.items())
+        summary.update(
+            f"{len(self.students)} student(s) within {fmt_pts(self.margin)} pt of a better "
+            f"grade" + (f"  |  {trans}" if trans else "")
+        )
+        for i, st in enumerate(self.students):
+            gap = st["gap"]
+            alone = sum(1 for q in st.get("questions", []) if q.get("lift") is not None)
+            table.add_row(
+                st.get("id", ""),
+                f"{st.get('grade', '')} → {gap.get('next_grade', '')}",
+                f"{st.get('total', 0.0):.2f}",
+                f"+{fmt_pts(gap.get('points'))}",
+                str(alone),
+                "yes" if st.get("complete") else "incomplete",
+                key=str(i),
+            )
+
+    @on(DataTable.RowSelected, "#sptable")
+    def _row_selected(self, event: DataTable.RowSelected) -> None:
+        key = event.row_key.value if event.row_key is not None else None
+        if key is None:
+            return
+        student = self.students[int(key)]
+        self.app.push_screen(
+            SecondPassStudentScreen(self.exam_name, self.margin, student),
+            lambda _r: self.run_worker(self.reload()),
+        )
+
+    @on(Button.Pressed, "#sp-margin")
+    def _margin_btn(self) -> None:
+        self.action_margin()
+
+    @work
+    async def action_margin(self) -> None:
+        value = await self.app.push_screen_wait(
+            TextPromptScreen("Margin: max points from a better grade", fmt_pts(self.margin))
+        )
+        if value is None:
+            return
+        try:
+            margin = float(value.replace(",", "."))
+        except ValueError:
+            margin = 0.0
+        if margin <= 0:
+            self.notify("Margin must be a positive number", severity="warning")
+            return
+        self.margin = margin
+        await self.reload()
+
+    @on(Button.Pressed, "#sp-refresh")
+    async def action_refresh(self) -> None:
+        await self.reload()
+
+    @on(Button.Pressed, "#sp-export")
+    async def action_export_sheet(self) -> None:
+        try:
+            res = await self.api.export_second_pass(self.exam_name, self.margin)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.notify(
+            f"Review sheet saved to {res.get('path', '?')}. Fill the `New points` column, "
+            "then import it here [i].",
+            timeout=12,
+        )
+
+    @on(Button.Pressed, "#sp-import")
+    def action_import_sheet(self) -> None:
+        self.app.push_screen(
+            FilePickerScreen(kinds=["exams"]),
+            lambda f: self.run_worker(self._dry_run(f)) if f else None,
+        )
+
+    async def _dry_run(self, file: str) -> None:
+        try:
+            summary = await self.api.second_pass_import(self.exam_name, file, dry_run=True)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.plan = SecondPassImportPlan(file=file, summary=summary)
+        self.query_one("#spimport", Static).update(import_summary_text(self.plan))
+        has_changes = bool(summary.get("changed"))
+        self.query_one("#sp-apply", Button).disabled = not has_changes
+        self.query_one("#sp-discard", Button).disabled = False
+        if not has_changes:
+            self.notify("Nothing to apply: no changed points in the sheet", timeout=6)
+
+    @on(Button.Pressed, "#sp-apply")
+    async def _apply(self) -> None:
+        if self.plan is None:
+            return
+        try:
+            summary = await self.api.second_pass_import(self.exam_name, self.plan.file)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        self.plan = SecondPassImportPlan(file=self.plan.file, summary=summary)
+        self.query_one("#spimport", Static).update(import_summary_text(self.plan))
+        self._reset_import_buttons()
+        self.plan = None
+        self.notify(f"Applied {len(summary.get('changed', []))} point change(s)")
+        await self.reload()
+
+    @on(Button.Pressed, "#sp-discard")
+    def _discard(self) -> None:
+        self.plan = None
+        self.query_one("#spimport", Static).update("")
+        self._reset_import_buttons()
+
+    def _reset_import_buttons(self) -> None:
+        self.query_one("#sp-apply", Button).disabled = True
+        self.query_one("#sp-discard", Button).disabled = True
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
+class SecondPassStudentScreen(TentanatorScreen):
+    """One borderline student: questions with headroom, responses, regrade."""
+
+    BINDINGS = [("escape", "back", "Back")]
+
+    def __init__(self, exam_name: str, margin: float, student: Dict[str, Any]) -> None:
+        super().__init__()
+        self.exam_name = exam_name
+        self.margin = margin
+        self.student = student
+
+    def compose(self) -> ComposeResult:
+        yield Header()
+        yield Static("", id="sphead")
+        yield Static(
+            "[dim]Questions below max. Enter on a row to set new points.[/dim]"
+        )
+        yield DataTable(id="spqtable")
+        with VerticalScroll(id="spresp"):
+            yield Static("", id="spresptext")
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        table = self.query_one("#spqtable", DataTable)
+        table.cursor_type = "row"
+        table.add_columns("Question", "Group", "Points", "Alone lifts")
+        self._show_student()
+
+    def _show_student(self) -> None:
+        st = self.student
+        gap = st["gap"]
+        pooled = [lift_text(lift) for lift in gap.get("lifts", []) if lift["source"] != "question"]
+        incomplete = "" if st.get("complete") else "  [yellow](incomplete)[/yellow]"
+        self.query_one("#sphead", Static).update(
+            f"[b]{escape(st.get('id', ''))}[/b]  {st.get('grade', '')} → "
+            f"{gap.get('next_grade', '')}  total {st.get('total', 0.0):.2f}  "
+            f"needs +{fmt_pts(gap.get('points'))}{incomplete}"
+            + ("\n" + "   ".join(pooled) if pooled else "")
+        )
+        table = self.query_one("#spqtable", DataTable)
+        table.clear()
+        for i, q in enumerate(st.get("questions", [])):
+            pts = q.get("points")
+            lift = q.get("lift")
+            table.add_row(
+                q.get("label") or q.get("col", ""),
+                q.get("group", "") or "-",
+                f"{'ungraded' if pts is None else fmt_pts(pts)}/{fmt_pts(q.get('max'))}",
+                "-" if lift is None else f"+{fmt_pts(lift)} → {gap.get('next_grade', '')}",
+                key=str(i),
+            )
+        self._show_response(0)
+
+    def _show_response(self, idx: int) -> None:
+        qs = self.student.get("questions", [])
+        text = self.query_one("#spresptext", Static)
+        if not 0 <= idx < len(qs):
+            text.update("")
+            return
+        q = qs[idx]
+        response = q.get("response", "") or ""
+        text.update(
+            f"[b]{escape(q.get('label') or q.get('col', ''))}[/b]\n"
+            + (escape(response) if response.strip() else "[dim](no response)[/dim]")
+        )
+
+    @on(DataTable.RowHighlighted, "#spqtable")
+    def _highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is not None and event.row_key.value is not None:
+            self._show_response(int(event.row_key.value))
+
+    @on(DataTable.RowSelected, "#spqtable")
+    def _row_selected(self, event: DataTable.RowSelected) -> None:
+        if event.row_key is not None and event.row_key.value is not None:
+            self._regrade(int(event.row_key.value))
+
+    @work
+    async def _regrade(self, idx: int) -> None:
+        q = self.student["questions"][idx]
+        current = "" if q.get("points") is None else fmt_pts(q.get("points"))
+        value = await self.app.push_screen_wait(TextPromptScreen(
+            f"New points for {q.get('label') or q['col']} (max {fmt_pts(q.get('max'))})",
+            current,
+        ))
+        if value is None or not value.strip():
+            return
+        try:
+            await self.api.grade(self.exam_name, q["col"], self.student["id"], value.strip())
+            data = await self.api.second_pass(self.exam_name, self.margin)
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+            return
+        updated = next(
+            (s for s in data.get("students", []) if s.get("id") == self.student["id"]), None)
+        if updated is None:
+            self.notify(
+                f"{self.student['id']} is no longer within {fmt_pts(self.margin)} pt "
+                "of a better grade",
+                timeout=8,
+            )
+            self.dismiss(None)
+            return
+        self.student = updated
+        self._show_student()
+        self.notify("Saved")
+
+    def action_back(self) -> None:
+        self.dismiss(None)
+
+
 class TentanatorTUI(App):
     """Top-level app holding the shared API client."""
 
@@ -2045,6 +2408,11 @@ class TentanatorTUI(App):
     #resultstable { height: 1fr; margin: 0 1; }
     #fulltable { height: 1fr; margin: 0 1; }
     #tablesummary { padding: 0 2; }
+    #sp-actions, #spimp-actions { height: auto; padding: 0 1; }
+    #spsummary, #spimport, #sphead { padding: 0 2; height: auto; }
+    #sptable { height: 1fr; min-height: 10; margin: 0 1; }
+    #spqtable { height: auto; max-height: 45%; margin: 0 1; }
+    #spresp { height: 1fr; border: round $primary; margin: 0 1; padding: 0 1; }
     #pickbox {
         width: 70; height: 80%; padding: 1 2;
         border: thick $primary; background: $surface;

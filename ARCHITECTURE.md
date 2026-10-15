@@ -88,6 +88,12 @@ released across LLM/file I/O. (Turso 0.4 still errors on concurrent
 multi-connection writes; serializing the brief DB sections avoids that while
 keeping LLM calls parallel. The lock can be relaxed as Turso's MVCC matures.)
 
+**Transactions**: Turso 0.4 ends an open `BEGIN` when a result set is dropped
+before it is exhausted, after which every write autocommits and the final
+`COMMIT` fails. Single-row reads therefore go through `store::query_one`, which
+drains the rest; never early-return from a bare `rows.next()` inside
+`store::transaction`.
+
 ## Legacy import (on demand)
 
 The backend does **not** import anything on startup and does not migrate old DB
@@ -188,6 +194,9 @@ the evaluated numeric total (for export).
 | GET | `/api/exams/{name}/conflicts` | none | `GradeConflict[]` |
 | POST | `/api/exams/{name}/conflicts/resolve` | `ResolveReq` | `204` |
 | GET | `/api/exams/{name}/render-data` | none | `RenderData` (per-student renderer contract) |
+| GET | `/api/exams/{name}/second-pass?margin=1` | none | `SecondPassReport` (students within `margin` points of a better grade) |
+| POST | `/api/exams/{name}/export/second-pass` | `{ margin? }` | second-pass review `.xlsx` (attachment) |
+| POST | `/api/exams/{name}/second-pass/import` | `{ file, dry_run? }` | `SecondPassImport` (filled review sheet; overwrites, no conflicts) |
 | GET | `/api/exams/{name}/scans` | none | `ScanMatch[]` (scans eligible for cover pages) |
 | POST | `/api/exams/{name}/export/daisy` | none | Daisy `id,grade` `.xlsx` (attachment) |
 | POST | `/api/exams/{name}/export/csv` | none | per-question `.csv` (attachment) |
@@ -248,6 +257,22 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   both clients also render it as an in-app **Table** view (per-student ×
   per-question points, drill into each response, auto-zeroed columns included) so
   a graded exam can be inspected without exporting.
+- **Second pass** (`GET …/second-pass?margin=`, `…/export/second-pass`,
+  `…/second-pass/import`): students within `margin` points (default 1) of a
+  better grade, closest first. Rules are arbitrary expressions, so the gap is
+  found by simulation, not by reading thresholds (`scheme::grade_gap`): extra
+  points are poured into question headroom (`max_points` minus current; estimated
+  questions excluded) from each source (any question, each group, each question
+  alone) and bisected to the cheapest amount that reaches a better grade. Gated
+  rules are therefore handled too (a zero essay capping the grade shows up as a
+  tiny lift on that essay). Grade order is the ECTS scale when every grade is on
+  it, else first appearance in the rules with the default last (rule order alone
+  is wrong: gate rules like `... -> F` usually come first). Each student lists
+  the questions with headroom, their responses, and the lift each one alone
+  gives. The review sheet has one row per (student, question) with a `New
+  points` column; importing it overwrites changed points with source
+  `second-pass` (the reviewer is authoritative, so no conflict queue) and reports
+  the resulting grade changes. `dry_run` previews without writing.
 
 ### Results-PDF renderer (`results-renderer/`)
 

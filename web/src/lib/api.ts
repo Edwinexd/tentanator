@@ -12,17 +12,26 @@
 import type { AIGradeSuggestion } from './generated/AIGradeSuggestion'
 import type { Exam } from './generated/Exam'
 import type { ExamSummary } from './generated/ExamSummary'
+import type { GradeChange } from './generated/GradeChange'
 import type { GradeConflict } from './generated/GradeConflict'
+import type { GradeGap } from './generated/GradeGap'
+import type { GradeLift } from './generated/GradeLift'
 import type { GradeRule } from './generated/GradeRule'
 import type { GradeScheme } from './generated/GradeScheme'
 import type { GradeStats } from './generated/GradeStats'
 import type { GlobalBankMatch } from './generated/GlobalBankMatch'
 import type { GradedItem } from './generated/GradedItem'
 import type { ImportResult } from './generated/ImportResult'
+import type { LiftSource } from './generated/LiftSource'
+import type { PointChange } from './generated/PointChange'
 import type { QuestionGrades } from './generated/QuestionGrades'
 import type { SamplingResult } from './generated/SamplingResult'
 import type { SchemeConst } from './generated/SchemeConst'
 import type { SchemeVar } from './generated/SchemeVar'
+import type { SecondPassImport } from './generated/SecondPassImport'
+import type { SecondPassQuestion } from './generated/SecondPassQuestion'
+import type { SecondPassReport } from './generated/SecondPassReport'
+import type { SecondPassStudent } from './generated/SecondPassStudent'
 import type { Session } from './generated/Session'
 import type { SessionSummary } from './generated/SessionSummary'
 import type { StudentResult } from './generated/StudentResult'
@@ -32,17 +41,26 @@ export type {
   AIGradeSuggestion,
   Exam,
   ExamSummary,
+  GradeChange,
   GradeConflict,
+  GradeGap,
+  GradeLift,
   GradeRule,
   GradeScheme,
   GradeStats,
   GlobalBankMatch,
   GradedItem,
   ImportResult,
+  LiftSource,
+  PointChange,
   QuestionGrades,
   SamplingResult,
   SchemeConst,
   SchemeVar,
+  SecondPassImport,
+  SecondPassQuestion,
+  SecondPassReport,
+  SecondPassStudent,
   Session,
   SessionSummary,
   StudentResult,
@@ -83,6 +101,10 @@ export interface ImportSummary {
   skipped: number
   unknown_ids: number
   conflicts: ConflictSample[]
+}
+export interface SecondPassImportReq {
+  file: string
+  dry_run?: boolean
 }
 export interface QuestionConfigUpdate {
   col: string
@@ -259,8 +281,12 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
 
 const enc = encodeURIComponent
 
-async function triggerDownload(method: string, path: string): Promise<void> {
-  const res = await fetch(`${API_BASE}${path}`, { method })
+async function triggerDownload(method: string, path: string, body?: unknown): Promise<void> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body !== undefined ? { 'content-type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
   if (!res.ok) {
     let message = res.statusText
     try {
@@ -439,6 +465,14 @@ export const api = {
     req<GradeConflict[]>('GET', `/api/exams/${enc(name)}/conflicts`),
   resolveConflict: (name: string, body: ResolveReq) =>
     req<void>('POST', `/api/exams/${enc(name)}/conflicts/resolve`, body),
+
+  // --- second pass (students close to a better grade) ---
+  secondPass: (name: string, margin: number) =>
+    req<SecondPassReport>('GET', `/api/exams/${enc(name)}/second-pass?margin=${margin}`),
+  secondPassImport: (name: string, body: SecondPassImportReq) =>
+    req<SecondPassImport>('POST', `/api/exams/${enc(name)}/second-pass/import`, body),
+  exportSecondPass: (name: string, margin: number) =>
+    triggerDownload('POST', `/api/exams/${enc(name)}/export/second-pass`, { margin }),
 
   // --- exports & downloads ---
   exportExam: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export`),

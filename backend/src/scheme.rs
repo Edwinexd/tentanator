@@ -168,20 +168,115 @@ fn install_groupsum(
     );
 }
 
-/// Compute one student's result. `points[var] = Some(p)` for a graded question,
-/// `None` (or absent) for ungraded. Expression errors degrade to 0 / false
-/// rather than failing the whole computation.
-pub fn compute_student(
-    id: &str,
-    scheme: &GradeScheme,
-    questions: &[QuestionConfig],
-    points: &HashMap<String, Option<f64>>,
-) -> StudentResult {
+/// Parse an expression once (int literals floatified). `None` on a syntax
+/// error, which evaluates as 0 / false like a runtime error does.
+fn compile(expr: &str) -> Option<Node> {
+    build_operator_tree::<DefaultNumericTypes>(&floatify_int_literals(expr)).ok()
+}
+
+/// A scheme with every expression pre-parsed, so repeated evaluation (the
+/// second-pass gap search runs hundreds per student) skips re-tokenizing.
+struct CompiledScheme<'a> {
+    scheme: &'a GradeScheme,
+    vars: Vec<Option<Node>>,
+    rules: Vec<Option<Node>>,
+    total: Option<Node>,
+}
+
+/// Outcome of evaluating a scheme over fully-bound question points.
+struct Evaluated {
+    grade: String,
+    total: f64,
+    vars: HashMap<String, f64>,
+}
+
+impl<'a> CompiledScheme<'a> {
+    fn new(scheme: &'a GradeScheme) -> Self {
+        CompiledScheme {
+            scheme,
+            vars: scheme.vars.iter().map(|v| compile(&v.expr)).collect(),
+            rules: scheme.rules.iter().map(|r| compile(&r.when)).collect(),
+            total: compile(total_var(scheme)),
+        }
+    }
+
+    /// Evaluate aggregate vars, total and the first matching rule.
+    fn evaluate(&self, questions: &[QuestionConfig], var_points: &HashMap<String, f64>) -> Evaluated {
+        let mut ctx = base_context(self.scheme);
+        for (k, v) in var_points {
+            let _ = ctx.set_value(k.clone(), Value::Float(*v));
+        }
+        install_groupsum(&mut ctx, questions, var_points);
+
+        // Named aggregate vars, in order. Round each to 2 decimals before it feeds
+        // later vars and the rule guards, so binary-float noise can't drop a value
+        // below a band threshold (mirrors the legacy `round(total, 2)`).
+        let mut vars = HashMap::new();
+        for (sv, node) in self.scheme.vars.iter().zip(&self.vars) {
+            let v = round2(
+                node.as_ref()
+                    .and_then(|n| n.eval_number_with_context(&ctx).ok())
+                    .unwrap_or(0.0),
+            );
+            let _ = ctx.set_value(sv.name.clone(), Value::Float(v));
+            vars.insert(sv.name.clone(), v);
+        }
+
+        let total = round2(
+            vars.get(total_var(self.scheme))
+                .copied()
+                .or_else(|| self.total.as_ref().and_then(|n| n.eval_number_with_context(&ctx).ok()))
+                .unwrap_or(0.0),
+        );
+
+        // Guarded rules, first match wins.
+        let grade = self
+            .scheme
+            .rules
+            .iter()
+            .zip(&self.rules)
+            .find(|(_, node)| {
+                node.as_ref()
+                    .and_then(|n| n.eval_boolean_with_context(&ctx).ok())
+                    .unwrap_or(false)
+            })
+            .map(|(rule, _)| rule.grade.clone())
+            .unwrap_or_else(|| default_grade(self.scheme).to_string());
+        Evaluated { grade, total, vars }
+    }
+}
+
+fn total_var(scheme: &GradeScheme) -> &str {
+    if scheme.total_var.is_empty() {
+        "total"
+    } else {
+        &scheme.total_var
+    }
+}
+
+fn default_grade(scheme: &GradeScheme) -> &str {
+    if scheme.default_grade.is_empty() {
+        "F"
+    } else {
+        &scheme.default_grade
+    }
+}
+
+fn base_context(scheme: &GradeScheme) -> HashMapContext {
     let mut ctx = HashMapContext::new();
     for c in &scheme.constants {
         let _ = ctx.set_value(c.name.clone(), Value::Float(c.value));
     }
+    ctx
+}
 
+/// Bind question points, estimating ungraded questions that carry an
+/// estimator. Returns (points per var, estimated vars, every question graded).
+fn resolve_points(
+    scheme: &GradeScheme,
+    questions: &[QuestionConfig],
+    points: &HashMap<String, Option<f64>>,
+) -> (HashMap<String, f64>, Vec<String>, bool) {
     // Bind question vars (ungraded -> 0 for now); collect ungraded.
     let mut var_points: HashMap<String, f64> = HashMap::new();
     let mut ungraded: Vec<&QuestionConfig> = Vec::new();
@@ -196,12 +291,12 @@ pub fn compute_student(
             }
         }
     }
+    let mut ctx = base_context(scheme);
     for (k, v) in &var_points {
         let _ = ctx.set_value(k.clone(), Value::Float(*v));
     }
     install_groupsum(&mut ctx, questions, &var_points);
 
-    // Estimate ungraded questions that carry an estimator.
     let mut estimated = Vec::new();
     for q in &ungraded {
         let Some(expr) = q.estimate.as_ref().filter(|e| !e.trim().is_empty()) else {
@@ -213,54 +308,177 @@ pub fn compute_student(
             estimated.push(q.var.clone());
         }
     }
-    if !estimated.is_empty() {
-        install_groupsum(&mut ctx, questions, &var_points);
-    }
+    (var_points, estimated, ungraded.is_empty())
+}
 
-    // Named aggregate vars, in order. Round each to 2 decimals before it feeds
-    // later vars and the rule guards, so binary-float noise can't drop a value
-    // below a band threshold (mirrors the legacy `round(total, 2)`).
-    let mut vars_out: HashMap<String, f64> = HashMap::new();
-    for sv in &scheme.vars {
-        let v = round2(eval_number_with_context(&floatify_int_literals(&sv.expr), &ctx).unwrap_or(0.0));
-        let _ = ctx.set_value(sv.name.clone(), Value::Float(v));
-        vars_out.insert(sv.name.clone(), v);
-    }
-
-    let total_var = if scheme.total_var.is_empty() {
-        "total"
-    } else {
-        scheme.total_var.as_str()
-    };
-    let total = round2(
-        vars_out
-            .get(total_var)
-            .copied()
-            .or_else(|| eval_number_with_context(total_var, &ctx).ok())
-            .unwrap_or(0.0),
-    );
-
-    // Guarded rules, first match wins.
-    let mut grade = if scheme.default_grade.is_empty() {
-        "F".to_string()
-    } else {
-        scheme.default_grade.clone()
-    };
-    for rule in &scheme.rules {
-        if eval_boolean_with_context(&floatify_int_literals(&rule.when), &ctx).unwrap_or(false) {
-            grade = rule.grade.clone();
-            break;
-        }
-    }
-
+/// Compute one student's result. `points[var] = Some(p)` for a graded question,
+/// `None` (or absent) for ungraded. Expression errors degrade to 0 / false
+/// rather than failing the whole computation.
+pub fn compute_student(
+    id: &str,
+    scheme: &GradeScheme,
+    questions: &[QuestionConfig],
+    points: &HashMap<String, Option<f64>>,
+) -> StudentResult {
+    let (var_points, estimated, complete) = resolve_points(scheme, questions, points);
+    let ev = CompiledScheme::new(scheme).evaluate(questions, &var_points);
     StudentResult {
         id: id.to_string(),
-        grade,
-        total,
-        vars: vars_out,
+        grade: ev.grade,
+        total: ev.total,
+        vars: ev.vars,
         estimated,
-        complete: ungraded.is_empty(),
+        complete,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Second pass: how close is a student to a better grade?
+// ---------------------------------------------------------------------------
+
+const ECTS: [&str; 7] = ["A", "B", "C", "D", "E", "FX", "F"];
+
+/// Rank of each grade the scheme can produce (0 = best). The ECTS scale when
+/// every grade is on it; otherwise first appearance in the rules with the
+/// default grade last. Rule order alone is not grade order: gate rules such as
+/// `se_total < secmin -> F` usually come first.
+pub fn grade_ranks(scheme: &GradeScheme) -> HashMap<String, usize> {
+    let default = default_grade(scheme);
+    let mut order: Vec<&str> = Vec::new();
+    for g in scheme.rules.iter().map(|r| r.grade.as_str()).chain([default]) {
+        if !order.contains(&g) {
+            order.push(g);
+        }
+    }
+    if order.iter().all(|g| ECTS.contains(g)) {
+        order.sort_by_key(|g| ECTS.iter().position(|e| e == g));
+    } else {
+        order.retain(|g| *g != default);
+        order.push(default);
+    }
+    order.into_iter().enumerate().map(|(i, g)| (g.to_string(), i)).collect()
+}
+
+/// Where the extra points of a lift come from.
+#[derive(Clone, Debug, PartialEq, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
+#[serde(rename_all = "lowercase")]
+pub enum LiftSource {
+    /// Spread over any questions with headroom.
+    Any,
+    /// Spread over one group's questions (`key` is the group tag).
+    Group,
+    /// One question alone (`key` is its scheme var).
+    Question,
+}
+
+/// Extra points from one source that reach a better grade.
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
+pub struct GradeLift {
+    pub source: LiftSource,
+    pub key: String,
+    /// Smallest extra points (rounded up to 0.01) from this source.
+    pub points: f64,
+    pub grade: String,
+}
+
+/// A student within `margin` points of a better grade.
+#[derive(Clone, Debug, Serialize, TS)]
+#[ts(export, export_to = "../../web/src/lib/generated/")]
+pub struct GradeGap {
+    /// The better grade reached by the cheapest lift.
+    pub next_grade: String,
+    /// Points of the cheapest lift.
+    pub points: f64,
+    /// Every source that reaches a better grade within the margin, cheapest first.
+    pub lifts: Vec<GradeLift>,
+}
+
+/// Headroom per question var: how many more points it can take.
+type Room<'a> = Vec<(&'a str, f64)>;
+
+/// Find the smallest extra points (at most `margin`) that lift a student to a
+/// better grade. Rules are arbitrary expressions, so instead of reading
+/// thresholds this simulates: for each source (any question, each group, each
+/// question alone) it adds points into questions' headroom (`max_points` minus
+/// current, estimated questions excluded) and bisects for the cheapest amount
+/// that changes the grade for the better. Assumes more points never worsen the
+/// grade, which holds for any sane scheme. `None` when no source reaches a
+/// better grade within the margin.
+pub fn grade_gap(
+    scheme: &GradeScheme,
+    questions: &[QuestionConfig],
+    points: &HashMap<String, Option<f64>>,
+    margin: f64,
+) -> Option<GradeGap> {
+    let compiled = CompiledScheme::new(scheme);
+    let ranks = grade_ranks(scheme);
+    let rank = |g: &str| ranks.get(g).copied().unwrap_or(usize::MAX);
+    let (base, estimated, _) = resolve_points(scheme, questions, points);
+    let current = rank(&compiled.evaluate(questions, &base).grade);
+
+    let headroom: Room = questions
+        .iter()
+        .filter(|q| q.max_points > 0.0 && !estimated.contains(&q.var))
+        .map(|q| (q.var.as_str(), q.max_points - base.get(&q.var).copied().unwrap_or(0.0)))
+        .filter(|(_, h)| *h > 1e-9)
+        .collect();
+
+    let mut sources: Vec<(LiftSource, String, Room)> =
+        vec![(LiftSource::Any, String::new(), headroom.clone())];
+    let mut groups: Vec<&str> =
+        questions.iter().map(|q| q.group.as_str()).filter(|g| !g.is_empty()).collect();
+    groups.sort();
+    groups.dedup();
+    for g in groups {
+        let in_group: Room = headroom
+            .iter()
+            .copied()
+            .filter(|(v, _)| questions.iter().any(|q| q.var == *v && q.group == g))
+            .collect();
+        sources.push((LiftSource::Group, g.to_string(), in_group));
+    }
+    for &(v, h) in &headroom {
+        sources.push((LiftSource::Question, v.to_string(), vec![(v, h)]));
+    }
+
+    // Grade after pouring `delta` into `room`, filling each question in turn.
+    let lifted = |room: &[(&str, f64)], delta: f64| -> String {
+        let mut pts = base.clone();
+        let mut left = delta;
+        for &(v, h) in room {
+            let add = left.min(h);
+            *pts.entry(v.to_string()).or_insert(0.0) += add;
+            left -= add;
+            if left <= 0.0 {
+                break;
+            }
+        }
+        compiled.evaluate(questions, &pts).grade
+    };
+
+    let mut lifts: Vec<GradeLift> = Vec::new();
+    for (source, key, room) in sources {
+        let cap = margin.min(room.iter().map(|(_, h)| h).sum());
+        if cap <= 0.0 || rank(&lifted(&room, cap)) >= current {
+            continue;
+        }
+        let (mut lo, mut hi) = (0.0, cap);
+        while hi - lo > 1e-4 {
+            let mid = (lo + hi) / 2.0;
+            if rank(&lifted(&room, mid)) < current {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        let points = ((hi * 100.0).ceil() / 100.0).min(cap);
+        lifts.push(GradeLift { source, key, points, grade: lifted(&room, points) });
+    }
+    lifts.sort_by(|a, b| a.points.partial_cmp(&b.points).unwrap_or(std::cmp::Ordering::Equal));
+    let best = lifts.first()?;
+    Some(GradeGap { next_grade: best.grade.clone(), points: best.points, lifts })
 }
 
 /// Validate that every variable referenced by the scheme's expressions resolves
@@ -394,6 +612,62 @@ mod tests {
             ("hci_essay".to_string(), Some(hci_essay)),
         ]);
         compute_student("s", &pvt_scheme(), &pvt_questions(), &points).grade
+    }
+
+    fn pvt_with_max() -> Vec<QuestionConfig> {
+        let mut qs = pvt_questions();
+        for (q, max) in qs.iter_mut().zip([18.0, 18.0, 7.0, 7.0]) {
+            q.max_points = max;
+        }
+        qs
+    }
+
+    fn gap(pts: [f64; 4], margin: f64) -> Option<GradeGap> {
+        let points: HashMap<String, Option<f64>> = pvt_with_max()
+            .iter()
+            .zip(pts)
+            .map(|(q, p)| (q.var.clone(), Some(p)))
+            .collect();
+        grade_gap(&pvt_scheme(), &pvt_with_max(), &points, margin)
+    }
+
+    #[test]
+    fn ranks_ignore_gate_rule_order() {
+        // PVT lists its F gates first; F must still rank last.
+        let r = grade_ranks(&pvt_scheme());
+        assert!(r["A"] < r["B"] && r["D"] < r["E"] && r["E"] < r["F"]);
+        // Non-ECTS scale: first appearance, default last.
+        let rule = |w: &str, g: &str| GradeRule { when: w.into(), grade: g.into() };
+        let s = GradeScheme {
+            rules: vec![rule("total >= 30", "VG"), rule("total >= 20", "G")],
+            default_grade: "U".into(),
+            ..Default::default()
+        };
+        let r = grade_ranks(&s);
+        assert!(r["VG"] < r["G"] && r["G"] < r["U"]);
+    }
+
+    #[test]
+    fn gap_finds_threshold_distance() {
+        // total 22 < emin - lenience (23): F, one point short of E.
+        let g = gap([10.0, 10.0, 1.0, 1.0], 1.0).unwrap();
+        assert_eq!(g.next_grade, "E");
+        assert!((g.points - 1.0).abs() < 1e-9, "{}", g.points);
+        assert!(gap([10.0, 10.0, 1.0, 1.0], 0.5).is_none());
+    }
+
+    #[test]
+    fn gap_sees_gates_not_just_totals() {
+        // High total capped at D by the zero hci essay: a hundredth of a point
+        // on that essay alone reaches A; the full questions offer no headroom.
+        let g = gap([18.0, 18.0, 7.0, 0.0], 1.0).unwrap();
+        assert_eq!(g.next_grade, "A");
+        assert!(g.points <= 0.011);
+        assert!(g
+            .lifts
+            .iter()
+            .any(|l| l.source == LiftSource::Question && l.key == "hci_essay"));
+        assert!(!g.lifts.iter().any(|l| l.key == "se_mc"));
     }
 
     #[test]

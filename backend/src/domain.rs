@@ -123,7 +123,66 @@ pub struct Exam {
     pub scheme: Option<crate::scheme::GradeScheme>,
 }
 
+impl QuestionGrades {
+    /// Variable name this question contributes to scheme expressions. Falls
+    /// back to the shared default (`Points N` -> `pN`, else sanitized) so an
+    /// unconfigured question grades under the same var the editor shows.
+    pub fn effective_var(&self, col: &str) -> String {
+        if self.var.is_empty() {
+            crate::detect::default_var(col)
+        } else {
+            self.var.clone()
+        }
+    }
+
+    /// Display label: the question name, else its output column.
+    pub fn label(&self, col: &str) -> String {
+        if self.question_name.is_empty() {
+            col.to_string()
+        } else {
+            self.question_name.clone()
+        }
+    }
+
+    /// Numeric points recorded for a student (`None` = ungraded/unparseable).
+    pub fn points_for(&self, row_id: &str) -> Option<f64> {
+        self.graded_items
+            .iter()
+            .find(|gi| gi.row_id == row_id)
+            .and_then(|gi| crate::grade::evaluate_grade(&gi.grade))
+    }
+}
+
 impl Exam {
+    /// Configured questions in column order, as `(output_col, question)`.
+    pub fn configured_questions(&self) -> impl Iterator<Item = (&String, &QuestionGrades)> {
+        self.output_columns
+            .iter()
+            .filter_map(|col| self.questions.get(col).map(|q| (col, q)))
+    }
+
+    /// Grade-engine config for every configured question, in column order.
+    pub fn scheme_questions(&self) -> Vec<crate::scheme::QuestionConfig> {
+        self.configured_questions()
+            .map(|(col, q)| crate::scheme::QuestionConfig {
+                var: q.effective_var(col),
+                label: q.question_name.clone(),
+                group: q.group.clone(),
+                qtype: q.qtype.clone(),
+                max_points: q.max_points,
+                position: q.position,
+                estimate: q.estimate.clone(),
+            })
+            .collect()
+    }
+
+    /// A student's points keyed by scheme var, as the grade engine takes them.
+    pub fn student_points(&self, row_id: &str) -> HashMap<String, Option<f64>> {
+        self.configured_questions()
+            .map(|(col, q)| (q.effective_var(col), q.points_for(row_id)))
+            .collect()
+    }
+
     /// Ensure a question exists for `output_col`, pairing it with the input
     /// column by index (falling back to the first input column).
     pub fn ensure_question(&mut self, output_col: &str) -> &mut QuestionGrades {

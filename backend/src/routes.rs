@@ -23,10 +23,10 @@ use crate::domain::{
     self, AIGradeSuggestion, Exam, ExamSummary, GradedItem, QuestionGrades, Session, SessionSummary,
 };
 use crate::error::{AppError, AppResult};
-use crate::grade::validate_grade;
+use crate::grade::{grades_equal, validate_grade};
 use crate::sampling::{self, Algorithm};
 use crate::scheme::{self, GradeScheme, StudentResult};
-use crate::{detect, global_bank, llm, moodle, scheme_text, store, workspace, AppState};
+use crate::{detect, global_bank, llm, moodle, scheme_text, second_pass, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
 const DEFAULT_SESSION: &str = "default";
@@ -107,6 +107,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/exams/{name}/export/daisy", post(export_daisy_route))
         .route("/api/exams/{name}/export/csv", post(export_csv_route))
         .route("/api/exams/{name}/render-data", get(render_data))
+        .route("/api/exams/{name}/second-pass", get(second_pass_report))
+        .route("/api/exams/{name}/second-pass/import", post(second_pass_import))
+        .route("/api/exams/{name}/export/second-pass", post(export_second_pass))
         .route("/api/exams/{name}/scans", get(list_exam_scans))
         .route("/api/exams/{name}/export/results-pdf", post(export_results_pdf))
         .route("/api/graded/{filename}", get(download_graded))
@@ -1172,52 +1175,17 @@ struct ResultsResponse {
     unresolved_conflicts: usize,
 }
 
-/// Variable name a question contributes to scheme expressions. Falls back to the
-/// shared default (`Points N` -> `pN`, else sanitized) so an unconfigured
-/// question grades under the same var the editor shows.
-fn effective_var(col: &str, q: &QuestionGrades) -> String {
-    if q.var.is_empty() {
-        detect::default_var(col)
-    } else {
-        q.var.clone()
-    }
-}
-
 fn compute_results(
     exam: &Exam,
     rows: &[HashMap<String, String>],
     scheme: &GradeScheme,
 ) -> ResultsResponse {
-    let questions: Vec<scheme::QuestionConfig> = exam
-        .output_columns
-        .iter()
-        .filter_map(|col| exam.questions.get(col).map(|q| (col, q)))
-        .map(|(col, q)| scheme::QuestionConfig {
-            var: effective_var(col, q),
-            label: q.question_name.clone(),
-            group: q.group.clone(),
-            qtype: q.qtype.clone(),
-            max_points: q.max_points,
-            position: q.position,
-            estimate: q.estimate.clone(),
-        })
-        .collect();
+    let questions = exam.scheme_questions();
 
     let mut results = Vec::with_capacity(rows.len());
     for row in rows {
         let rid = domain::row_id(row, &exam.id_columns);
-        let mut points: HashMap<String, Option<f64>> = HashMap::new();
-        for col in &exam.output_columns {
-            if let Some(q) = exam.questions.get(col) {
-                let var = effective_var(col, q);
-                let graded = q
-                    .graded_items
-                    .iter()
-                    .find(|gi| gi.row_id == rid)
-                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
-                points.insert(var, graded);
-            }
-        }
+        let points = exam.student_points(&rid);
         results.push(scheme::compute_student(&rid, scheme, &questions, &points));
     }
 
@@ -1240,7 +1208,7 @@ fn compute_results(
 fn exam_question_vars(exam: &Exam) -> Vec<String> {
     exam.output_columns
         .iter()
-        .filter_map(|c| exam.questions.get(c).map(|q| effective_var(c, q)))
+        .filter_map(|c| exam.questions.get(c).map(|q| q.effective_var(c)))
         .collect()
 }
 
@@ -1283,7 +1251,7 @@ async fn put_questions_config(
     let mut seen = std::collections::HashSet::new();
     for col in &exam.output_columns {
         if let Some(q) = exam.questions.get(col) {
-            let v = effective_var(col, q);
+            let v = q.effective_var(col);
             if !seen.insert(v.clone()) {
                 return Err(AppError::BadRequest(format!(
                     "duplicate scheme variable `{v}` - each question needs a unique var"
@@ -1395,13 +1363,6 @@ struct ImportSummary {
     skipped: usize,
     unknown_ids: usize,
     conflicts: Vec<ConflictSample>,
-}
-
-fn grades_equal(a: &str, b: &str) -> bool {
-    match (crate::grade::evaluate_grade(a), crate::grade::evaluate_grade(b)) {
-        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
-        _ => a.trim().eq_ignore_ascii_case(b.trim()),
-    }
 }
 
 /// Read roster + import file, returning (roster id-set, import rows).
@@ -1658,63 +1619,26 @@ async fn render_data(
     let exam = load_exam_or_404(&s, &name).await?;
     let (rows, _) = exam_data(&s.config, &exam)?;
     let scheme = exam.scheme.clone().unwrap_or_default();
-    let questions: Vec<scheme::QuestionConfig> = exam
-        .output_columns
-        .iter()
-        .filter_map(|col| exam.questions.get(col).map(|q| (col, q)))
-        .map(|(col, q)| scheme::QuestionConfig {
-            var: effective_var(col, q),
-            label: q.question_name.clone(),
-            group: q.group.clone(),
-            qtype: q.qtype.clone(),
-            max_points: q.max_points,
-            position: q.position,
-            estimate: q.estimate.clone(),
-        })
-        .collect();
+    let questions = exam.scheme_questions();
 
     let mut students = Vec::new();
     for row in &rows {
         let rid = domain::row_id(row, &exam.id_columns);
-        let mut points: HashMap<String, Option<f64>> = HashMap::new();
-        for col in &exam.output_columns {
-            if let Some(q) = exam.questions.get(col) {
-                let var = effective_var(col, q);
-                let g = q
-                    .graded_items
-                    .iter()
-                    .find(|gi| gi.row_id == rid)
-                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
-                points.insert(var, g);
-            }
-        }
+        let points = exam.student_points(&rid);
         let sr = scheme::compute_student(&rid, &scheme, &questions, &points);
         let est: std::collections::HashSet<&str> = sr.estimated.iter().map(|s| s.as_str()).collect();
 
         let mut rq = Vec::new();
-        for col in &exam.output_columns {
-            if let Some(q) = exam.questions.get(col) {
-                let var = effective_var(col, q);
-                let response = row.get(&q.input_column).cloned().unwrap_or_default();
-                let pts = q
-                    .graded_items
-                    .iter()
-                    .find(|gi| gi.row_id == rid)
-                    .and_then(|gi| crate::grade::evaluate_grade(&gi.grade));
-                rq.push(RenderQuestion {
-                    label: if q.question_name.is_empty() {
-                        col.clone()
-                    } else {
-                        q.question_name.clone()
-                    },
-                    group: q.group.clone(),
-                    qtype: q.qtype.clone(),
-                    response,
-                    points: pts,
-                    max: q.max_points,
-                    estimated: est.contains(var.as_str()),
-                });
-            }
+        for (col, q) in exam.configured_questions() {
+            rq.push(RenderQuestion {
+                label: q.label(col),
+                group: q.group.clone(),
+                qtype: q.qtype.clone(),
+                response: row.get(&q.input_column).cloned().unwrap_or_default(),
+                points: q.points_for(&rid),
+                max: q.max_points,
+                estimated: est.contains(q.effective_var(col).as_str()),
+            });
         }
         students.push(RenderStudent {
             id: rid,
@@ -1724,6 +1648,98 @@ async fn render_data(
         });
     }
     Ok(Json(RenderData { exam: name, students }))
+}
+
+// ---------------------------------------------------------------------------
+// Second pass (students close to a better grade)
+// ---------------------------------------------------------------------------
+
+/// Default distance to a better grade that counts as borderline.
+const DEFAULT_MARGIN: f64 = 1.0;
+
+#[derive(Deserialize)]
+struct MarginQuery {
+    #[serde(default)]
+    margin: Option<f64>,
+}
+
+impl MarginQuery {
+    fn margin(&self) -> AppResult<f64> {
+        let m = self.margin.unwrap_or(DEFAULT_MARGIN);
+        if m.is_finite() && m > 0.0 {
+            Ok(m)
+        } else {
+            Err(AppError::BadRequest("margin must be a positive number".into()))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SecondPassImportReq {
+    file: String,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// Exam (with prefilled grades seeded) and its roster rows.
+async fn graded_exam(
+    s: &AppState,
+    name: &str,
+) -> AppResult<(Exam, Vec<HashMap<String, String>>)> {
+    let exam = load_exam_or_404(s, name).await?;
+    let (rows, _) = exam_data(&s.config, &exam)?;
+    let exam = seed_and_reload(s, &exam, &rows).await?;
+    Ok((exam, rows))
+}
+
+async fn second_pass_report(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Query(q): Query<MarginQuery>,
+) -> AppResult<Json<second_pass::SecondPassReport>> {
+    let margin = q.margin()?;
+    let (exam, rows) = graded_exam(&s, &name).await?;
+    Ok(Json(second_pass::report(&exam, &rows, margin)))
+}
+
+async fn export_second_pass(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(q): Json<MarginQuery>,
+) -> AppResult<Response> {
+    let margin = q.margin()?;
+    let (exam, rows) = graded_exam(&s, &name).await?;
+    let rep = second_pass::report(&exam, &rows, margin);
+    let (filename, bytes) = second_pass::build_sheet(&exam, &rep)?;
+    Ok(download(&filename, XLSX_MIME, bytes))
+}
+
+/// Import a filled review sheet. The reviewer is authoritative: changed points
+/// overwrite the stored grade (source `second-pass`), no conflict queue.
+async fn second_pass_import(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<SecondPassImportReq>,
+) -> AppResult<Json<second_pass::SecondPassImport>> {
+    let (exam, rows) = graded_exam(&s, &name).await?;
+    let path = store::resolve_exam_path(&s.config, &req.file)
+        .ok_or_else(|| AppError::NotFound(format!("file '{}' not found", req.file)))?;
+    let sheet = store::read_exam_data(&path)?;
+    let (mut summary, writes) = second_pass::plan_import(&exam, &rows, &sheet)?;
+    if req.dry_run || writes.is_empty() {
+        return Ok(Json(summary));
+    }
+    let conn = s.db().await;
+    store::transaction(&conn, async {
+        for (col, item) in &writes {
+            store::put_graded_item(&conn, &name, col, item, second_pass::SOURCE, "").await?;
+        }
+        store::touch(&conn, &name).await?;
+        Ok::<_, AppError>(())
+    })
+    .await?;
+    summary.applied = true;
+    Ok(Json(summary))
 }
 
 async fn export_results_pdf(

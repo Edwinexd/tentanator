@@ -256,6 +256,22 @@ class TentanatorAPI:
     async def list_exam_scans(self, name: str) -> List[Dict[str, Any]]:
         return await self._request("GET", f"/api/exams/{_p(name)}/scans")
 
+    # -- second pass (students close to a better grade) -------------------
+    async def second_pass(self, name: str, margin: float = 1.0) -> Dict[str, Any]:
+        return await self._request(
+            "GET", f"/api/exams/{_p(name)}/second-pass", params={"margin": margin})
+
+    async def export_second_pass(self, name: str, margin: float = 1.0) -> Dict[str, str]:
+        return await self._download(
+            "POST", f"/api/exams/{_p(name)}/export/second-pass", json={"margin": margin})
+
+    async def second_pass_import(self, name: str, file: str,
+                                 dry_run: bool = False) -> Dict[str, Any]:
+        return await self._request(
+            "POST", f"/api/exams/{_p(name)}/second-pass/import",
+            json={"file": file, "dry_run": dry_run},
+        )
+
     # -- scheme & question config -----------------------------------------
     # The readable scheme DSL grammar lives in the backend; the TUI round-trips
     # through these rather than parsing/emitting it locally.

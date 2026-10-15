@@ -68,6 +68,14 @@ pub fn evaluate_grade(grade_str: &str) -> Option<f64> {
 
 /// Validate a grade string. Returns the evaluated total on success, or a
 /// human-readable error message.
+/// Same grade, numerically when both parse (`1` == `1.00`), else by text.
+pub fn grades_equal(a: &str, b: &str) -> bool {
+    match (evaluate_grade(a), evaluate_grade(b)) {
+        (Some(x), Some(y)) => (x - y).abs() < 1e-9,
+        _ => a.trim().eq_ignore_ascii_case(b.trim()),
+    }
+}
+
 pub fn validate_grade(grade_str: &str) -> Result<f64, String> {
     if grade_str.trim().is_empty() {
         return Err("Grade cannot be empty".to_string());
