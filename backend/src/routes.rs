@@ -1729,7 +1729,7 @@ async fn export_second_pass(
     let margin = q.margin()?;
     let (exam, rows) = graded_exam(&s, &name).await?;
     let rep = second_pass::report(&exam, &rows, margin);
-    let (filename, bytes) = second_pass::build_sheet(&exam, &rep)?;
+    let (filename, bytes) = second_pass::build_sheet(&exam, &rows, &rep)?;
     Ok(download(&filename, XLSX_MIME, bytes))
 }
 

@@ -2248,8 +2248,8 @@ class SecondPassScreen(TentanatorScreen):
             self.notify(str(exc), severity="error", timeout=8)
             return
         self.notify(
-            f"Review sheet saved to {res.get('path', '?')}. Fill the `New points` column, "
-            "then import it here [i].",
+            f"Review sheet saved to {res.get('path', '?')}. Edit the highlighted points "
+            "in place, then import it here [i].",
             timeout=12,
         )
 

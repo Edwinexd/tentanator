@@ -282,13 +282,16 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   it, else first appearance in the rules with the default last (rule order alone
   is wrong: gate rules like `... -> F` usually come first). Each student lists
   the questions with headroom, their responses, and the lift each one alone
-  gives. The review sheet has one row per (student, question) with a `New
-  points` column; importing it overwrites changed points with source
-  `second-pass` (the reviewer is authoritative) and reports the resulting grade
-  changes. With the export state column, points whose stored value also moved
-  since export are queued as `grade_conflicts` instead (`conflicts` in the
-  summary), and an edited `Points` cell counts when `New points` is blank.
-  `dry_run` previews without writing.
+  gives. The review sheet has one row per student: `ID`, grade, total, next
+  grade and gap, then a response and a points column (headed by the exam's own
+  input/output column names) for every question where some listed student has
+  headroom, with headroom cells highlighted, and the export state column. The
+  reviewer edits points in place; the state column tells which cells changed.
+  Importing overwrites changed points with source `second-pass` (the reviewer
+  is authoritative) and reports the resulting grade changes; points whose
+  stored value also moved since export are queued as `grade_conflicts` instead
+  (`conflicts` in the summary). The old one-row-per-(student, question) sheet
+  with a `New points` column still imports. `dry_run` previews without writing.
 
 ### Results-PDF renderer (`results-renderer/`)
 

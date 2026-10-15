@@ -117,7 +117,7 @@ function ReviewView() {
           Export review sheet
         </Button>
         <span className="text-xs text-muted-foreground">
-          Fill the yellow <em>New points</em> column, then import it below.
+          One row per student: edit the highlighted points in place, then import it below.
         </span>
       </div>
 
