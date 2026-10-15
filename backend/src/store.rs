@@ -266,9 +266,37 @@ pub fn read_exam_data(path: &Path) -> AppResult<Vec<HashMap<String, String>>> {
 // Exams (Turso)
 // ---------------------------------------------------------------------------
 
+/// Run `sql` and return its first row, draining the rest. Turso ends an open
+/// BEGIN when a result set is dropped before it is exhausted, so reading just
+/// the first row inside `transaction()` would silently autocommit every write
+/// after it (and the final COMMIT then fails). Use this for every single-row
+/// read instead of a bare `rows.next()`.
+pub(crate) async fn query_one(
+    conn: &Connection,
+    sql: &str,
+    params: impl turso::IntoParams,
+) -> AppResult<Option<turso::Row>> {
+    let mut rows = conn.query(sql, params).await?;
+    let first = rows.next().await?;
+    while rows.next().await?.is_some() {}
+    Ok(first)
+}
+
+/// `SELECT COUNT(*) ...` as a usize (0 when the query yields no row).
+async fn query_count(
+    conn: &Connection,
+    sql: &str,
+    params: impl turso::IntoParams,
+) -> AppResult<usize> {
+    Ok(query_one(conn, sql, params)
+        .await?
+        .map(|r| r.get::<i64>(0))
+        .transpose()?
+        .unwrap_or(0) as usize)
+}
+
 pub async fn exam_exists(conn: &Connection, name: &str) -> AppResult<bool> {
-    let mut r = conn.query("SELECT 1 FROM exams WHERE name = ?", (name,)).await?;
-    Ok(r.next().await?.is_some())
+    Ok(query_one(conn, "SELECT 1 FROM exams WHERE name = ?", (name,)).await?.is_some())
 }
 
 /// Run `body` inside a BEGIN/COMMIT, rolling back on error. `body` must use the
@@ -503,17 +531,16 @@ pub async fn get_graded(
     col: &str,
     row_id: &str,
 ) -> AppResult<Option<(String, String)>> {
-    let mut r = conn
-        .query(
-            "SELECT grade, source FROM graded_items \
-             WHERE exam = ? AND output_col = ? AND row_id = ?",
-            (exam, col, row_id),
-        )
-        .await?;
-    if let Some(row) = r.next().await? {
-        Ok(Some((row.get(0)?, row.get(1)?)))
-    } else {
-        Ok(None)
+    let row = query_one(
+        conn,
+        "SELECT grade, source FROM graded_items \
+         WHERE exam = ? AND output_col = ? AND row_id = ?",
+        (exam, col, row_id),
+    )
+    .await?;
+    match row {
+        Some(row) => Ok(Some((row.get(0)?, row.get(1)?))),
+        None => Ok(None),
     }
 }
 
@@ -567,10 +594,7 @@ pub async fn list_conflicts(conn: &Connection, exam: &str) -> AppResult<Vec<Grad
 }
 
 pub async fn count_conflicts(conn: &Connection, exam: &str) -> AppResult<usize> {
-    let mut c = conn
-        .query("SELECT COUNT(*) FROM grade_conflicts WHERE exam = ?", (exam,))
-        .await?;
-    Ok(c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize)
+    query_count(conn, "SELECT COUNT(*) FROM grade_conflicts WHERE exam = ?", (exam,)).await
 }
 
 pub async fn clear_conflicts_for(
@@ -602,16 +626,15 @@ pub async fn delete_graded_item(
 }
 
 async fn question_gq_id(conn: &Connection, exam: &str, col: &str) -> AppResult<Option<String>> {
-    let mut r = conn
-        .query(
-            "SELECT global_question_id FROM questions WHERE exam = ? AND output_col = ?",
-            (exam, col),
-        )
-        .await?;
-    if let Some(row) = r.next().await? {
-        Ok(opt(row.get::<String>(0)?))
-    } else {
-        Ok(None)
+    let row = query_one(
+        conn,
+        "SELECT global_question_id FROM questions WHERE exam = ? AND output_col = ?",
+        (exam, col),
+    )
+    .await?;
+    match row {
+        Some(row) => Ok(opt(row.get::<String>(0)?)),
+        None => Ok(None),
     }
 }
 
@@ -738,14 +761,14 @@ const Q_COLS: &str = "output_col, question_name, input_column, exam_question, \
 
 pub async fn load_exam(conn: &Connection, name: &str) -> AppResult<Option<Exam>> {
     let meta = {
-        let mut r = conn
-            .query(
-                "SELECT exam_file, id_columns, input_columns, output_columns, course, last_updated, scheme \
-                 FROM exams WHERE name = ?",
-                (name,),
-            )
-            .await?;
-        match r.next().await? {
+        let row = query_one(
+            conn,
+            "SELECT exam_file, id_columns, input_columns, output_columns, course, last_updated, scheme \
+             FROM exams WHERE name = ?",
+            (name,),
+        )
+        .await?;
+        match row {
             Some(row) => {
                 let exam_file: String = row.get(0)?;
                 let id_columns = parse_array(&row.get::<String>(1)?);
@@ -815,8 +838,7 @@ pub async fn load_question(
 ) -> AppResult<Option<QuestionGrades>> {
     let mut q = {
         let sql = format!("SELECT {Q_COLS} FROM questions WHERE exam = ? AND output_col = ?");
-        let mut r = conn.query(&sql, (exam, col)).await?;
-        match r.next().await? {
+        match query_one(conn, &sql, (exam, col)).await? {
             Some(row) => question_from_row(&row)?.1,
             None => return Ok(None),
         }
@@ -854,22 +876,12 @@ pub async fn list_exams(conn: &Connection, archived: bool) -> AppResult<Vec<Exam
     let mut out = Vec::with_capacity(tmp.len());
     for t in tmp {
         let num_questions = {
-            let mut c = conn
-                .query(
-                    "SELECT COUNT(*) FROM questions WHERE exam = ?",
-                    (t.name.as_str(),),
-                )
-                .await?;
-            c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
+            query_count(conn, "SELECT COUNT(*) FROM questions WHERE exam = ?", (t.name.as_str(),))
+                .await?
         };
         let graded_count = {
-            let mut c = conn
-                .query(
-                    "SELECT COUNT(*) FROM graded_items WHERE exam = ?",
-                    (t.name.as_str(),),
-                )
-                .await?;
-            c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
+            query_count(conn, "SELECT COUNT(*) FROM graded_items WHERE exam = ?", (t.name.as_str(),))
+                .await?
         };
         out.push(ExamSummary {
             name: t.name,
@@ -889,10 +901,9 @@ pub async fn list_exams(conn: &Connection, archived: bool) -> AppResult<Vec<Exam
 // ---------------------------------------------------------------------------
 
 pub async fn session_exists(conn: &Connection, exam: &str, name: &str) -> AppResult<bool> {
-    let mut r = conn
-        .query("SELECT 1 FROM sessions WHERE exam = ? AND name = ?", (exam, name))
-        .await?;
-    Ok(r.next().await?.is_some())
+    Ok(query_one(conn, "SELECT 1 FROM sessions WHERE exam = ? AND name = ?", (exam, name))
+        .await?
+        .is_some())
 }
 
 /// Create a session if it doesn't already exist; returns it either way.
@@ -905,13 +916,13 @@ pub async fn create_session(conn: &Connection, exam: &str, name: &str) -> AppRes
         )
         .await?;
     }
-    let mut r = conn
-        .query(
-            "SELECT created_at, last_updated FROM sessions WHERE exam = ? AND name = ?",
-            (exam, name),
-        )
-        .await?;
-    let (created_at, last_updated) = match r.next().await? {
+    let row = query_one(
+        conn,
+        "SELECT created_at, last_updated FROM sessions WHERE exam = ? AND name = ?",
+        (exam, name),
+    )
+    .await?;
+    let (created_at, last_updated) = match row {
         Some(row) => (row.get::<String>(0)?, row.get::<String>(1)?),
         None => (now.clone(), now),
     };
@@ -968,13 +979,12 @@ pub async fn list_sessions(conn: &Connection, exam: &str) -> AppResult<Vec<Sessi
     let mut out = Vec::with_capacity(tmp.len());
     for t in tmp {
         let graded_count = {
-            let mut c = conn
-                .query(
-                    "SELECT COUNT(*) FROM graded_items WHERE exam = ? AND session = ?",
-                    (exam, t.name.as_str()),
-                )
-                .await?;
-            c.next().await?.map(|r| r.get::<i64>(0)).transpose()?.unwrap_or(0) as usize
+            query_count(
+                conn,
+                "SELECT COUNT(*) FROM graded_items WHERE exam = ? AND session = ?",
+                (exam, t.name.as_str()),
+            )
+            .await?
         };
         out.push(SessionSummary {
             exam: exam.to_string(),
@@ -997,13 +1007,13 @@ pub async fn has_feature_vector(
     input_column: &str,
     row_id: &str,
 ) -> AppResult<bool> {
-    let mut r = conn
-        .query(
-            "SELECT 1 FROM caches WHERE exam = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
-            (exam, input_column, row_id),
-        )
-        .await?;
-    Ok(r.next().await?.is_some())
+    Ok(query_one(
+        conn,
+        "SELECT 1 FROM caches WHERE exam = ? AND kind = 'features' AND input_column = ? AND row_id = ?",
+        (exam, input_column, row_id),
+    )
+    .await?
+    .is_some())
 }
 
 pub async fn put_feature_vector(
@@ -1094,8 +1104,7 @@ pub async fn load_bank_vectors(
 
 /// Number of cached bank vectors (across all languages).
 pub async fn count_bank_vectors(conn: &Connection) -> AppResult<usize> {
-    let mut r = conn.query("SELECT COUNT(*) FROM global_bank_vectors", ()).await?;
-    Ok(r.next().await?.map(|row| row.get::<i64>(0)).transpose()?.unwrap_or(0) as usize)
+    query_count(conn, "SELECT COUNT(*) FROM global_bank_vectors", ()).await
 }
 
 /// Remove every question (and its vectors) for a bank - used to fully replace a
@@ -1232,15 +1241,13 @@ async fn sync_item_to_pool(
     source_exam: &str,
     item: &GradedItem,
 ) -> AppResult<()> {
-    let exists = {
-        let mut r = conn
-            .query(
-                "SELECT 1 FROM graded_pool WHERE global_question_id = ? AND source_exam = ? AND row_id = ?",
-                (gq_id, source_exam, item.row_id.as_str()),
-            )
-            .await?;
-        r.next().await?.is_some()
-    };
+    let exists = query_one(
+        conn,
+        "SELECT 1 FROM graded_pool WHERE global_question_id = ? AND source_exam = ? AND row_id = ?",
+        (gq_id, source_exam, item.row_id.as_str()),
+    )
+    .await?
+    .is_some();
     if exists {
         return Ok(());
     }
@@ -1507,7 +1514,7 @@ pub fn write_xlsx(path: &Path, headers: &[String], rows: &[Vec<String>]) -> AppR
 }
 
 /// Stem of an exam's file, for naming downloads.
-fn exam_file_stem(exam: &Exam) -> String {
+pub(crate) fn exam_file_stem(exam: &Exam) -> String {
     Path::new(&exam.exam_file)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -1911,5 +1918,26 @@ mod tests {
         assert!(has_feature_vector(&conn, "s1", "ans", "r1").await.unwrap());
         let cache = load_feature_cache(&conn, "s1", "ans").await.unwrap();
         assert_eq!(cache.get("r1").unwrap(), &vec![0.5, -1.5, 2.0]);
+    }
+
+    // Turso ends an open BEGIN when a result set is dropped unread, so a
+    // single-row read inside `transaction()` must drain (see `query_one`).
+    #[tokio::test]
+    async fn read_then_write_inside_transaction_commits() {
+        let conn = mem_conn().await;
+        let item = |id: &str| GradedItem {
+            row_id: id.into(),
+            input_text: "x".into(),
+            grade: "1".into(),
+            timestamp: now_iso(),
+        };
+        put_graded_item(&conn, "e", "g", &item("r1"), "manual", "").await.unwrap();
+        let res = transaction(&conn, async {
+            assert!(get_graded(&conn, "e", "g", "r1").await?.is_some());
+            put_graded_item(&conn, "e", "g", &item("r2"), "manual", "").await?;
+            Ok::<_, AppError>(())
+        })
+        .await;
+        assert!(res.is_ok(), "{res:?}");
     }
 }

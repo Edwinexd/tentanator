@@ -17,6 +17,7 @@ import { Route as ExamNameRouteImport } from './routes/exam.$name'
 import { Route as ExamNameIndexRouteImport } from './routes/exam.$name.index'
 import { Route as ExamNameTableRouteImport } from './routes/exam.$name.table'
 import { Route as ExamNameSchemeRouteImport } from './routes/exam.$name.scheme'
+import { Route as ExamNameReviewRouteImport } from './routes/exam.$name.review'
 import { Route as ExamNameResultsRouteImport } from './routes/exam.$name.results'
 import { Route as ExamNamePdfRouteImport } from './routes/exam.$name.pdf'
 import { Route as ExamNameImportRouteImport } from './routes/exam.$name.import'
@@ -61,6 +62,11 @@ const ExamNameSchemeRoute = ExamNameSchemeRouteImport.update({
   path: '/scheme',
   getParentRoute: () => ExamNameRoute,
 } as any)
+const ExamNameReviewRoute = ExamNameReviewRouteImport.update({
+  id: '/review',
+  path: '/review',
+  getParentRoute: () => ExamNameRoute,
+} as any)
 const ExamNameResultsRoute = ExamNameResultsRouteImport.update({
   id: '/results',
   path: '/results',
@@ -86,6 +92,7 @@ export interface FileRoutesByFullPath {
   '/exam/$name/import': typeof ExamNameImportRoute
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/review': typeof ExamNameReviewRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
   '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name/': typeof ExamNameIndexRoute
@@ -98,6 +105,7 @@ export interface FileRoutesByTo {
   '/exam/$name/import': typeof ExamNameImportRoute
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/review': typeof ExamNameReviewRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
   '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name': typeof ExamNameIndexRoute
@@ -112,6 +120,7 @@ export interface FileRoutesById {
   '/exam/$name/import': typeof ExamNameImportRoute
   '/exam/$name/pdf': typeof ExamNamePdfRoute
   '/exam/$name/results': typeof ExamNameResultsRoute
+  '/exam/$name/review': typeof ExamNameReviewRoute
   '/exam/$name/scheme': typeof ExamNameSchemeRoute
   '/exam/$name/table': typeof ExamNameTableRoute
   '/exam/$name/': typeof ExamNameIndexRoute
@@ -127,6 +136,7 @@ export interface FileRouteTypes {
     | '/exam/$name/import'
     | '/exam/$name/pdf'
     | '/exam/$name/results'
+    | '/exam/$name/review'
     | '/exam/$name/scheme'
     | '/exam/$name/table'
     | '/exam/$name/'
@@ -139,6 +149,7 @@ export interface FileRouteTypes {
     | '/exam/$name/import'
     | '/exam/$name/pdf'
     | '/exam/$name/results'
+    | '/exam/$name/review'
     | '/exam/$name/scheme'
     | '/exam/$name/table'
     | '/exam/$name'
@@ -152,6 +163,7 @@ export interface FileRouteTypes {
     | '/exam/$name/import'
     | '/exam/$name/pdf'
     | '/exam/$name/results'
+    | '/exam/$name/review'
     | '/exam/$name/scheme'
     | '/exam/$name/table'
     | '/exam/$name/'
@@ -223,6 +235,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ExamNameSchemeRouteImport
       parentRoute: typeof ExamNameRoute
     }
+    '/exam/$name/review': {
+      id: '/exam/$name/review'
+      path: '/review'
+      fullPath: '/exam/$name/review'
+      preLoaderRoute: typeof ExamNameReviewRouteImport
+      parentRoute: typeof ExamNameRoute
+    }
     '/exam/$name/results': {
       id: '/exam/$name/results'
       path: '/results'
@@ -251,6 +270,7 @@ interface ExamNameRouteChildren {
   ExamNameImportRoute: typeof ExamNameImportRoute
   ExamNamePdfRoute: typeof ExamNamePdfRoute
   ExamNameResultsRoute: typeof ExamNameResultsRoute
+  ExamNameReviewRoute: typeof ExamNameReviewRoute
   ExamNameSchemeRoute: typeof ExamNameSchemeRoute
   ExamNameTableRoute: typeof ExamNameTableRoute
   ExamNameIndexRoute: typeof ExamNameIndexRoute
@@ -260,6 +280,7 @@ const ExamNameRouteChildren: ExamNameRouteChildren = {
   ExamNameImportRoute: ExamNameImportRoute,
   ExamNamePdfRoute: ExamNamePdfRoute,
   ExamNameResultsRoute: ExamNameResultsRoute,
+  ExamNameReviewRoute: ExamNameReviewRoute,
   ExamNameSchemeRoute: ExamNameSchemeRoute,
   ExamNameTableRoute: ExamNameTableRoute,
   ExamNameIndexRoute: ExamNameIndexRoute,

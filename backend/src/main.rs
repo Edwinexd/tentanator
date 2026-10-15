@@ -13,6 +13,7 @@ mod routes;
 mod sampling;
 mod scheme;
 mod scheme_text;
+mod second_pass;
 mod store;
 mod workspace;
 
