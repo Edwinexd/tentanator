@@ -27,6 +27,7 @@ use crate::grade::validate_grade;
 use crate::sampling::{self, Algorithm};
 use crate::scheme::{self, GradeScheme, StudentResult};
 use crate::snapshot::{self, Merge};
+use crate::pdf_jobs::{self, PdfJob};
 use crate::{detect, global_bank, llm, moodle, scheme_text, second_pass, store, workspace, AppState};
 
 const NUM_REPRESENTATIVE_SAMPLES: usize = 5;
@@ -112,7 +113,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/exams/{name}/second-pass/import", post(second_pass_import))
         .route("/api/exams/{name}/export/second-pass", post(export_second_pass))
         .route("/api/exams/{name}/scans", get(list_exam_scans))
-        .route("/api/exams/{name}/export/results-pdf", post(export_results_pdf))
+        .route(
+            "/api/exams/{name}/export/results-pdf",
+            get(results_pdf_job).post(export_results_pdf),
+        )
         .route("/api/graded/{filename}", get(download_graded))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -1779,15 +1783,13 @@ async fn second_pass_import(
     Ok(Json(summary))
 }
 
-/// A results PDF compiles LaTeX per student and merges scan covers; a few
-/// hundred students take minutes, far past the client's default timeout.
-const RENDER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
+/// Start a background results-PDF render (or return the one already running
+/// for this exam). Returns immediately; poll `GET` for its status.
 async fn export_results_pdf(
     State(s): State<AppState>,
     Path(name): Path<String>,
     Json(req): Json<ResultsPdfReq>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<(StatusCode, Json<PdfJob>)> {
     if s.config.renderer_url.is_empty() {
         return Err(AppError::BadRequest(
             "results renderer not configured (set RENDERER_URL)".into(),
@@ -1799,23 +1801,18 @@ async fn export_results_pdf(
             return Err(AppError::NotFound(format!("exam '{name}' not found")));
         }
     }
-    let url = format!("{}/render", s.config.renderer_url.trim_end_matches('/'));
-    let body = json!({ "exam": name, "scanned_pdf": req.scanned_pdf });
-    let resp = s
-        .http
-        .post(&url)
-        .timeout(RENDER_TIMEOUT)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?;
-    if !resp.status().is_success() {
-        let st = resp.status();
-        let t = resp.text().await.unwrap_or_default();
-        return Err(AppError::Upstream(format!("renderer {st}: {t}")));
-    }
-    let v: Value = resp.json().await.map_err(|e| AppError::Upstream(e.to_string()))?;
-    Ok(Json(v))
+    let job =
+        pdf_jobs::start(&s.pdf_jobs, s.http.clone(), &s.config.renderer_url, &name, req.scanned_pdf)
+            .await;
+    Ok((StatusCode::ACCEPTED, Json(job)))
+}
+
+/// The exam's latest results-PDF job, or `null` if none has run since startup.
+async fn results_pdf_job(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+) -> Json<Option<PdfJob>> {
+    Json(pdf_jobs::get(&s.pdf_jobs, &name).await)
 }
 
 /// A scanned PDF reported alongside whether it is eligible to supply cover

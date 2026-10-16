@@ -1,8 +1,10 @@
-import { FileText, Upload, Download, Printer, Scan } from 'lucide-react'
+import { FileText, Upload, Printer, Scan } from 'lucide-react'
 import { createFileRoute } from '@tanstack/react-router'
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react'
 import { api, type ScanMatch } from '#/lib/api'
 import { ExamNav } from '#/components/ExamNav'
+import { ResultsPdfStatus } from '#/components/ResultsPdfStatus'
+import { useResultsPdfJob } from '#/hooks/use-results-pdf-job'
 import { PageShell } from '#/components/PageShell'
 import { Button } from '#/components/ui/button'
 import { Label } from '#/components/ui/label'
@@ -29,10 +31,10 @@ function PdfView() {
   const { name } = Route.useParams()
   const [scans, setScans] = useState<ScanMatch[]>([])
   const [scan, setScan] = useState('')
-  const [busy, setBusy] = useState(false)
   const [info, setInfo] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [pdfPath, setPdfPath] = useState<string | null>(null)
+  const pdf = useResultsPdfJob(name)
+  const busy = pdf.running
 
   const loadScans = useCallback(
     () => api.listExamScans(name).then((s) => { setScans(s); return s }).catch(() => [] as ScanMatch[]),
@@ -73,39 +75,11 @@ function PdfView() {
     }
   }
 
-  async function generate(withCover: boolean) {
-    setBusy(true)
-    setError(null)
+  function generate(withCover: boolean) {
     setInfo(null)
-    setPdfPath(null)
-    try {
-      // Cover pages are prepended when a scanned PDF is supplied to the
-      // renderer; the "with cover" button opts into passing the scan.
-      const result = await api.exportResultsPdf(name, withCover ? scan || undefined : undefined)
-      const path = typeof result.path === 'string' ? result.path : null
-      if (path) {
-        setPdfPath(path)
-        setInfo(`PDF generated: ${path}`)
-      } else {
-        setInfo('PDF generated.')
-      }
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function download() {
-    if (!pdfPath) return
-    // pdfPath is the renderer's absolute server path; the file lives in
-    // graded_exams/, served by the backend at /api/graded/{filename}.
-    const filename = pdfPath.split('/').pop() ?? 'results.pdf'
-    try {
-      await api.downloadGraded(filename)
-    } catch (e) {
-      setError((e as Error).message)
-    }
+    // Cover pages are prepended when a scanned PDF is supplied to the
+    // renderer; the "with cover" button opts into passing the scan.
+    void pdf.start(withCover ? scan || undefined : undefined)
   }
 
   return (
@@ -183,17 +157,8 @@ function PdfView() {
         </CardFooter>
       </Card>
 
-      {pdfPath && (
-        <Alert>
-          <AlertDescription className="flex items-center justify-between">
-            <span>PDF ready: {pdfPath}</span>
-            <Button onClick={download} variant="outline" size="sm">
-              <Download className="mr-1 h-4 w-4" />
-              Download
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
+      <ResultsPdfStatus job={pdf.job} onDownload={pdf.download} />
+      {pdf.error && <Alert variant="destructive"><AlertDescription>{pdf.error}</AlertDescription></Alert>}
 
       {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}

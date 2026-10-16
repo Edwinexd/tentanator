@@ -4,6 +4,8 @@ import { api, type ResultsResponse } from '#/lib/api'
 import { gradeLabel } from '#/lib/utils'
 import { ExamNav } from '#/components/ExamNav'
 import { PageShell } from '#/components/PageShell'
+import { ResultsPdfStatus } from '#/components/ResultsPdfStatus'
+import { useResultsPdfJob } from '#/hooks/use-results-pdf-job'
 import { Button } from '#/components/ui/button'
 import { Badge } from '#/components/ui/badge'
 import { Alert, AlertDescription } from '#/components/ui/alert'
@@ -30,6 +32,7 @@ function ResultsView() {
   const [data, setData] = useState<ResultsResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [info, setInfo] = useState<string | null>(null)
+  const pdf = useResultsPdfJob(name)
 
   useEffect(() => {
     let active = true
@@ -45,31 +48,6 @@ function ResultsView() {
     try {
       await fn(name)
       setInfo('Download started')
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
-
-  async function exportPdf() {
-    setError(null)
-    setInfo(null)
-    try {
-      const result = await api.exportResultsPdf(name)
-      // export/results-pdf returns opaque JSON proxied from the renderer; if it
-      // points at a generated file, download it via the graded-files endpoint.
-      const ref =
-        typeof result.path === 'string'
-          ? result.path
-          : typeof result.filename === 'string'
-            ? result.filename
-            : null
-      if (ref) {
-        const filename = ref.split('/').pop() ?? ref
-        await api.downloadGraded(filename)
-        setInfo('Download started')
-      } else {
-        setInfo('Results PDF generated')
-      }
     } catch (e) {
       setError((e as Error).message)
     }
@@ -94,12 +72,14 @@ function ResultsView() {
           <TableIcon className="mr-1 h-4 w-4" />
           Export CSV
         </Button>
-        <Button onClick={exportPdf} variant="outline" size="sm">
+        <Button onClick={() => void pdf.start()} disabled={pdf.running} variant="outline" size="sm">
           <FileText className="mr-1 h-4 w-4" />
-          Export results PDF
+          {pdf.running ? 'Rendering PDF…' : 'Export results PDF'}
         </Button>
       </div>
 
+      <ResultsPdfStatus job={pdf.job} onDownload={pdf.download} />
+      {pdf.error && <Alert variant="destructive"><AlertDescription>{pdf.error}</AlertDescription></Alert>}
       {info && <Alert><AlertDescription>{info}</AlertDescription></Alert>}
       {error && <Alert variant="destructive"><AlertDescription>{error}</AlertDescription></Alert>}
 

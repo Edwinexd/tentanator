@@ -21,6 +21,7 @@ from textual import on, work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen, Screen
+from textual.timer import Timer
 from textual.widgets import (
     Button,
     DataTable,
@@ -1823,6 +1824,29 @@ class ResultsScreen(TentanatorScreen):
         self.dismiss(None)
 
 
+PDF_POLL_SECONDS = 3.0
+
+
+def pdf_job_text(job: Optional[Dict[str, Any]]) -> str:
+    """One-line status of a results-PDF job (``PdfJob`` from the backend)."""
+    if not job:
+        return ""
+    status = job.get("status")
+    if status == "running":
+        scan = job.get("scanned_pdf")
+        cover = f" with covers from {escape(scan)}" if scan else ""
+        return (f"[yellow]Rendering{cover} (started {job.get('started_at', '?')[:19]}). "
+                "Runs in the background; you can leave this screen.[/yellow]")
+    if status == "failed":
+        return f"[red]Failed: {escape(str(job.get('error')))}[/red]"
+    text = (f"[green]PDF ready: {escape(str(job.get('filename')))}[/green] "
+            f"({job.get('students', '?')} students)")
+    missing = job.get("covers_missing") or []
+    if missing:
+        text += f"\n[dim]No cover page for {len(missing)}: {escape(', '.join(missing))}[/dim]"
+    return text
+
+
 class PdfScreen(TentanatorScreen):
     """Generate the results PDF, optionally prepending scanned cover pages."""
 
@@ -1831,7 +1855,8 @@ class PdfScreen(TentanatorScreen):
     def __init__(self, exam_name: str) -> None:
         super().__init__()
         self.exam_name = exam_name
-        self.pdf_path: Optional[str] = None
+        self.job: Optional[Dict[str, Any]] = None
+        self._poll: Optional[Timer] = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1852,6 +1877,9 @@ class PdfScreen(TentanatorScreen):
         yield Footer()
 
     async def on_mount(self) -> None:
+        # The render runs in the backend, so leaving this screen is safe; on
+        # return, pick up the latest job and resume polling if it still runs.
+        await self._refresh_job()
         await self._load_scans()
 
     async def _load_scans(self) -> None:
@@ -1895,25 +1923,41 @@ class PdfScreen(TentanatorScreen):
         await self._do_generate(str(scan))
 
     async def _do_generate(self, scan: Optional[str]) -> None:
-        self.query_one("#pdfstatus", Static).update("[dim]Generating...[/dim]")
         try:
-            result = await self.api.export_results_pdf(self.exam_name, scan)
+            self._show(await self.api.export_results_pdf(self.exam_name, scan))
         except APIError as exc:
-            self.query_one("#pdfstatus", Static).update("")
             self.notify(str(exc), severity="error", timeout=8)
-            return
-        path = result.get("path") if isinstance(result, dict) else None
-        self.pdf_path = path if isinstance(path, str) else None
-        self.query_one("#pdfstatus", Static).update(
-            f"PDF generated: {self.pdf_path}" if self.pdf_path else "PDF generated."
-        )
+
+    async def _refresh_job(self) -> None:
+        try:
+            self._show(await self.api.results_pdf_job(self.exam_name))
+        except APIError as exc:
+            self.notify(str(exc), severity="error", timeout=8)
+
+    def _show(self, job: Optional[Dict[str, Any]]) -> None:
+        was_running = bool(self.job and self.job.get("status") == "running")
+        self.job = job
+        status = job.get("status") if job else None
+        running = status == "running"
+        if running and self._poll is None:
+            self._poll = self.set_interval(PDF_POLL_SECONDS, self._refresh_job)
+        elif not running and self._poll is not None:
+            self._poll.stop()
+            self._poll = None
+        for bid in ("#gen", "#gencover"):
+            self.query_one(bid, Button).disabled = running
+        self.query_one("#pdfstatus", Static).update(pdf_job_text(job))
+        if was_running and status == "done":
+            self.notify("Results PDF ready", timeout=8)
+        elif was_running and status == "failed":
+            self.notify(f"Results PDF failed: {job.get('error')}", severity="error", timeout=10)
 
     @on(Button.Pressed, "#download")
     async def _download(self) -> None:
-        if not self.pdf_path:
+        filename = self.job.get("filename") if self.job else None
+        if not filename or self.job.get("status") != "done":
             self.notify("Generate a PDF first", severity="warning")
             return
-        filename = self.pdf_path.split("/")[-1]
         try:
             res = await self.api.download_graded(filename)
         except APIError as exc:

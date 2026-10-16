@@ -13,8 +13,6 @@ from urllib.parse import quote
 import httpx
 
 DEFAULT_BASE_URL = os.getenv("TENTANATOR_API", "http://127.0.0.1:8787")
-# Results-PDF renders take minutes for large sittings (backend allows 30 min).
-RENDER_TIMEOUT = 30 * 60.0
 
 
 def _p(seg: Any) -> str:
@@ -236,12 +234,17 @@ class TentanatorAPI:
     async def export_csv(self, name: str) -> Dict[str, str]:
         return await self._download("POST", f"/api/exams/{_p(name)}/export/csv")
 
+    # Results PDF is a background job: POST starts it (or returns the running
+    # one) and returns at once; GET polls the latest PdfJob (None if none yet).
     async def export_results_pdf(self, name: str,
                                  scanned_pdf: Optional[str] = None) -> Dict[str, Any]:
         return await self._request(
             "POST", f"/api/exams/{_p(name)}/export/results-pdf",
-            json={"scanned_pdf": scanned_pdf}, timeout=RENDER_TIMEOUT,
+            json={"scanned_pdf": scanned_pdf},
         )
+
+    async def results_pdf_job(self, name: str) -> Optional[Dict[str, Any]]:
+        return await self._request("GET", f"/api/exams/{_p(name)}/export/results-pdf")
 
     async def download_graded(self, filename: str) -> Dict[str, str]:
         return await self._download("GET", f"/api/graded/{_p(filename)}")

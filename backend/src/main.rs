@@ -9,6 +9,7 @@ mod global_bank;
 mod grade;
 mod llm;
 mod moodle;
+mod pdf_jobs;
 mod routes;
 mod sampling;
 mod scheme;
@@ -31,6 +32,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub db: Arc<turso::Database>,
     pub conn: Arc<tokio::sync::Mutex<turso::Connection>>,
+    pub pdf_jobs: pdf_jobs::PdfJobs,
 }
 
 impl AppState {
@@ -81,6 +83,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         db: Arc::new(database),
         conn: Arc::new(tokio::sync::Mutex::new(conn)),
+        pdf_jobs: Arc::default(),
     };
 
     let app = routes::router(state);

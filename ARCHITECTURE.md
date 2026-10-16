@@ -200,7 +200,8 @@ the evaluated numeric total (for export).
 | GET | `/api/exams/{name}/scans` | none | `ScanMatch[]` (scans eligible for cover pages) |
 | POST | `/api/exams/{name}/export/daisy` | none | Daisy `id,grade` `.xlsx` (attachment) |
 | POST | `/api/exams/{name}/export/csv` | none | per-question `.csv` (attachment) |
-| POST | `/api/exams/{name}/export/results-pdf` | `{ scanned_pdf? }` | renderer JSON (proxied; PDF lands in `graded_exams/`) |
+| POST | `/api/exams/{name}/export/results-pdf` | `{ scanned_pdf? }` | `202 PdfJob` (starts a background render, or returns the running one; PDF lands in `graded_exams/`) |
+| GET | `/api/exams/{name}/export/results-pdf` | none | `PdfJob \| null` (the exam's latest render job) |
 | GET | `/api/graded/{filename}` | none | streams a file from `graded_exams/` |
 
 `ImportReq = { file, id_column?, mappings?: [{ column, output_col }], label? }`
@@ -277,8 +278,8 @@ types and the grade formula are all per-examination config (`scheme.rs`).
   true). State written for another exam is ignored. Sheets without the column
   (older exports, foreign files) keep the two-way behaviour.
 - **Exports**: `…/export` (full graded xlsx), `…/export/daisy` (Daisy `id,grade`
-  xlsx), `…/export/csv` (per-question), `…/export/results-pdf` (proxies the
-  renderer). `GET …/render-data` is the per-student contract the renderer reads;
+  xlsx), `…/export/csv` (per-question), `…/export/results-pdf` (a background
+  renderer job, see below). `GET …/render-data` is the per-student contract the renderer reads;
   both clients also render it as an in-app **Table** view (per-student ×
   per-question points, drill into each response, auto-zeroed columns included) so
   a graded exam can be inspected without exporting.
@@ -320,7 +321,13 @@ offer only scans matching the exam's student count) are slow on large scans, so
 they are cached in memory and in `scans/.covers_cache.json` (keyed by file name,
 mtime and size), surviving renderer restarts; the backend allows that call 15
 minutes for a first decode. Rendering itself takes minutes for a few hundred
-students, so the backend allows `/render` 30 minutes (the TUI matches). The backend reaches it via
+students, so it runs as a background job (`backend/src/pdf_jobs.rs`): `POST
+…/export/results-pdf` spawns the `/render` call (allowed 30 minutes) and returns
+a `PdfJob` at once; clients poll `GET …/export/results-pdf` (`status` ∈
+`running`/`done`/`failed`, `filename` to fetch via `/api/graded/{filename}`,
+`covers_missing`), so the page or screen can be left mid-render. One job per
+exam is kept in memory (a second POST while running returns the running job); a
+backend restart forgets it, but a finished PDF stays in `graded_exams/`. The backend reaches it via
 `RENDERER_URL`. Generalized from `reference/pvt/scripts/01-03`.
 
 ## Quick start (Docker)

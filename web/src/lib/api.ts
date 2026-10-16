@@ -23,6 +23,8 @@ import type { GlobalBankMatch } from './generated/GlobalBankMatch'
 import type { GradedItem } from './generated/GradedItem'
 import type { ImportResult } from './generated/ImportResult'
 import type { LiftSource } from './generated/LiftSource'
+import type { PdfJob } from './generated/PdfJob'
+import type { PdfJobStatus } from './generated/PdfJobStatus'
 import type { PointChange } from './generated/PointChange'
 import type { QuestionGrades } from './generated/QuestionGrades'
 import type { SamplingResult } from './generated/SamplingResult'
@@ -52,6 +54,8 @@ export type {
   GradedItem,
   ImportResult,
   LiftSource,
+  PdfJob,
+  PdfJobStatus,
   PointChange,
   QuestionGrades,
   SamplingResult,
@@ -487,12 +491,16 @@ export const api = {
   exportDaisy: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/daisy`),
   exportCsv: (name: string) => triggerDownload('POST', `/api/exams/${enc(name)}/export/csv`),
   downloadGraded: (filename: string) => triggerDownload('GET', `/api/graded/${enc(filename)}`),
-  // POST export/results-pdf returns opaque JSON proxied from the renderer
-  // service (NOT a file download).
+  // Results PDF renders as a background job: POST starts it (or returns the
+  // one already running) and returns at once; GET polls the exam's latest job
+  // (null if none since backend start). The finished file comes from
+  // downloadGraded(job.filename).
   exportResultsPdf: (name: string, scannedPdf?: string) =>
-    req<Record<string, unknown>>('POST', `/api/exams/${enc(name)}/export/results-pdf`, {
+    req<PdfJob>('POST', `/api/exams/${enc(name)}/export/results-pdf`, {
       scanned_pdf: scannedPdf ?? null,
     } satisfies ResultsPdfReq),
+  resultsPdfJob: (name: string) =>
+    req<PdfJob | null>('GET', `/api/exams/${enc(name)}/export/results-pdf`),
 }
 
 export function rowId(row: ExamRow, idColumns: string[]): string {
